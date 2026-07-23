@@ -30,8 +30,10 @@ import time
 from contextlib import contextmanager
 from pathlib import Path
 
+from danus import runtime
 from danus.execution import layout as L
 from danus.execution import loop, scaffold
+from danus.tests.portable import write_python_launcher
 
 
 @contextmanager
@@ -70,12 +72,8 @@ def _mk_worker(tmp: Path, name: str = "high") -> L.WorkerLayout:
 
 
 def _write_fake_codex(tmp: Path, body: str) -> Path:
-    """Write an executable python fake-codex stub and return its path. The stub
-    ignores all the exec args and just does what ``body`` says."""
-    p = tmp / "fake_codex"
-    p.write_text("#!/usr/bin/env python3\n" + body, encoding="utf-8")
-    p.chmod(0o755)
-    return p
+    script = "from __future__ import annotations\n" + body
+    return write_python_launcher(tmp, "fake_codex", script)
 
 
 # --- run_round: chosen exit code ------------------------------------------- #
@@ -106,14 +104,28 @@ def test_run_round_success_rc0(tmp: Path):
 
 def test_run_round_hard_timeout_terminates(tmp: Path):
     wl = _mk_worker(tmp)
-    # sleeps far past the tiny hard_timeout; a plain terminate() ends it.
-    fake = _write_fake_codex(tmp, "import time\ntime.sleep(60)\n")
+    pid_file = wl.dir / "child.pid"
+    fake = _write_fake_codex(
+        tmp,
+        f"import os, time\nfrom pathlib import Path\n"
+        f"Path({str(pid_file)!r}).write_text(str(os.getpid()), encoding='utf-8')\n"
+        "time.sleep(60)\n",
+    )
     log = wl.dir / "round.log"
     with _env(DANUS_CODEX_BIN=str(fake)):
         rc = loop.run_round(wl, {"MODEL": "m", "REASONING_EFFORT": "high"},
                             "prompt", log, hard_timeout=1)
+    child_pid = int(pid_file.read_text(encoding="utf-8"))
     assert rc == 124
     assert "hard-timeout after 1s" in log.read_text()
+    deadline = time.time() + 5
+    while time.time() < deadline and runtime.pid_alive(child_pid):
+        time.sleep(0.05)
+    assert not runtime.pid_alive(child_pid)
+    with log.open("a", encoding="utf-8") as handle:
+        handle.write("reopened after timeout\n")
+    log.unlink()
+    assert not log.exists()
     assert loop._Child.proc is None
 
 
@@ -140,32 +152,43 @@ def test_run_round_timeout_then_kill(tmp: Path):
 
     class _StubProc:
         def __init__(self):
-            self.terminated = False
-            self.killed = False
+            self.returncode = None
             self._waits = 0
+            self.stop_calls = []
 
         def wait(self, timeout=None):
             self._waits += 1
             # 1st wait = the hard-timeout expiry; 2nd wait = the 10s grace expiry.
-            raise subprocess.TimeoutExpired(cmd="codex", timeout=timeout)
+            if self._waits <= 2:
+                raise subprocess.TimeoutExpired(cmd="codex", timeout=timeout)
+            return self.returncode
 
-        def terminate(self):
-            self.terminated = True
-
-        def kill(self):
-            self.killed = True
+        def poll(self):
+            return self.returncode
 
     stub = _StubProc()
-    orig_popen = subprocess.Popen
-    subprocess.Popen = lambda *a, **k: stub
+    orig_spawn = runtime.spawn_process
+    orig_stop = runtime.stop_process
+    orig_wait_path = runtime.wait_until_path_releasable
+    wait_calls = []
+    runtime.spawn_process = lambda *a, **k: stub
+    def _fake_stop_process(proc, *, wait_seconds=5.0, force=False):
+        proc.stop_calls.append((wait_seconds, force))
+        proc.returncode = -9
+        return proc.returncode
+    runtime.stop_process = _fake_stop_process
+    runtime.wait_until_path_releasable = lambda path, *, timeout_seconds: (wait_calls.append((path, timeout_seconds)) or True)  # type: ignore[assignment]
     try:
         with _env(DANUS_CODEX_BIN=str(tmp / "anything")):
             rc = loop.run_round(wl, {"MODEL": "m", "REASONING_EFFORT": "high"},
                                 "prompt", log, hard_timeout=1)
     finally:
-        subprocess.Popen = orig_popen
+        runtime.spawn_process = orig_spawn
+        runtime.stop_process = orig_stop
+        runtime.wait_until_path_releasable = orig_wait_path
     assert rc == 124
-    assert stub.terminated and stub.killed          # terminate → (grace expired) → kill
+    assert stub.stop_calls == [(10, True)]
+    assert wait_calls == [(log, 10)]
     assert loop._Child.proc is None
 
 
@@ -285,22 +308,20 @@ def test_main_sigterm_handler(tmp: Path):
 
     class _FakeProc:
         def __init__(self):
-            self.terminated = False
-
-        def terminate(self):
-            self.terminated = True
+            self.stopped = False
 
     fake_proc = _FakeProc()
+    orig_stop = runtime.stop_process
 
     # run_round: install a live child then deliver SIGTERM to ourselves so the
     # loop's own handler fires (covers _on_term end to end).
     def _round(w, role, prompt, log_path, ht):
         loop._Child.proc = fake_proc
-        os.kill(os.getpid(), signal.SIGTERM)
-        time.sleep(2)                     # give the signal time to be delivered
+        signal.raise_signal(signal.SIGTERM)
         return 0
 
     with _restore_sigterm(), _env(DANUS_ROUND_BEAT="0"):
+        runtime.stop_process = lambda proc, *, wait_seconds=5.0, force=False: setattr(proc, "stopped", True) or 0
         _patch_run_round(_round)
         try:
             try:
@@ -311,7 +332,8 @@ def test_main_sigterm_handler(tmp: Path):
         finally:
             _unpatch_run_round()
             loop._Child.proc = None
-    assert fake_proc.terminated
+            runtime.stop_process = orig_stop
+    assert fake_proc.stopped
     assert json.loads(wl.status.read_text())["state"] == "terminated"
 
 
@@ -462,9 +484,14 @@ def test_symlink_skips_existing(tmp: Path):
 def test_symlink_swallows_oserror(tmp: Path):
     target = tmp / "target"
     target.write_text("x")
-    # a link path whose parent does not exist → os.symlink raises OSError, swallowed
+    # a link path whose parent does not exist → fallback copy raises OSError, swallowed
     link = tmp / "no_parent_dir" / "link"
-    scaffold.symlink(target, link)             # must not raise
+    real = runtime.shutil.copy2
+    runtime.shutil.copy2 = lambda *a, **k: (_ for _ in ()).throw(OSError("boom"))  # type: ignore[assignment]
+    try:
+        scaffold.symlink(target, link)         # must not raise
+    finally:
+        runtime.shutil.copy2 = real  # type: ignore[assignment]
     assert not link.exists()
 
 

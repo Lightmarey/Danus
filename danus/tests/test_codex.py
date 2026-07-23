@@ -15,8 +15,6 @@ from __future__ import annotations
 
 import contextlib
 import os
-import stat
-import tempfile
 from pathlib import Path
 
 from danus import codex
@@ -66,10 +64,32 @@ def test_resolve_bin_falls_back_to_wrapper_then_which_then_bare():
         got = codex.resolve_bin()
         import shutil
         wrapper = Path(codex.__file__).resolve().parents[1] / "bin" / "codex"
-        if wrapper.exists():
+        if codex._usable_repo_wrapper(wrapper):
             assert got == str(wrapper)
         else:
             assert got == (shutil.which("codex") or "codex")
+
+
+def test_resolve_bin_windows_skips_posix_repo_wrapper_for_path_codex(tmp_path: Path, monkeypatch):
+    wrapper = tmp_path / "bin" / "codex"
+    wrapper.parent.mkdir()
+    wrapper.write_text("#!/bin/sh\n", encoding="utf-8")
+    monkeypatch.setattr(codex, "_REPO_ROOT", tmp_path)
+    monkeypatch.setattr(codex.os, "name", "nt")
+    monkeypatch.setattr(codex.shutil, "which", lambda name: r"C:\Tools\codex.CMD")
+    with env(**_ALL):
+        assert codex.resolve_bin() == r"C:\Tools\codex.CMD"
+
+
+def test_resolve_bin_posix_repo_wrapper_still_wins(tmp_path: Path, monkeypatch):
+    wrapper = tmp_path / "bin" / "codex"
+    wrapper.parent.mkdir()
+    wrapper.write_text("#!/bin/sh\n", encoding="utf-8")
+    monkeypatch.setattr(codex, "_REPO_ROOT", tmp_path)
+    monkeypatch.setattr(codex.os, "name", "posix")
+    monkeypatch.setattr(codex.shutil, "which", lambda name: "/usr/bin/codex")
+    with env(**_ALL):
+        assert codex.resolve_bin() == str(wrapper)
 
 
 def test_resolve_bin_bare_when_nothing_available(monkeypatch=None):
@@ -117,27 +137,44 @@ def test_first_override_in_order_wins():
 # --- subprocess_env --------------------------------------------------------- #
 
 def test_subprocess_env_prepends_dir_for_concrete_path():
-    with env(**{**_ALL, "PATH": "/usr/bin:/bin"}):
-        out = codex.subprocess_env("/opt/codex/bin/codex")
-        assert out["PATH"].split(os.pathsep)[0] == "/opt/codex/bin"
-        assert "/usr/bin" in out["PATH"]
+    if os.name == "nt":
+        codex_bin = r"C:\opt\codex\bin\codex.cmd"
+        original_path = r"C:\Windows\System32;C:\Windows"
+        expected_dir = r"C:\opt\codex\bin"
+        preserved = r"C:\Windows\System32"
+    else:
+        codex_bin = "/opt/codex/bin/codex"
+        original_path = "/usr/bin:/bin"
+        expected_dir = "/opt/codex/bin"
+        preserved = "/usr/bin"
+    with env(**{**_ALL, "PATH": original_path}):
+        out = codex.subprocess_env(codex_bin)
+        assert out["PATH"].split(os.pathsep)[0] == expected_dir
+        assert preserved in out["PATH"]
 
 
 def test_subprocess_env_never_injects_cwd_for_bare_codex():
-    with env(**{**_ALL, "PATH": "/usr/bin:/bin"}):
+    original_path = r"C:\Windows\System32;C:\Windows" if os.name == "nt" else "/usr/bin:/bin"
+    with env(**{**_ALL, "PATH": original_path}):
         out = codex.subprocess_env("codex")
         # the bare-name fallback has no dir component → PATH is untouched, and the
         # CWD ("" / ".") is NOT injected.
-        assert out["PATH"] == "/usr/bin:/bin"
+        assert out["PATH"] == original_path
         assert "" not in out["PATH"].split(os.pathsep)
         assert "." not in out["PATH"].split(os.pathsep)
 
 
 def test_subprocess_env_idempotent_when_dir_already_on_path():
-    with env(**{**_ALL, "PATH": "/opt/codex/bin:/usr/bin"}):
-        out = codex.subprocess_env("/opt/codex/bin/codex")
+    if os.name == "nt":
+        original_path = r"C:\opt\codex\bin;C:\Windows\System32"
+        codex_bin = r"C:\opt\codex\bin\codex.cmd"
+    else:
+        original_path = "/opt/codex/bin:/usr/bin"
+        codex_bin = "/opt/codex/bin/codex"
+    with env(**{**_ALL, "PATH": original_path}):
+        out = codex.subprocess_env(codex_bin)
         # already present → not duplicated
-        assert out["PATH"] == "/opt/codex/bin:/usr/bin"
+        assert out["PATH"] == original_path
 
 
 # --- exec_cmd shape --------------------------------------------------------- #
@@ -161,6 +198,8 @@ def main() -> None:
     tests = [
         test_resolve_bin_prefers_danus_codex_bin_over_alias,
         test_resolve_bin_falls_back_to_wrapper_then_which_then_bare,
+        test_resolve_bin_windows_skips_posix_repo_wrapper_for_path_codex,
+        test_resolve_bin_posix_repo_wrapper_still_wins,
         test_resolve_bin_bare_when_nothing_available,
         test_model_override_wins_then_neutral_then_default,
         test_effort_override_wins_then_neutral_then_default,

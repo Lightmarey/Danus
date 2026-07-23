@@ -19,6 +19,7 @@ from contextlib import contextmanager
 from pathlib import Path
 
 from danus.strategy import cli, ledger
+from danus import runtime
 from danus.strategy.config import (
     DEFAULT_CLAUDE_CODE_MODEL, DEFAULT_MODEL, DEFAULT_PRICE_IN, DEFAULT_PRICE_OUT,
     ClaudeCodeConfig, ConsultConfig, load_claude_code_config, load_config, resolve_transport,
@@ -686,10 +687,9 @@ def test_claude_code_transport_empty_model_usage():
 def test_claude_default_runner_runs_local_subprocess():
     """`_default_runner` (used when no runner is injected) wraps subprocess.run.
     Drive it with a harmless local command — no `claude` binary, no network."""
-    import shutil
-    echo = shutil.which("echo") or "/bin/echo"
     proc = ClaudeCodeTransport._default_runner(
-        [echo, "hi there"], input=None, cwd=None, env=None, timeout=10)
+        [runtime.current_python(), "-c", "print('hi there')"],
+        input=None, cwd=None, env=None, timeout=10)
     assert proc.returncode == 0 and "hi there" in proc.stdout
 
 

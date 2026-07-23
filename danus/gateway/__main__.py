@@ -6,5 +6,9 @@ by each worker's ``.codex/config.toml`` (worker) / the verifier's ``-c`` overrid
 
 from .server import build_app
 
-if __name__ == "__main__":
+def main() -> int:
     build_app().run()
+    return 0
+
+if __name__ == "__main__":
+    main()

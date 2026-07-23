@@ -35,7 +35,7 @@ from pathlib import Path
 from typing import Optional
 
 from . import layout as L
-from danus import codex
+from danus import codex, runtime
 
 _FACT_ID_RE = re.compile(r'"?fact_id"?\s*[:=]\s*"?([0-9a-f]{16})"?')
 
@@ -99,6 +99,18 @@ def write_status(wl: L.WorkerLayout, **fields) -> None:
     os.replace(tmp, path)
 
 
+def _write_own_pid(wl: L.WorkerLayout) -> None:
+    """Claim the worker .pid with the actual loop pid.
+
+    On Windows the spawned pid observed by the parent can differ from the long-lived
+    interpreter pid that writes status and later performs cleanup. Overwrite the file
+    from inside the loop so liveness and cleanup always refer to the real owner.
+    """
+    tmp = wl.pid.with_suffix(wl.pid.suffix + ".tmp")
+    tmp.write_text(str(os.getpid()), encoding="utf-8")
+    os.replace(tmp, wl.pid)
+
+
 def _deadline_passed(project_dir: Path) -> bool:
     f = project_dir / L.DEADLINE_FILE
     if not f.exists():
@@ -141,12 +153,14 @@ def run_round(wl: L.WorkerLayout, role: dict, prompt: str, log_path: Path,
         "--dangerously-bypass-approvals-and-sandbox",
         prompt,
     )
+    timed_out = False
     with open(log_path, "w", encoding="utf-8") as logf:
         try:
-            _Child.proc = subprocess.Popen(
+            _Child.proc = runtime.spawn_process(
                 cmd, stdout=logf, stderr=subprocess.STDOUT,
                 stdin=subprocess.DEVNULL, cwd=str(wdir),
                 env=codex.subprocess_env(codex_bin),
+                new_process_group=True,
             )
         except FileNotFoundError:
             logf.write(f"[worker_loop] codex binary not found: {cmd[0]}\n")
@@ -154,15 +168,15 @@ def run_round(wl: L.WorkerLayout, role: dict, prompt: str, log_path: Path,
         try:
             return _Child.proc.wait(timeout=hard_timeout if hard_timeout > 0 else None)
         except subprocess.TimeoutExpired:
-            _Child.proc.terminate()
-            try:
-                _Child.proc.wait(timeout=10)
-            except subprocess.TimeoutExpired:
-                _Child.proc.kill()
+            runtime.stop_process(_Child.proc, wait_seconds=10, force=True)
             logf.write(f"\n[worker_loop] round hard-timeout after {hard_timeout}s\n")
-            return 124
+            timed_out = True
         finally:
             _Child.proc = None
+    if timed_out:
+        if not runtime.wait_until_path_releasable(log_path, timeout_seconds=10):
+            raise RuntimeError(f"log path still locked after timeout cleanup: {log_path}")
+        return 124
 
 
 # --- the loop -------------------------------------------------------------- #
@@ -177,12 +191,20 @@ def _cleanup_pid(wl: L.WorkerLayout) -> None:
         pass
 
 
+def refresh_worker_assets(wl: L.WorkerLayout) -> None:
+    runtime.sync_symlink_or_copy(L.worker_md(), wl.dir / "AGENTS.md")
+    runtime.sync_symlink_or_copy(
+        L.worker_skills_dir(), wl.dir / ".agents" / "skills",
+    )
+
+
 def main(worker_dir: str) -> int:
     wdir = Path(worker_dir).resolve()
     if not wdir.is_dir():
         print(f"worker dir not found: {wdir}", file=sys.stderr)
         return 2
     wl = L.WorkerLayout(wdir)
+    refresh_worker_assets(wl)
     project_dir = wl.project_dir
     project = wl.project
     worker = wl.name
@@ -197,13 +219,14 @@ def main(worker_dir: str) -> int:
 
     def _on_term(signum, _frame):
         if _Child.proc is not None:
-            _Child.proc.terminate()
+            runtime.stop_process(_Child.proc, wait_seconds=1, force=True)
         write_status(wl, state="terminated")
         _cleanup_pid(wl)
         sys.exit(0)
 
     signal.signal(signal.SIGTERM, _on_term)
 
+    _write_own_pid(wl)
     write_status(wl, state="running", round=0, started_at=time.time())
     rnd = 0
     consec_fail = 0

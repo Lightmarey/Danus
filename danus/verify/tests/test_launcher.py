@@ -21,14 +21,17 @@ from __future__ import annotations
 
 import json
 import os
-import stat
+import sys
 import tempfile
+import time
 from contextlib import contextmanager
 from pathlib import Path
 
 from fastapi import HTTPException
 
 from danus import codex
+from danus import runtime
+from danus.tests.portable import write_python_launcher
 from danus.verify import launcher
 
 _STMT = "For every integer n, n + 0 equals n."
@@ -54,18 +57,14 @@ def _env(**kv):
 
 
 def _write_stub(dirpath: Path, name: str, body: str) -> Path:
-    p = dirpath / name
-    p.write_text("#!/usr/bin/env python3\n" + body, encoding="utf-8")
-    p.chmod(p.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
-    return p
+    return write_python_launcher(dirpath, name, body)
 
 
 # stub that writes a valid verification.json to the prompt's output path
 _STUB_OK = """\
-import re, sys, json
+import json, os
 from pathlib import Path
-prompt = sys.argv[-1]
-out = Path(re.search(r'this exact path:\\s*(\\S+)', prompt).group(1).rstrip('.'))
+out = Path(os.environ["VERIFIER_RESULTS_DIR"]) / "RID" / "verification.json"
 out.parent.mkdir(parents=True, exist_ok=True)
 out.write_text(json.dumps({"verification_report": {"critical_errors": []},
                            "verdict": "correct", "repair_hints": ""}))
@@ -80,26 +79,30 @@ _STUB_NOOUT = "print('did nothing')\n"
 
 # stub that writes invalid JSON
 _STUB_BADJSON = """\
-import re, sys
+import os
 from pathlib import Path
-prompt = sys.argv[-1]
-out = Path(re.search(r'this exact path:\\s*(\\S+)', prompt).group(1).rstrip('.'))
+out = Path(os.environ["VERIFIER_RESULTS_DIR"]) / "RID" / "verification.json"
 out.parent.mkdir(parents=True, exist_ok=True)
 out.write_text("{ this is not json ")
 """
 
 # stub that writes valid JSON that is NOT an object (a list)
 _STUB_NONDICT = """\
-import re, sys, json
+import json, os
 from pathlib import Path
-prompt = sys.argv[-1]
-out = Path(re.search(r'this exact path:\\s*(\\S+)', prompt).group(1).rstrip('.'))
+out = Path(os.environ["VERIFIER_RESULTS_DIR"]) / "RID" / "verification.json"
 out.parent.mkdir(parents=True, exist_ok=True)
 out.write_text(json.dumps(["not", "a", "dict"]))
 """
 
 # stub that sleeps long enough to trip a 1s timeout
-_STUB_SLOW = "import time\ntime.sleep(10)\n"
+_STUB_SLOW = """\
+import os, time
+from pathlib import Path
+Path(os.environ["VERIFIER_RESULTS_DIR"]).joinpath("RID", "child.pid").parent.mkdir(parents=True, exist_ok=True)
+Path(os.environ["VERIFIER_RESULTS_DIR"]).joinpath("RID", "child.pid").write_text(str(os.getpid()), encoding="utf-8")
+time.sleep(10)
+"""
 
 
 @contextmanager
@@ -107,7 +110,7 @@ def _service(stub_body: str, *, timeout: str = "0"):
     """Point the launcher at a stub codex + isolated results/home dirs."""
     with tempfile.TemporaryDirectory() as tmp:
         tmpd = Path(tmp)
-        stub = _write_stub(tmpd, "fake.py", stub_body)
+        stub = _write_stub(tmpd, "fake", stub_body)
         with _env(DANUS_CODEX_BIN=str(stub), CODEX_BIN=None,
                   VERIFIER_RESULTS_DIR=str(tmpd / "runs"),
                   VERIFY_AGENT_HOME=str(tmpd / "home"),
@@ -122,18 +125,20 @@ def _service(stub_body: str, *, timeout: str = "0"):
 
 def test_build_codex_command_shape():
     with tempfile.TemporaryDirectory() as tmp:
-        with _env(DANUS_CODEX_BIN="/abs/codex",
+        tmp = Path(tmp)
+        with _env(DANUS_CODEX_BIN=str(tmp / "codex"),
                   VERIFY_AGENT_HOME=str(tmp),
                   DANUS_VERIFY_MODEL="m-test", DANUS_VERIFY_EFFORT="e-test",
                   DANUS_CODEX_MODEL=None, DANUS_CODEX_EFFORT=None):
             cmd = launcher.build_codex_command("RID", _STMT, _PROOF)
-    assert cmd[0] == "/abs/codex" and cmd[1] == "exec"
+    assert cmd[0] == str(tmp / "codex") and cmd[1] == "exec"
     assert "--model" in cmd and cmd[cmd.index("--model") + 1] == "m-test"
     assert '--config' in cmd and 'model_reasoning_effort="e-test"' in cmd
     assert "-C" in cmd  # agent home
     # gateway injected via -c with role=verifier
     assert "-c" in cmd
-    assert any('mcp_servers.danus=' in a and 'DANUS_ROLE="verifier"' in a for a in cmd)
+    py = json.dumps(runtime.current_python())
+    assert any('mcp_servers.danus=' in a and 'DANUS_ROLE="verifier"' in a and py in a for a in cmd)
     assert "--dangerously-bypass-approvals-and-sandbox" in cmd
     # the prompt (final arg) names the exact output path
     assert cmd[-1].endswith("verification.json.")
@@ -142,9 +147,10 @@ def test_build_codex_command_shape():
 
 def test_subprocess_env_prepends_dir_for_concrete_path():
     with tempfile.TemporaryDirectory() as tmp:
-        binp = str(Path(tmp) / "codex")
+        tmp = Path(tmp)
+        binp = str(tmp / "codex")
         env = codex.subprocess_env(binp)
-        assert env["PATH"].split(os.pathsep)[0] == str(Path(tmp).resolve())
+        assert env["PATH"].split(os.pathsep)[0] == str(tmp.resolve())
 
 
 def test_subprocess_env_no_cwd_injection_for_bare_name():
@@ -160,7 +166,8 @@ def test_subprocess_env_no_cwd_injection_for_bare_name():
 
 def test_allocate_run_id_retries_on_collision():
     with tempfile.TemporaryDirectory() as tmp:
-        with _env(VERIFIER_RESULTS_DIR=str(Path(tmp) / "runs")):
+        tmp = Path(tmp)
+        with _env(VERIFIER_RESULTS_DIR=str(tmp / "runs")):
             base = launcher.generate_run_id(_STMT)
             root = launcher._results_root()
             root.mkdir(parents=True, exist_ok=True)
@@ -185,7 +192,8 @@ def test_allocate_run_id_retries_on_collision():
 
 def test_verification_path_found_and_absent():
     with tempfile.TemporaryDirectory() as tmp:
-        with _env(VERIFIER_RESULTS_DIR=str(Path(tmp) / "runs")):
+        tmp = Path(tmp)
+        with _env(VERIFIER_RESULTS_DIR=str(tmp / "runs")):
             rid = "RID1"
             d = launcher._results_dir(rid)
             d.mkdir(parents=True)
@@ -220,6 +228,13 @@ def test_run_timeout_504():
             assert False, "expected 504"
         except HTTPException as e:
             assert e.status_code == 504 and "timed out" in e.detail
+        child_pid = int((launcher._results_dir("RID") / "child.pid").read_text(encoding="utf-8"))
+        deadline = time.time() + 5
+        while time.time() < deadline and runtime.pid_alive(child_pid):
+            time.sleep(0.05)
+        assert not runtime.pid_alive(child_pid)
+        log_path = launcher._results_dir("RID") / "log.md"
+        assert runtime.wait_until_path_releasable(log_path, timeout_seconds=0.1) is True
 
 
 def test_run_nonzero_exit_500():
@@ -277,6 +292,30 @@ def test_ensure_agent_home_provisions_missing_home():
             # idempotent: a second call is a no-op and still valid
             launcher.ensure_agent_home()
             assert agents_md.exists() and skills.exists()
+
+
+def test_ensure_agent_home_refreshes_copied_assets(tmp_path, monkeypatch):
+    repo = tmp_path / "repo"
+    contract = repo / "agents" / "contracts" / "verifier.md"
+    skills_source = repo / "agents" / "skills" / "verify"
+    contract.parent.mkdir(parents=True)
+    skills_source.mkdir(parents=True)
+    contract.write_text("fresh contract", encoding="utf-8")
+    (skills_source / "current.md").write_text("fresh skill", encoding="utf-8")
+
+    home = tmp_path / "home"
+    copied_skills = home / ".agents" / "skills"
+    copied_skills.mkdir(parents=True)
+    (home / "AGENTS.md").write_text("stale contract", encoding="utf-8")
+    (copied_skills / "removed.md").write_text("stale skill", encoding="utf-8")
+    monkeypatch.setattr(launcher, "_REPO_ROOT", repo)
+    monkeypatch.setenv("VERIFY_AGENT_HOME", str(home))
+
+    launcher.ensure_agent_home()
+
+    assert (home / "AGENTS.md").read_text(encoding="utf-8") == "fresh contract"
+    assert (copied_skills / "current.md").read_text(encoding="utf-8") == "fresh skill"
+    assert not (copied_skills / "removed.md").exists()
 
 
 def main() -> None:

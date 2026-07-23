@@ -18,10 +18,14 @@ import io
 import json
 import os
 import runpy
+import signal
+import subprocess
+import sys
 import tempfile
 from contextlib import contextmanager, redirect_stdout
 from pathlib import Path
 
+from danus import runtime
 from danus.execution import layout as L
 from danus.orchestration import cli
 
@@ -131,9 +135,9 @@ def test_stop_one_force_sigkill_fallback(tmp: Path):
     Waiting for the readiness file is essential: if we stop before the SIGTERM
     handler is installed, the default handler kills the child immediately and the
     SIGKILL branch is never reached."""
-    import subprocess
-    import sys
     import time
+    if runtime.is_windows():
+        return
     ready = tmp / "handler_ready"
     prog = (
         "import signal, time, sys\n"
@@ -175,34 +179,28 @@ def test_stop_one_force_sigkill_fallback(tmp: Path):
 
 
 def test_stop_one_force_sigkill_killpg_raises(tmp: Path):
-    """Defensive branch (cli.py 247-248): the final SIGKILL ``os.killpg`` itself
-    raises ProcessLookupError (the process died in the tiny window between the last
-    ``_alive`` check and the kill). It must be swallowed and still return 'killed'.
-    Fully stubbed — ``_alive`` is forced True through the wait loop, ``os.getpgid``
-    is a no-op, and ``os.killpg`` raises; no real process is touched."""
+    """Force path: repeated liveness checks keep reporting alive, so _stop_one
+    falls through to the second terminate call and still returns 'killed'."""
     with _project_env(tmp):
         cli.do_new("P", roles="high:1")
         wl = _wl("P", "high")
         wl.pid.write_text("2000000000")
 
         real_alive = cli._alive
-        real_getpgid = cli.os.getpgid
-        real_killpg = cli.os.killpg
+        real_term = runtime.terminate_process_tree
         real_sleep = cli.time.sleep
 
-        cli._alive = lambda pid: True                 # always "alive" -> reaches SIGKILL
-        cli.os.getpgid = lambda pid: 12345
-        def boom_killpg(pgid, sig):
-            raise ProcessLookupError("gone before SIGKILL")
-        cli.os.killpg = boom_killpg
+        calls = []
+        cli._alive = lambda pid: True
+        runtime.terminate_process_tree = lambda pid, force, wait_seconds=5.0: calls.append(force)  # type: ignore[assignment]
         cli.time.sleep = lambda s: None               # don't actually wait ~5s
         try:
             assert cli._stop_one(wl, force=True) == "killed"
+            assert calls == [False, True]
             assert not wl.pid.exists()
         finally:
             cli._alive = real_alive
-            cli.os.getpgid = real_getpgid
-            cli.os.killpg = real_killpg
+            runtime.terminate_process_tree = real_term  # type: ignore[assignment]
             cli.time.sleep = real_sleep
 
 
@@ -212,7 +210,10 @@ def test_alive_proc_read_failure_defaults_alive(tmp: Path):
     /proc is unavailable). ``_alive`` conservatively returns True. We simulate the
     race by patching ``cli.Path`` so the /proc read raises OSError, using our own
     (definitely-live, non-zombie) pid so os.kill succeeds."""
-    real_Path = cli.Path
+    if runtime.is_windows():
+        assert cli._alive(os.getpid()) is True
+        return
+    real_Path = runtime.Path
 
     class _BoomPath:
         def __init__(self, *a, **k):
@@ -220,25 +221,21 @@ def test_alive_proc_read_failure_defaults_alive(tmp: Path):
         def read_text(self, *a, **k):
             raise OSError("simulated /proc read failure")
 
-    cli.Path = _BoomPath
+    runtime.Path = _BoomPath
     try:
         assert cli._alive(os.getpid()) is True        # kill ok, /proc read boom -> True
     finally:
-        cli.Path = real_Path
+        runtime.Path = real_Path
 
 
 def test_stop_one_force_getpgid_raises(tmp: Path):
-    """Force path where ``os.getpgid`` raises (cli.py 238-239): the process is seen
-    alive by ``_alive`` but disappears before ``getpgid`` — the ProcessLookupError
-    is swallowed, then the wait loop finds it dead and returns 'killed'. We stub
-    ``cli.os.getpgid`` to raise and use a dead pid for the subsequent _alive checks
-    so the loop exits at once."""
-    import types
+    """Force path where the first stop attempt does nothing and liveness flips to
+    dead during the wait loop."""
     with _project_env(tmp):
         cli.do_new("P", roles="high:1")
         wl = _wl("P", "high")
 
-        real_getpgid = cli.os.getpgid
+        real_term = runtime.terminate_process_tree
         real_alive = cli._alive
         # first _alive (guard) True, then getpgid raises, then loop sees dead
         state = {"n": 0}
@@ -247,17 +244,14 @@ def test_stop_one_force_getpgid_raises(tmp: Path):
             state["n"] += 1
             return state["n"] == 1                     # alive once (the guard), dead after
 
-        def boom_getpgid(pid):
-            raise ProcessLookupError("gone between alive and getpgid")
-
         wl.pid.write_text("2000000000")
-        cli.os.getpgid = boom_getpgid
+        runtime.terminate_process_tree = lambda pid, force, wait_seconds=5.0: None  # type: ignore[assignment]
         cli._alive = fake_alive
         try:
             assert cli._stop_one(wl, force=True) == "killed"
             assert not wl.pid.exists()
         finally:
-            cli.os.getpgid = real_getpgid
+            runtime.terminate_process_tree = real_term  # type: ignore[assignment]
             cli._alive = real_alive
 
 
@@ -277,19 +271,26 @@ def test_alive_permission_error_means_alive():
     """A pid we can't signal (owned by another user, e.g. init pid 1) raises
     PermissionError from ``os.kill(pid, 0)`` -> treated as alive ('exists but not
     ours'). pid 1 always exists and is root-owned when we're not root."""
-    if os.geteuid() == 0:
-        return  # as root os.kill(1,0) succeeds; the PermissionError branch is unreachable
-    assert cli._alive(1) is True
+    real_is_windows = runtime.is_windows
+    real_kill = runtime.os.kill
+    runtime.is_windows = lambda: False  # type: ignore[assignment]
+    runtime.os.kill = lambda pid, sig: (_ for _ in ()).throw(PermissionError())  # type: ignore[assignment]
+    try:
+        assert cli._alive(1) is True
+    finally:
+        runtime.is_windows = real_is_windows  # type: ignore[assignment]
+        runtime.os.kill = real_kill  # type: ignore[assignment]
 
 
 def test_alive_zombie_is_dead():
     """A child that exited but hasn't been reaped is a zombie; /proc reports state
     'Z' and ``_alive`` must call it dead. We fork a child that exits immediately
     and do NOT wait() it, so it lingers as a zombie we own."""
-    import subprocess
     import time
+    if runtime.is_windows():
+        return
     # 'true' exits at once; without wait() it becomes a zombie child of us.
-    proc = subprocess.Popen(["true"])
+    proc = subprocess.Popen([sys.executable, "-c", "pass"])
     try:
         # wait for the kernel to mark it Z (exited, unreaped)
         pid = proc.pid
@@ -366,18 +367,13 @@ def test_do_start_calls_spawn_with_worker_dir(tmp: Path):
 
 
 def test_do_start_locked_returns_locked(tmp: Path):
-    import fcntl
     with _project_env(tmp), _patch_spawn():
         cli.do_new("P", roles="high:1")
         wl = _wl("P", "high")
         wl.dir.mkdir(parents=True, exist_ok=True)
-        held = open(wl.lock, "w")
-        fcntl.flock(held, fcntl.LOCK_EX)
-        try:
+        with runtime.file_lock(wl.lock) as held:
+            assert held is not None
             assert cli._start_one(wl) == "locked"
-        finally:
-            fcntl.flock(held, fcntl.LOCK_UN)
-            held.close()
 
 
 def test_do_start_clears_stale_stop(tmp: Path):
@@ -453,11 +449,13 @@ def test_stop_one_force_kills_a_real_child(tmp: Path):
     """Spawn a genuine harmless child (sleep), record its pid, force-stop it, and
     assert it's reaped as 'killed'. This is a real process we own — safe to kill,
     never a codex/worker (which the RULES forbid launching)."""
-    import subprocess
     with _project_env(tmp):
         cli.do_new("P", roles="high:1")
         wl = _wl("P", "high")
-        proc = subprocess.Popen(["sleep", "30"], start_new_session=True)
+        kwargs = {"start_new_session": True}
+        if runtime.is_windows():
+            kwargs = {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP}
+        proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"], **kwargs)
         wl.pid.write_text(str(proc.pid))
         try:
             assert cli._stop_one(wl, force=True) == "killed"

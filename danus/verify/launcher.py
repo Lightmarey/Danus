@@ -30,6 +30,7 @@ from typing import Any, Dict, List, Optional
 from fastapi import HTTPException
 
 from danus import codex
+from danus import runtime
 
 _HERE = Path(__file__).resolve().parent  # danus/verify/
 _REPO_ROOT = _HERE.parent.parent         # repo root (danus/verify -> danus -> root)
@@ -42,13 +43,6 @@ VERIFICATION_FILENAMES = ("verification.json", "verificationt.json")
 
 def _agent_home() -> Path:
     return Path(os.getenv("VERIFY_AGENT_HOME", str(_HERE / "agent"))).resolve()
-
-
-def _relink(link: Path, target: Path) -> None:
-    """Point ``link`` (a symlink) at absolute ``target``, replacing a stale link."""
-    if link.is_symlink() or link.exists():
-        link.unlink()
-    link.symlink_to(target)
 
 
 def ensure_agent_home() -> Path:
@@ -67,13 +61,11 @@ def ensure_agent_home() -> Path:
     skills = _REPO_ROOT / "agents" / "skills" / "verify"
     agents_md = home / "AGENTS.md"
     skills_link = home / ".agents" / "skills"
-    if agents_md.exists() and skills_link.exists():
-        return home
     if not (contract.exists() and skills.exists()):
         return home  # nothing to link from — do not create broken links
     (home / ".agents").mkdir(parents=True, exist_ok=True)
-    _relink(agents_md, contract)
-    _relink(skills_link, skills)
+    runtime.sync_symlink_or_copy(contract, agents_md)
+    runtime.sync_symlink_or_copy(skills, skills_link)
     return home
 
 
@@ -98,7 +90,8 @@ def _mcp_config_arg() -> str:
     """Inject the danus gateway (role=verifier) into the codex agent via `-c`,
     independent of CODEX_HOME. Runs the installed package (``python3 -m
     danus.gateway``); the verifier role exposes only search_arxiv_theorems."""
-    return 'mcp_servers.danus={command="python3",args=["-m","danus.gateway"],env={DANUS_ROLE="verifier"}}'
+    py = json.dumps(runtime.current_python())
+    return f'mcp_servers.danus={{command={py},args=["-m","danus.gateway"],env={{DANUS_ROLE="verifier"}}}}'
 
 
 # --------------------------------------------------------------------------- #
@@ -179,23 +172,32 @@ def run_codex_verification(run_id: str, statement: str, proof: str) -> Dict[str,
     env = codex.subprocess_env(cmd[0])
 
     started_at = datetime.now(timezone.utc).isoformat()
+    proc = None
     try:
         with log_path.open("w", encoding="utf-8") as log_handle:
             log_handle.write(f"started_at_utc: {started_at}\n")
             log_handle.write(f"command: {shlex.join(cmd)}\n\n")
             log_handle.flush()
-            completed = subprocess.run(
+            proc = runtime.spawn_process(
                 cmd, cwd=_agent_home(), env=env,
                 stdin=subprocess.DEVNULL, stdout=log_handle, stderr=subprocess.STDOUT,
-                text=True, timeout=_timeout(), check=False,
+                new_process_group=True,
             )
+            completed_rc = proc.wait(timeout=_timeout())
     except subprocess.TimeoutExpired as exc:
+        if proc is not None:
+            runtime.stop_process(proc, wait_seconds=10.0, force=True)
+        if not runtime.wait_until_path_releasable(log_path, timeout_seconds=10.0):
+            raise HTTPException(
+                status_code=500,
+                detail=f"verifier log remained locked after timeout cleanup at {log_path}",
+            ) from exc
         raise HTTPException(status_code=504,
                             detail=f"codex exec timed out after {exc.timeout}s. See log at {log_path}") from exc
 
-    if completed.returncode != 0:
+    if completed_rc != 0:
         raise HTTPException(status_code=500,
-                            detail=f"codex exec failed with exit code {completed.returncode}. See log at {log_path}")
+                            detail=f"codex exec failed with exit code {completed_rc}. See log at {log_path}")
 
     verification_path = _verification_path(run_id)
     if verification_path is None:

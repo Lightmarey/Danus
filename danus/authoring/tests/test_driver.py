@@ -10,35 +10,37 @@ Runs standalone (``python -m danus.authoring.tests.test_driver``) and under pyte
 from __future__ import annotations
 
 import os
-import stat
 import subprocess
 import tempfile
 from pathlib import Path
 
 from danus.authoring import driver
+from danus.tests.portable import write_python_launcher
 
 from ._fixtures import env
 
 FAKE = Path(__file__).resolve().parent / "fake_codex.py"
 
 
-def _ensure_fake_executable():
-    FAKE.chmod(FAKE.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+def _fake_launcher(dirpath: Path) -> Path:
+    return write_python_launcher(dirpath, "fake_codex", FAKE.read_text(encoding="utf-8"))
 
 
 def test_stdout_forwarded_verbatim():
-    _ensure_fake_executable()
-    with env(DANUS_CODEX_BIN=str(FAKE)):
-        cp = driver.run_codex("please write the paper", timeout=60)
+    with tempfile.TemporaryDirectory() as d:
+        fake = _fake_launcher(Path(d))
+        with env(DANUS_CODEX_BIN=str(fake)):
+            cp = driver.run_codex("please write the paper", timeout=60)
     assert cp.returncode == 0
     assert "\\documentclass{amsart}" in cp.stdout
     assert "\\end{document}" in cp.stdout
 
 
 def test_cwd_is_a_fresh_temp_dir():
-    _ensure_fake_executable()
-    with env(DANUS_CODEX_BIN=str(FAKE)):
-        cp = driver.run_codex("[[FAKE:cwd]] print your cwd", timeout=60)
+    with tempfile.TemporaryDirectory() as d:
+        fake = _fake_launcher(Path(d))
+        with env(DANUS_CODEX_BIN=str(fake)):
+            cp = driver.run_codex("[[FAKE:cwd]] print your cwd", timeout=60)
     cwd = cp.stdout.strip()
     # the driver hands codex a brand-new temp dir, NOT the caller's cwd
     assert cwd and cwd != os.getcwd()
@@ -48,9 +50,10 @@ def test_cwd_is_a_fresh_temp_dir():
 
 
 def test_nonzero_returncode_plumbed():
-    _ensure_fake_executable()
-    with env(DANUS_CODEX_BIN=str(FAKE)):
-        cp = driver.run_codex("boom [[FAKE:exit=7]]", timeout=60)
+    with tempfile.TemporaryDirectory() as d:
+        fake = _fake_launcher(Path(d))
+        with env(DANUS_CODEX_BIN=str(fake)):
+            cp = driver.run_codex("boom [[FAKE:exit=7]]", timeout=60)
     assert cp.returncode == 7
     assert cp.stdout.strip() == ""
     assert "forced nonzero exit" in cp.stderr
@@ -59,9 +62,11 @@ def test_nonzero_returncode_plumbed():
 def test_timeout_raises():
     # a stub that sleeps longer than the timeout → TimeoutExpired is propagated
     with tempfile.TemporaryDirectory() as d:
-        sleeper = Path(d) / "sleeper.py"
-        sleeper.write_text("#!/usr/bin/env python3\nimport time,sys\ntime.sleep(5)\n", encoding="utf-8")
-        sleeper.chmod(sleeper.stat().st_mode | stat.S_IXUSR)
+        sleeper = write_python_launcher(
+            Path(d),
+            "sleeper",
+            "import time\ntime.sleep(5)\n",
+        )
         with env(DANUS_CODEX_BIN=str(sleeper)):
             try:
                 driver.run_codex("anything", timeout=1)
@@ -89,23 +94,23 @@ def test_neutral_default_model_and_effort():
         assert driver.default_effort() == driver.DEFAULT_EFFORT == "xhigh"
 
 
-def test_resolve_bin_bare_name_resolved_via_which():
+def test_resolve_bin_bare_name_resolved_via_which(tmp_path: Path):
     # codex.py resolve_bin: a bare (non-absolute) DANUS_CODEX_BIN name is resolved
-    # to its absolute path via PATH (shutil.which). We put a fake 'mycodex' on PATH.
+    # to its absolute path via PATH (shutil.which). Use the portable launcher so
+    # Windows gets a discoverable `.cmd` and POSIX gets an executable file.
     from danus import codex
-    with tempfile.TemporaryDirectory() as d:
-        binp = Path(d) / "mycodex"
-        binp.write_text("#!/bin/sh\ntrue\n", encoding="utf-8")
-        binp.chmod(binp.stat().st_mode | stat.S_IXUSR)
-        old_path = os.environ.get("PATH", "")
-        with env(DANUS_CODEX_BIN="mycodex", CODEX_BIN=None):
-            os.environ["PATH"] = d + os.pathsep + old_path
-            try:
-                resolved = codex.resolve_bin()
-            finally:
-                os.environ["PATH"] = old_path
-        # resolved to the absolute path found on PATH (not left as the bare name)
-        assert resolved == str(binp)
+    launcher = write_python_launcher(tmp_path, "mycodex", "pass\n")
+    old_path = os.environ.get("PATH", "")
+    with env(DANUS_CODEX_BIN="mycodex", CODEX_BIN=None):
+        os.environ["PATH"] = str(tmp_path) + os.pathsep + old_path
+        try:
+            resolved = codex.resolve_bin()
+        finally:
+            os.environ["PATH"] = old_path
+    if os.name == "nt":
+        assert os.path.normcase(os.path.normpath(resolved)) == os.path.normcase(os.path.normpath(str(launcher)))
+    else:
+        assert resolved == str(launcher)
 
 
 def test_resolve_bin_bare_name_not_on_path_falls_back_to_raw():
@@ -119,10 +124,11 @@ def test_subprocess_env_prepends_bin_dir_for_concrete_path():
     # a concrete codex path -> its dir is prepended to PATH (for the node shebang)
     from danus import codex
     with tempfile.TemporaryDirectory() as d:
-        codex_bin = str(Path(d) / "codex")
+        d = Path(d)
+        codex_bin = str(d / "codex")
         senv = codex.subprocess_env(codex_bin)
         first = senv["PATH"].split(os.pathsep)[0]
-        assert first == str(Path(d))
+        assert first == str(d)
 
 
 def test_subprocess_env_bare_name_does_not_inject_cwd():

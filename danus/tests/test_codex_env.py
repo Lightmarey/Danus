@@ -11,15 +11,16 @@ from __future__ import annotations
 
 import os
 import shutil
-import tempfile
 from pathlib import Path
 
 from danus import codex
 
 
 def test_subprocess_env_prepends_dir_for_concrete_path():
-    env = codex.subprocess_env("/opt/tools/codex")
-    assert env["PATH"].split(os.pathsep)[0] == "/opt/tools"
+    codex_bin = r"C:\opt\tools\codex.cmd" if os.name == "nt" else "/opt/tools/codex"
+    expected = r"C:\opt\tools" if os.name == "nt" else "/opt/tools"
+    env = codex.subprocess_env(codex_bin)
+    assert env["PATH"].split(os.pathsep)[0] == expected
     # the rest of the original PATH is preserved after the prepended dir
     assert os.environ.get("PATH", "") in env["PATH"]
 
@@ -39,16 +40,15 @@ def test_subprocess_env_returns_full_environ_copy():
             assert env[k] == os.environ[k]
 
 
-def _no_override_no_wrapper(which_result):
+def _no_override_no_wrapper(tmp_path: Path, which_result):
     """Run resolve_bin() with no override env and no bin/codex wrapper, with
     shutil.which stubbed to ``which_result``. Returns resolve_bin()'s result."""
     saved = {n: os.environ.pop(n, None) for n in ("DANUS_CODEX_BIN", "CODEX_BIN")}
     orig_root, orig_which = codex._REPO_ROOT, shutil.which
     try:
-        with tempfile.TemporaryDirectory() as d:
-            codex._REPO_ROOT = Path(d)  # a dir with no bin/codex wrapper
-            shutil.which = lambda name: which_result
-            return codex.resolve_bin()
+        codex._REPO_ROOT = tmp_path  # a dir with no bin/codex wrapper
+        shutil.which = lambda name: which_result
+        return codex.resolve_bin()
     finally:
         codex._REPO_ROOT, shutil.which = orig_root, orig_which
         for n, v in saved.items():
@@ -56,12 +56,13 @@ def _no_override_no_wrapper(which_result):
                 os.environ[n] = v
 
 
-def test_resolve_bin_falls_through_to_which():
-    assert _no_override_no_wrapper("/usr/bin/codex") == "/usr/bin/codex"
+def test_resolve_bin_falls_through_to_which(tmp_path: Path):
+    expected = r"C:\Tools\codex.CMD" if os.name == "nt" else "/usr/bin/codex"
+    assert _no_override_no_wrapper(tmp_path, expected) == expected
 
 
-def test_resolve_bin_falls_through_to_bare_codex():
-    assert _no_override_no_wrapper(None) == "codex"
+def test_resolve_bin_falls_through_to_bare_codex(tmp_path: Path):
+    assert _no_override_no_wrapper(tmp_path, None) == "codex"
 
 
 def main() -> None:

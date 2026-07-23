@@ -22,16 +22,15 @@ Notes:
 from __future__ import annotations
 
 import argparse
-import fcntl
 import json
 import os
-import signal
 import time
 from pathlib import Path
 from typing import Dict, List, Optional
 
 from danus.execution import layout as L
 from danus.execution.scaffold import atomic_write, do_new, spawn_loop
+from danus import runtime
 
 __all__ = [
     "do_new", "do_assign", "do_start", "do_status", "worker_status",
@@ -54,22 +53,7 @@ def _read_pid(wl: L.WorkerLayout) -> Optional[int]:
 
 
 def _alive(pid: Optional[int]) -> bool:
-    if not pid:
-        return False
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        return True  # exists but not ours
-    # The pid exists — but a zombie (killed, not yet reaped by its parent) is
-    # effectively dead. Linux /proc tells us the process state.
-    try:
-        stat = Path(f"/proc/{pid}/stat").read_text()
-        state = stat.rsplit(")", 1)[1].split()[0]  # field after "(comm)"
-        return state != "Z"
-    except (OSError, IndexError):
-        return True
+    return runtime.pid_alive(pid)
 
 
 def _read_status(wl: L.WorkerLayout) -> Dict:
@@ -168,11 +152,8 @@ def _start_one(wl: L.WorkerLayout) -> str:
     on .pid.lock; clears a stale .stop before spawning."""
     wl.dir.mkdir(parents=True, exist_ok=True)
     wl.logs.mkdir(exist_ok=True)
-    lock = open(wl.lock, "w")
-    try:
-        try:
-            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError:
+    with runtime.file_lock(wl.lock) as lock:
+        if lock is None:
             return "locked"
         if _alive(_read_pid(wl)):
             return "already-running"
@@ -180,9 +161,6 @@ def _start_one(wl: L.WorkerLayout) -> str:
         pid = spawn_loop(wl.dir)
         atomic_write(wl.pid, str(pid))
         return "started"
-    finally:
-        fcntl.flock(lock, fcntl.LOCK_UN)
-        lock.close()
 
 
 def do_start(target: str, stagger: float = 0.2) -> List[Dict]:
@@ -287,24 +265,16 @@ def _stop_one(wl: L.WorkerLayout, force: bool) -> str:
             return "not-running"
         wl.stop.touch()      # graceful: loop exits at round boundary
         return "stopping (graceful)"
-    # force: kill the loop's process group (loop + its codex child), then SIGKILL
     if not _alive(pid):
         wl.pid.unlink(missing_ok=True)
         return "not-running"
-    try:
-        pgid = os.getpgid(pid)
-        os.killpg(pgid, signal.SIGTERM)
-    except (ProcessLookupError, PermissionError):
-        pass
-    for _ in range(50):                          # up to ~5s for a clean exit
+    runtime.terminate_process_tree(pid, force=False)
+    for _ in range(50):
         if not _alive(pid):
             break
         time.sleep(0.1)
     if _alive(pid):
-        try:
-            os.killpg(os.getpgid(pid), signal.SIGKILL)
-        except (ProcessLookupError, PermissionError):
-            pass
+        runtime.terminate_process_tree(pid, force=True)
     wl.pid.unlink(missing_ok=True)
     return "killed"
 

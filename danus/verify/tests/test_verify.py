@@ -11,7 +11,6 @@ Runs standalone (``python -m danus.verify.tests.test_verify``) and under pytest.
 from __future__ import annotations
 
 import os
-import stat
 import tempfile
 from contextlib import contextmanager
 from pathlib import Path
@@ -20,6 +19,7 @@ from fastapi import HTTPException
 
 from danus.verify import prechecks
 from danus.verify.service import VerifyRequest, verify
+from danus.tests.portable import write_python_launcher
 
 FAKE = Path(__file__).resolve().parent / "fake_codex.py"
 
@@ -44,14 +44,20 @@ def _env(**kv):
             else:
                 os.environ[k] = v
 
-
-def _ensure_fake_executable():
-    FAKE.chmod(FAKE.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+def _fake_launcher(tmp: Path) -> Path:
+    return write_python_launcher(tmp, "fake_codex", FAKE.read_text(encoding="utf-8"))
 
 
 def _call(statement, proof, tmp):
-    with _env(DANUS_CODEX_BIN=str(FAKE)), \
-            _env(VERIFIER_RESULTS_DIR=str(Path(tmp) / "runs"), VERIFY_AGENT_HOME=str(tmp)):
+    tmp = Path(tmp)
+    fake = _fake_launcher(tmp)
+    prompt = f"Statement: {statement}\nProof:\n{proof}"
+    with _env(
+        DANUS_CODEX_BIN=str(fake),
+        VERIFIER_RESULTS_DIR=str(tmp / "runs"),
+        VERIFY_AGENT_HOME=str(tmp),
+        FAKE_CODEX_PROMPT=prompt,
+    ):
         return verify(VerifyRequest(statement=statement, proof=proof))
 
 
@@ -67,14 +73,12 @@ def test_prechecks_units():
 
 
 def test_verify_accept_via_fake_codex():
-    _ensure_fake_executable()
     with tempfile.TemporaryDirectory() as tmp:
         out = _call(_GOOD_STATEMENT, _GOOD_PROOF, tmp)
         assert out["verdict"] == "correct" and out["verification_report"]["critical_errors"] == []
 
 
 def test_verify_reject_via_fake_codex():
-    _ensure_fake_executable()
     with tempfile.TemporaryDirectory() as tmp:
         out = _call(_GOOD_STATEMENT, _GOOD_PROOF + " [[FAKE:wrong]]", tmp)
         assert out["verdict"] == "wrong" and out["repair_hints"]

@@ -17,22 +17,28 @@ Point the service at it with DANUS_CODEX_BIN=/abs/path/to/fake_codex.py . It acc
 from __future__ import annotations
 
 import json
+import os
 import re
 import sys
 from pathlib import Path
 
 
 def main() -> int:
-    if len(sys.argv) < 2:
+    if len(sys.argv) < 2 and not os.environ.get("FAKE_CODEX_PROMPT"):
         sys.stderr.write("fake_codex: no prompt argument\n")
         return 2
-    prompt = sys.argv[-1]
+    prompt = os.environ.get("FAKE_CODEX_PROMPT") or " ".join(sys.argv[1:])
 
     m = re.search(r"this exact path:\s*(\S+)", prompt)
-    if not m:
-        sys.stderr.write("fake_codex: could not find output path in prompt\n")
-        return 3
-    out_path = Path(m.group(1).rstrip("."))
+    if m:
+        out_path = Path(m.group(1).rstrip("."))
+    else:
+        results_root = Path(os.environ["VERIFIER_RESULTS_DIR"])
+        run_dirs = [p for p in results_root.iterdir() if p.is_dir()]
+        if len(run_dirs) != 1:
+            sys.stderr.write("fake_codex: could not infer unique run directory\n")
+            return 3
+        out_path = run_dirs[0] / "verification.json"
 
     if "[[FAKE:wrong]]" in prompt:
         payload = {

@@ -127,15 +127,20 @@ def test_parse_fact_frontmatter_line_without_colon():
 
 
 def test_load_jsonl_permission_denied_returns_empty():
-    import stat
-    with tempfile.TemporaryDirectory() as d:
-        p = Path(d) / "chan.jsonl"
-        p.write_text('{"a": 1}\n', encoding="utf-8")
-        p.chmod(0)  # exists + is_file, but unreadable -> read_text raises OSError -> []
-        try:
-            assert app._load_jsonl(p) == []
-        finally:
-            p.chmod(stat.S_IRUSR | stat.S_IWUSR)  # restore so tempdir cleanup succeeds
+    p = Path("C:/permission-denied.jsonl")
+    real_is_file = Path.is_file
+    real_read_text = Path.read_text
+    Path.is_file = lambda self: self == p or real_is_file(self)  # type: ignore[assignment]
+    def _boom(self, *args, **kwargs):
+        if self == p:
+            raise PermissionError("denied")
+        return real_read_text(self, *args, **kwargs)
+    Path.read_text = _boom  # type: ignore[assignment]
+    try:
+        assert app._load_jsonl(p) == []
+    finally:
+        Path.is_file = real_is_file  # type: ignore[assignment]
+        Path.read_text = real_read_text  # type: ignore[assignment]
 
 
 def test_app_module_run_as_main():

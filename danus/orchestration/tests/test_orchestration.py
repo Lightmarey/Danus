@@ -16,10 +16,13 @@ import os
 import tempfile
 import time
 from contextlib import contextmanager
+import contextlib
 from pathlib import Path
 
 from danus.execution import layout as L
 from danus.orchestration import cli
+from danus import runtime
+from danus.tests.portable import write_python_launcher
 
 
 @contextmanager
@@ -58,11 +61,14 @@ def _project_env(tmp: Path, **extra):
 
 def _fake_codex(d: Path) -> Path:
     """A stub codex: print a round marker, sleep FAKE_CODEX_SLEEP, exit 0."""
-    p = d / "fake_codex.sh"
-    p.write_text('#!/usr/bin/env bash\necho "fake codex round"\n'
-                 'sleep "${FAKE_CODEX_SLEEP:-0}"\nexit 0\n')
-    p.chmod(0o755)
-    return p
+    return write_python_launcher(
+        d,
+        "fake_codex",
+        'import os, sys, time\n'
+        'sys.stdout.write("fake codex round\\n")\n'
+        'sys.stdout.flush()\n'
+        'time.sleep(float(os.environ.get("FAKE_CODEX_SLEEP", "0")))\n',
+    )
 
 
 def _wait_until(pred, timeout=15.0, interval=0.05) -> bool:
@@ -78,18 +84,37 @@ def _st(project: str, worker: str) -> dict:
     return cli.worker_status(L.WorkerLayout(L.worker_dir(project, worker)))
 
 
+def _status_pid(wl: L.WorkerLayout):
+    try:
+        data = json.loads(wl.status.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    pid = data.get("pid")
+    return pid if isinstance(pid, int) else None
+
+
 def _kill_project(project: str):
+    pids = []
+    wait_opts = getattr(os, "WNOHANG", 0)
+    logs = []
+    for d in L.target_worker_dirs(project):
+        wl = L.WorkerLayout(d)
+        pid = cli._read_pid(wl) or _status_pid(wl)
+        if pid:
+            pids.append(pid)
+        logs.append(wl.logs / "loop.log")
     try:
         cli.do_stop(project, force=True)
     except SystemExit:
         pass
-    for d in L.target_worker_dirs(project):
-        pid = cli._read_pid(L.WorkerLayout(d))
-        if pid:
-            try:
-                os.waitpid(pid, os.WNOHANG)
-            except (ChildProcessError, OSError):
-                pass
+    _wait_until(lambda: all(not runtime.pid_alive(pid) for pid in pids), timeout=8.0)
+    for pid in pids:
+        with contextlib.suppress(ChildProcessError, OSError):
+            os.waitpid(pid, wait_opts)
+    for log_path in logs:
+        assert runtime.wait_until_path_releasable(log_path, timeout_seconds=8.0), (
+            f"loop log still locked after process exit: {log_path}"
+        )
 
 
 # --- filesystem verb tests ------------------------------------------------- #
@@ -156,13 +181,23 @@ def test_graceful_stop(tmp: Path):
                       DANUS_MAX_ROUNDS="0", FAKE_CODEX_SLEEP="0.1"):
         cli.do_new("P", roles="high:1")
         try:
+            wl = L.WorkerLayout(L.worker_dir("P", "high"))
             cli.do_start("P/high")
             assert _wait_until(lambda: _st("P", "high")["round"] >= 1), "should start a round"
             assert _st("P", "high")["alive"] is True
+            assert _wait_until(
+                lambda: wl.pid.exists()
+                and wl.status.exists()
+                and cli._read_pid(wl) == json.loads(wl.status.read_text(encoding="utf-8"))["pid"]
+            ), "loop should claim .pid with its own running pid"
+            loop_pid = cli._read_pid(wl)
+            assert loop_pid is not None
             r = cli.do_stop("P/high")            # graceful
             assert "graceful" in r[0]["result"]
-            assert _wait_until(lambda: not _st("P", "high")["alive"]), "loop should exit after .stop"
-            assert cli._read_pid(L.WorkerLayout(L.worker_dir("P", "high"))) is None  # pid cleaned
+            assert _wait_until(
+                lambda: cli._read_pid(wl) is None and not runtime.pid_alive(loop_pid)
+            ), "loop should exit after .stop and fully close its handles"
+            assert cli._read_pid(wl) is None  # pid cleaned
         finally:
             _kill_project("P")
 

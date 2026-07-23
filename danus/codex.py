@@ -36,6 +36,18 @@ DEFAULT_MODEL = "gpt-5.5"
 DEFAULT_EFFORT = "xhigh"
 
 
+def _repo_wrapper() -> Path:
+    return _REPO_ROOT / "bin" / "codex"
+
+
+def _usable_repo_wrapper(wrapper: Path) -> bool:
+    if not wrapper.exists():
+        return False
+    if os.name == "nt":
+        return wrapper.suffix.lower() in {".exe", ".cmd", ".bat", ".com", ".ps1"}
+    return True
+
+
 def resolve_bin() -> str:
     """Resolve the codex binary at CALL time. Precedence:
       1. ``DANUS_CODEX_BIN`` env,
@@ -53,8 +65,8 @@ def resolve_bin() -> str:
         if os.path.isabs(override):
             return override
         return shutil.which(override) or override
-    wrapper = _REPO_ROOT / "bin" / "codex"
-    if wrapper.exists():
+    wrapper = _repo_wrapper()
+    if _usable_repo_wrapper(wrapper):
         return str(wrapper)
     which = shutil.which("codex")
     if which:

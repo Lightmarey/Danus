@@ -16,6 +16,7 @@ import tempfile
 from contextlib import contextmanager
 from pathlib import Path
 
+from danus import runtime
 from danus.execution import layout as L
 from danus.execution import loop, scaffold
 
@@ -111,8 +112,10 @@ def test_do_new_scaffolds_project(tmp: Path):
             cfg = wl.codex_config.read_text()
             assert 'DANUS_ROLE = "worker"' in cfg
             assert 'args = ["-m", "danus.gateway"]' in cfg  # pinned MCP launch
+            assert f'command = "{runtime.current_python().replace("\\", "\\\\")}"' in cfg
             assert "tool_timeout_sec = 3600" in cfg
-            assert f'DANUS_AUTHOR = "{w}"' in cfg and str(pdir) in cfg
+            assert f'DANUS_AUTHOR = "{w}"' in cfg
+            assert str(pdir).replace("\\", "\\\\") in cfg
             role = wl.role.read_text()
             assert f"REASONING_EFFORT={eff}" in role and "MODEL=gpt-5.5" in role
             assert "(unassigned" in wl.task.read_text()
@@ -135,6 +138,25 @@ def test_do_new_verify_url_from_env(tmp: Path):
             scaffold.do_new("Q", roles="high:1")
         cfg = L.WorkerLayout(L.worker_dir("Q", "high")).codex_config.read_text()
         assert 'DANUS_VERIFY_URL = "http://127.0.0.1:9999/verify"' in cfg
+
+
+def test_worker_start_refreshes_copied_assets(tmp: Path):
+    with _project_env(tmp):
+        wl = L.WorkerLayout(tmp / "project" / "workers" / "high")
+        wl.dir.mkdir(parents=True)
+        (wl.dir / ".agents").mkdir()
+        (wl.dir / "AGENTS.md").write_text("stale", encoding="utf-8")
+        copied_skills = wl.dir / ".agents" / "skills"
+        copied_skills.mkdir()
+        (copied_skills / "removed.md").write_text("stale", encoding="utf-8")
+        (L.worker_md()).write_text("fresh", encoding="utf-8")
+        (L.worker_skills_dir() / "current.md").write_text("fresh", encoding="utf-8")
+
+        loop.refresh_worker_assets(wl)
+
+        assert (wl.dir / "AGENTS.md").read_text(encoding="utf-8") == "fresh"
+        assert (copied_skills / "current.md").read_text(encoding="utf-8") == "fresh"
+        assert not (copied_skills / "removed.md").exists()
 
 
 # --- loop helpers (pure) --------------------------------------------------- #

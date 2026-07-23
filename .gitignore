@@ -5,6 +5,16 @@ __pycache__/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
+.uv-cache/
+uvcache/
+.tmp/
+.tmp-tests/
+.tmp-*/
+.manual-*/
+.pytest-tmp*/
+pytest-cache-files-*/
+focused.log
+.focused-pytest.log
 
 # --- Build / packaging artifacts (from `pip install -e .`) ---
 build/
@@ -62,6 +72,9 @@ paper/.runs/
 
 # verify agent home — provisioned on service start (launcher.ensure_agent_home)
 danus/verify/agent/
+
+# local AI session artifacts
+.ai_refs/
 
 # node deps provisioned by bootstrap.sh (human-summary PDF render: markdown-it/katex)
 .claude/skills/human-summary/node_modules/

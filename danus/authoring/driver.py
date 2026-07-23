@@ -41,10 +41,12 @@ Config (env, read at CALL time — never import time; resolved via the shared
 
 from __future__ import annotations
 
+import json
 import subprocess
 import tempfile
 
 from danus import codex
+from danus import runtime
 
 DEFAULT_MODEL = codex.DEFAULT_MODEL
 DEFAULT_EFFORT = codex.DEFAULT_EFFORT
@@ -58,8 +60,9 @@ def _gateway_config_arg(gateway_role: str) -> str:
     independent of CODEX_HOME. Reuse ``DANUS_ROLE=verifier`` for minimum privilege —
     that gateway role exposes ONLY ``search_arxiv_theorems`` (read-only). We do NOT
     define a new gateway role for the paper verifier."""
+    py = json.dumps(runtime.current_python())
     return (
-        'mcp_servers.danus={command="python3",args=["-m","danus.gateway"],'
+        f'mcp_servers.danus={{command={py},args=["-m","danus.gateway"],'
         f'env={{DANUS_ROLE="{gateway_role}"}}}}'
     )
 
