@@ -341,10 +341,13 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--force", action="store_true", help="kill now (else finish current round)")
     from danus import services
     services.configure_parser(sub)
+    from danus import codex_backend
+    codex_backend.configure_parser(sub)
     return p
 
 
 def main(argv: Optional[List[str]] = None) -> int:
+    runtime.configure_environment()
     args = build_parser().parse_args(argv)
     if args.cmd == "list":
         rows = do_list()
@@ -386,4 +389,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     elif args.cmd == "services":
         from danus import services
         return services.dispatch(args)
+    elif args.cmd == "codex":
+        from danus import codex_backend
+        return codex_backend.dispatch(args)
     return 0

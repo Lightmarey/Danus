@@ -55,7 +55,7 @@ if "$VENV/bin/python" -c "$DEPS" 2>/dev/null; then
   log "venv present + healthy"
 else
   [ -e "$VENV" ] && { log "venv missing/broken (dangling base interpreter?) — rebuilding"; rm -rf "$VENV"; }
-  PYBASE="$(command -v python3)"; [ -n "$PYBASE" ] || { log "FATAL: no python3 on PATH to build the venv"; exit 1; }
+  PYBASE="$(command -v python)"; [ -n "$PYBASE" ] || { log "FATAL: no python on PATH to build the venv"; exit 1; }
   log "creating venv ($PYBASE) -> $VENV"
   "$PYBASE" -m venv "$VENV"
   log "installing python deps (mcp/fastapi/uvicorn/pydantic/openai/anthropic)"
@@ -100,7 +100,7 @@ else
 fi
 
 # --- 4) node skill deps (human-summary: markdown-it + katex) ---------------
-HS="$DANUS_ROOT/.claude/skills/human-summary"
+HS="$DANUS_ROOT/.agents/skills/human-summary"
 if [ -d "$HS" ] && [ ! -d "$HS/node_modules/katex" ]; then
   log "installing human-summary node deps (markdown-it/katex)"
   ( cd "$HS" && $NICE "$NODE_DIR/bin/npm" install --no-fund --no-audit >/dev/null 2>&1 ) \

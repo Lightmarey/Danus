@@ -7,8 +7,7 @@
 > entry points). Each script also carries an "EXAMPLE, NOT CORE" banner so it is
 > never mistaken for the control path.
 
-Danus has exactly one unattended mode: **run Claude Code as a
-resident main agent** (`ops/main-agent-tmux.sh`). The **strategic judgment** —
+Run the Codex main agent at the repository root. The **strategic judgment** —
 elaborate → consult GPT → record `master_guidance` → dispatch workers — lives in
 that main agent and its skills (`elaboration`, `consult`), *not* in shell.
 The two loops here (`strategy-loop.sh`, `watchdog.sh`) are only the unattended
@@ -20,19 +19,8 @@ prose follows `OPERATOR.md`; the scripts themselves only emit English mechanics.
 
 ## `ops/` — unattended-operation scripts
 
-### `main-agent-tmux.sh`
-Starts Claude Code detached in a tmux session, in the repo root, so it inherits
-`CLAUDE.md`, the skills, and `.mcp.json`. `.mcp.json` is what wires the gateway
-MCP server (`python -m danus.gateway` via `bin/danus-mcp`); this launcher does
-**not** wire MCP itself.
-
-```bash
-bash examples/ops/main-agent-tmux.sh
-tmux attach -t danus-main        # watch / interact; DANUS_MAIN_TMUX overrides the name
-```
-
-Requires `tmux` and the `claude` CLI on PATH. The main agent is the sole control
-path — there is no separate Node CLI or persona-seed layer.
+Start `codex` in the repository root so `AGENTS.md`, `.agents/skills/`, and
+`.codex/config.toml` load. The main agent is the sole control path.
 
 ### `strategy-loop.sh <project>`
 One parameterized strategic-cadence loop. Each beat it runs the consult CLI on
@@ -81,11 +69,9 @@ There is no Telegram / vendor binding. Set `DANUS_NOTIFY` in
 `config/danus.env` to make it the default for a deployment.
 
 ### Keeping the loops running
-These loops run in the foreground. To make them persist beyond your shell, wrap
-them the same way you would anything else — a `tmux` window or `setsid`. Do
-**not** register them in the services pidfile/autostart manifest: that registry
-belongs to `scripts/services.sh` (which owns `verify` and the dashboard);
-`examples/` never touches it.
+These legacy POSIX examples run in the foreground. Native deployments should use
+`uv run danus services` for supported services and keep the Codex main session
+attended. Do not add example loops to the service registry.
 
 ## `project/` — a toy project on disk
 `project/PROBLEM.md` plus a 2-fact `project/fact_graph/` show the shape of a
@@ -93,4 +79,4 @@ Danus project — a verbatim problem statement and a content-addressed fact DAG
 written to `danus.core`'s real schema. It is **illustrative sample data**, not a
 verified run; see `project/fact_graph/README.md`. For a paper-pipeline example,
 see the write-paper skill's own toy project under
-`agents/skills/write-paper/examples/paper/`.
+`.agents/skills/write-paper/examples/paper/`.

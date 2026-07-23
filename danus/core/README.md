@@ -75,7 +75,7 @@ source — a proof may only cite a `fact_id`"; "no handwave / chart-position ref
 ## Test
 
 ```bash
-python3 danus/core/tests/test_core.py
+uv run python danus/core/tests/test_core.py
 ```
 
 ## Known follow-ups

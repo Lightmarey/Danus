@@ -37,6 +37,7 @@ def checks() -> Iterable[Tuple[str, bool, str]]:
 
 
 def main() -> int:
+    runtime.configure_environment()
     failed = False
     for name, ok, detail in checks():
         status = "ok" if ok else "missing"

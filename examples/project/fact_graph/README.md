@@ -30,4 +30,4 @@ against `examples/project/` — see `danus/core/README.md`.
 
 For a paper-pipeline example (a fact graph plus the polished LaTeX it compiles
 to), see the write-paper skill's own toy project under
-`agents/skills/write-paper/examples/paper/` rather than duplicating it here.
+`.agents/skills/write-paper/examples/paper/` rather than duplicating it here.

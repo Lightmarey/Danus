@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/env python
 """Danus gateway — the role-gated MCP server.
 
 A thin MCP wrapper over ``danus.core`` (the truth stores) + one external

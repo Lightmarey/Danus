@@ -18,7 +18,7 @@ import signal
 import subprocess
 import sys
 from pathlib import Path
-from typing import Dict, Iterator, List, Optional
+from typing import Dict, Iterator, List, MutableMapping, Optional
 
 if os.name == "nt":
     import msvcrt
@@ -128,6 +128,27 @@ def load_env_files(root: str | Path, environ: Optional[Dict[str, str]] = None) -
                 loaded[key] = value
                 base[key] = value
     return loaded
+
+
+def configure_environment(
+    root: str | Path | None = None,
+    environ: MutableMapping[str, str] | None = None,
+) -> Path:
+    """Apply the repo's non-executable ``config/*.env`` chain to this process.
+
+    Console scripts and ``python -m`` entry points call this before importing
+    components that inspect environment variables. Explicit process values
+    retain precedence over files.
+    """
+    env = os.environ if environ is None else environ
+    configured_root = Path(root or env.get("DANUS_ROOT") or Path.cwd()).resolve()
+    env.update(load_env_files(configured_root, dict(env)))
+    if env.get("CODEX_API_MODEL"):
+        env.setdefault("DANUS_CODEX_MODEL", env["CODEX_API_MODEL"])
+    if env.get("CODEX_BACKEND") == "api":
+        runtime_dir = Path(env.get("DANUS_RUNTIME", configured_root / "runtime")).resolve()
+        env.setdefault("CODEX_HOME", str(runtime_dir / "codex-home"))
+    return configured_root
 
 
 def mcp_server_spec(module: str, *, env: Optional[Dict[str, str]] = None,

@@ -22,7 +22,7 @@ otherwise free.
 
 The writer prompt lives in the operator-editable skill dir, located at CALL time
 via ``DANUS_HUMAN_SUMMARY_SKILL_DIR`` (default
-``<repo_root>/agents/skills/human-summary``); never read at import time. Every
+``<repo_root>/.agents/skills/human-summary``); never read at import time. Every
 required file is read verbatim, in full, and a missing file fails loudly.
 """
 
@@ -33,12 +33,10 @@ from pathlib import Path
 from typing import Dict, List
 
 from danus.authoring.common import body_sections, read_fixed, read_project, section
+from danus.authoring.assets import skill_dir as shipped_skill_dir
 from danus.core import FactGraph
 
-# danus/human_summary/assemble.py -> repo root is two parents up; the default skill
-# dir is the shipped human-summary codex-facing assets.
-_REPO_ROOT = Path(__file__).resolve().parents[2]
-_DEFAULT_SKILL_DIR = _REPO_ROOT / "agents" / "skills" / "human-summary"
+_DEFAULT_SKILL_DIR = shipped_skill_dir("human-summary")
 
 WRITER_PROMPT_REL = "REPORT_WRITER_PROMPT.md"
 

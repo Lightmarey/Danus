@@ -9,7 +9,7 @@
 </p>
 
 Danus orchestrates mathematical reasoning agents with fact-graph memory. A main
-agent (Claude Code) steers a swarm of autonomous codex workers that prove; a
+Codex main agent steers a swarm of autonomous Codex workers that prove; a
 cold-start verifier is the sole authority on correctness: a result becomes real
 only once it passes. Verified results accumulate in a content-addressed fact
 graph — the system's only source of truth — and a strategy loop (a strong
@@ -82,8 +82,8 @@ danus/                 the engine (installable Python package)
   authoring/           shared one-shot isolated-codex driver for the two renderers below
   write_paper/         write-paper MCP service (fact graph → publishable LaTeX paper)
   human_summary/       human-summary MCP service (fact graph → progress-report PDF)
-agents/                codex agent contracts (main/worker/verifier) + worker & verify skills
-.claude/skills/        main-agent skills: elaboration · consult · human-summary · initialize · write-paper
+agents/                isolated worker/verifier contracts and generated-home skills
+.agents/skills/        canonical main-agent skills and writing/report assets
 bin/ scripts/ config/  runtime layer (wrappers, bootstrap/services/doctor, env templates)
 docs/                  human docs: getting started · concepts · operating guide · security & trust · …
 examples/              unattended-ops examples + a toy project
@@ -104,21 +104,17 @@ uv run danus-doctor
 uv run danus services up verify
 uv run danus services status
 
-# 4. connect Claude Code rooted at this repo dir; on first run it runs `initialize`.
-#    --dangerously-skip-permissions lets the main agent operate autonomously (no
-#    per-action permission prompts). That is the intended mode, but it means the
-#    agent acts with your shell privileges — run Danus on an isolated, disposable
-#    host, and read docs/security-and-trust.md first.
+# 4. start Codex rooted at this repo; AGENTS.md and .codex/config.toml load here
 codex
 ```
 
 On POSIX hosts the existing `scripts/*.sh` wrappers remain available, but are
 not required for service management.
 
-Everything runs on your own keys (BYO). Workers and the verifier run on your codex
-backend; the strategy consult runs on a top-tier reasoning model over the `gpt_pro`
-transport (paid), `claude_api` (the Anthropic API, per-token), or `claude_code`
-(your Claude subscription), or `off` to skip it.
+Everything runs on your own keys (BYO). Main, workers, verifier, and writers use Codex.
+The strategy consult defaults to
+`gpt_pro` (paid) or `off`. Optional `claude_api` and `claude_code` transports
+remain available but are not required by the core path.
 
 **Notes**
 

@@ -1,17 +1,19 @@
 # Danus — Configuration Reference
 
 All host- and account-specific configuration lives in gitignored `config/*.env`
-files; **no path or secret is hardcoded** elsewhere. `scripts/env.sh` sources the
-chain and fills defaults:
+files; **no path or secret is hardcoded** elsewhere. Every installed Python/uv
+entry point loads the chain without executing it:
 
 ```
 config/codex.env  →  config/danus.env  →  runtime/runtime.env  →  built-in defaults
-   (BYO backend)      (host/account)      (machine paths, auto)   (scripts/env.sh)
+   (BYO backend)      (host/account)      (machine paths, auto)   (Python defaults)
 ```
 
-Only `*.env.example` templates are committed; copy them to the real names and edit.
-The `bin/` wrappers source `env.sh` for you. Values below are the defaults from
-`scripts/env.sh` / `config/danus.env.example`.
+Only `*.env.example` templates are committed; copy them to the real names and
+edit. `uv run danus`, `uv run consult`, the doctor, workers, services, and all
+three project MCP servers load them automatically. Explicit values already in
+the process environment win. Values below are the defaults from the Python
+runtime and `config/danus.env.example`.
 
 ## Codex backend (workers + verifier)
 
@@ -24,7 +26,9 @@ The `bin/` wrappers source `env.sh` for you. Values below are the defaults from
 | `DANUS_CODEX_API_KEY` | — | (api) key, **read at run time**, never stored in a file |
 
 These live in `config/codex.env`. See `getting-started.md` §2 and
-`scripts/setup-codex.sh`.
+run `uv run danus codex api` to materialize the keyless model-provider file.
+Use `uv run danus codex login` for ChatGPT authentication and
+`uv run danus codex status` to inspect the selected backend.
 
 ## Strategy consult (the system's brain)
 
@@ -87,7 +91,7 @@ defaults apply everywhere; per-service overrides win.
 | `DANUS_RUNTIME` | `<repo>/runtime` | the whole self-contained runtime |
 | `DANUS_AGENTS_ROOT` | `runtime/projects` | where `danus new` puts projects |
 | `VERIFIER_RESULTS_DIR` | `runtime/verify-runs` | per-verification run logs |
-| `DANUS_PY` | `runtime/venv/bin/python` (else system `python3`) | the engine's Python |
+| `DANUS_PY` | current uv Python (legacy wrappers fall back to `python`) | the engine's Python |
 
 ## Worker loop pacing (optional; engine defaults are sane)
 

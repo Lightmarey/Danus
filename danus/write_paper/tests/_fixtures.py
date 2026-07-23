@@ -1,7 +1,7 @@
 """Shared fixtures for the danus.write_paper offline tests.
 
 The read-only source fixture is the shipped example project
-``agents/skills/write-paper/examples/paper/project/``. Anything that WRITES
+``.agents/skills/write-paper/examples/paper/project/``. Anything that WRITES
 copies it to a tempdir first. The reference ledger is seeded from the facts'
 ``external_refs`` (via ``seed_ledger``) so the writer/auditor prompts have a real
 ledger to embed.
@@ -16,9 +16,9 @@ import shutil
 from pathlib import Path
 
 _REPO_ROOT = Path(__file__).resolve().parents[3]
-SKILL_DIR = _REPO_ROOT / "agents" / "skills" / "write-paper"          # codex-facing assets (roles/style/boilerplate/examples)
+SKILL_DIR = _REPO_ROOT / ".agents" / "skills" / "write-paper"
 EXAMPLE_PROJECT = SKILL_DIR / "examples" / "paper" / "project"
-MAIN_SKILL_DIR = _REPO_ROOT / ".claude" / "skills" / "write-paper"    # main-agent side (SKILL.md / driver / templates)
+MAIN_SKILL_DIR = SKILL_DIR
 
 _MINIMAL_TEX = (
     "\\documentclass{amsart}\n"

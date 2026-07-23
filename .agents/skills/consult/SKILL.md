@@ -47,12 +47,12 @@ sides, then start the workers.
 
 2. **Call the consult CLI** with the elaboration as input:
 
-   ```bash
-   consult --file <elaboration.md> --project <project_dir> --out <reply.md>
+   ```powershell
+   uv run consult --file <elaboration.md> --project <project_dir> --out <reply.md>
    ```
 
-   - `consult` is the wrapper on PATH — it sources the deployment env and execs
-     the strategy consult CLI (in `danus/strategy`) with the right Python.
+   - `uv run consult` invokes the installed strategy consult CLI with the current
+     project environment.
    - **Transport** comes from config (`DANUS_CONSULT_TRANSPORT`, default `gpt_pro`); a
      per-call override is `--transport gpt_pro|claude_api|claude_code|off`. `gpt_pro`
      runs the paid OpenAI-compatible endpoint; `claude_api` runs the native Anthropic
@@ -93,7 +93,7 @@ sides, then start the workers.
 
 4. **Dispatch from it** (see the main-agent contract's command surface). If the
    reply names **distinct branches/directions**, put **different workers on
-   different directions** by writing each a `TASK.md` with `danus assign`; if there
+   different directions** with `uv run danus assign`; if there
    are **fewer branches than workers**, multiple workers on one subgoal is fine.
 
 5. **Keep the human informed** at the right severity (the elaboration + the

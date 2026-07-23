@@ -5,9 +5,12 @@ Launched by ``bin/human-summary-mcp`` (which exports
 DANUS_HUMAN_SUMMARY_SKILL_DIR and the codex/project env).
 """
 
-from .server import build_app
-
 def main() -> int:
+    from danus import runtime
+
+    runtime.configure_environment()
+    from .server import build_app
+
     build_app().run()
     return 0
 

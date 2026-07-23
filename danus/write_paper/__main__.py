@@ -5,9 +5,12 @@ Launched by ``bin/write-paper-mcp`` (which exports DANUS_WRITE_PAPER_SKILL_DIR a
 codex/project env).
 """
 
-from .server import build_app
-
 def main() -> int:
+    from danus import runtime
+
+    runtime.configure_environment()
+    from .server import build_app
+
     build_app().run()
     return 0
 

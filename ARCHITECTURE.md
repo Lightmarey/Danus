@@ -6,7 +6,7 @@ strategy-steered research system, and renders verified results into papers and
 human progress reports. This is the as-built map: the layered model, the folder
 layout, the invariants, and the pinned cross-module contracts.
 
-For the main agent's operating contract, see `CLAUDE.md`
+For the main agent's operating contract, see `AGENTS.md`
 (→ `agents/contracts/main_agent.md`).
 
 ---
@@ -39,7 +39,7 @@ output: write-paper (publication) · human-summary (progress report) — each re
 Danus/
 ├─ ARCHITECTURE.md              this file (map + invariants + interface contract)
 ├─ README.md   pyproject.toml   top-level intro + the installable `danus` package
-├─ .gitignore  .mcp.json        MCP wiring: the `danus` gateway + the `write-paper` and `human-summary` services
+├─ .gitignore  .codex/config.toml  portable main MCP wiring
 ├─ config/                      env templates (BYO key; only *.env.example committed)
 ├─ danus/                       THE ENGINE (installable Python package)
 │  ├─ core/                     ⑤ truth: schema · factgraph · global/local memory · bm25 · glossary
@@ -58,10 +58,10 @@ Danus/
 │  └─ skills/
 │     ├─ worker/                9 proving skills (inherited from Rethlas)
 │     ├─ verify/                3 verify skills
-│     └─ write-paper/           paper role prompts + house style (embedded by the write-paper MCP)
-├─ .claude/skills/              MAIN-AGENT SKILLS (Claude Code auto-discovers)
+│     └─ verify/                verifier-only skills for generated homes
+├─ .agents/skills/              canonical Codex main-agent skills
 │  ├─ elaboration/  consult/  human-summary/  initialize/
-│  └─ write-paper/              the recipe SKILL.md + driver/ scripts + templates/
+│  └─ write-paper/              recipe, role prompts, style, drivers, and templates
 ├─ bin/                         thin wrappers: danus · danus-mcp · write-paper-mcp · human-summary-mcp · codex · consult
 ├─ scripts/                     bootstrap · doctor · services · env · setup/check-codex · start-verify/-dashboard · recover · install-tex
 ├─ docs/                        human docs: getting started · concepts · operating guide · security & trust · …
@@ -121,10 +121,10 @@ Danus/
 | contract | pinned shape | ends |
 |---|---|---|
 | MCP tool set + role gating | 6 tools; `roles.py` `ROLE_TOOLS` (main has NO `fact_submit`; verifier read-only) | `danus.gateway` ↔ worker/main/verifier agents |
-| MCP launch | `python -m danus.gateway` + `DANUS_ROLE` env | `danus.verify` launcher · worker `.codex/config.toml` · `.mcp.json` (main) → `danus.gateway` |
+| MCP launch | current Python/uv + `DANUS_ROLE` env | verifier launcher · worker `.codex/config.toml` · main `.codex/config.toml` → gateway |
 | verify HTTP | `POST /verify {statement,proof}` → `{verification_report,verdict,repair_hints}`; verdict ⟺ no critical_errors & no gaps | `danus.gateway.fact_submit` ↔ `danus.verify` |
 | fact id inputs | `problem_id + sorted(predecessors) + sorted(glossary) + normalized(statement,proof)`; **external_refs EXCLUDED** | `danus.core` ↔ everyone (write-paper reads `external_refs`) |
 | global-memory kinds | the 11 `GLOBAL_KINDS` (incl. `master_guidance`/`elaboration`/`verification`) | `danus.core` ↔ agents · strategy · consult |
 | consult JSON envelope | `{transport,reply,usage,cost_usd,…}` | `danus.strategy` CLI ↔ consult skill |
-| write-paper prompt assets | codex role prompts + style read from `agents/skills/write-paper/` (via `DANUS_WRITE_PAPER_SKILL_DIR`) | `danus.write_paper` assembler ↔ `agents/skills/write-paper/` |
+| main assets | one canonical source under `.agents/skills/`; worker/verifier skills stay isolated under `agents/skills/` | Codex main + authoring assemblers ↔ canonical assets |
 | env-var contract | `DANUS_* / CODEX_* / VERIFY_* / CONSULT_*` names; the codex CALL + env (bin/model/effort/PATH/`exec` prefix) is resolved through the shared `danus.codex` launcher: neutral `DANUS_CODEX_BIN` / `DANUS_CODEX_MODEL` / `DANUS_CODEX_EFFORT` + per-service `DANUS_{VERIFY,WRITE_PAPER,HUMAN_SUMMARY}_{MODEL,EFFORT}` overrides | `danus.codex` + `config/` + `scripts/env.sh` ↔ every codex-exec site (`danus.execution.loop` · `danus.verify.launcher` · `danus.authoring.driver`) |

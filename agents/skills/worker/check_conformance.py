@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/env python
 """Conformance check for the worker proving skills.
 
 Asserts, for every skill folder next to this script:

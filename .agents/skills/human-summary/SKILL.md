@@ -50,7 +50,7 @@ returns a small dict:
 
 You never read the fact graph and never write the report prose; the tool owns
 both. If the operator asks for a different language/register, that is a property
-of the writer prompt (`agents/skills/human-summary/REPORT_WRITER_PROMPT.md`,
+of the writer prompt (`.agents/skills/human-summary/REPORT_WRITER_PROMPT.md`,
 operator-editable) — the register rule (narrative in the operator's language,
 **all standard math terminology in English**) and the five-section structure are
 locked there, not here.
@@ -60,7 +60,7 @@ locked there, not here.
 Once you have a clean `report.md`, render it to a self-contained PDF:
 
 ```bash
-bash "${CLAUDE_SKILL_DIR}/render_pdf.sh" <report.md> <out.pdf> "Title"
+bash ".agents/skills/human-summary/render_pdf.sh" <report.md> <out.pdf> "Title"
 ```
 
 This server-renders markdown + KaTeX into self-contained HTML and prints it to
@@ -124,7 +124,7 @@ progress report, not a publication artifact.
 - A **headless Chrome / Chromium** binary — resolved via `DANUS_CHROME_BIN` (from
   `scripts/env.sh`) or a `google-chrome` on PATH. This is a local PDF-render
   binary only; it is unrelated to any browser transport. Confirm with
-  `bash "${CLAUDE_SKILL_DIR}/doctor.sh"`.
+  `bash ".agents/skills/human-summary/doctor.sh"`.
 - **node** (provisioned by `scripts/bootstrap.sh`) + the pinned node deps
   (`markdown-it`, `katex`) in `package.json`. `render_pdf.sh` installs them once if
   absent; the KaTeX CSS is then vendored from the local install, so subsequent

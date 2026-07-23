@@ -4,7 +4,7 @@ Reads an elaboration (``--file`` / ``--stdin``), sends it to a strong model via
 the chosen transport, and prints the pinned JSON envelope on stdout. The caller
 records ``reply`` verbatim as ``master_guidance`` and dispatches workers from it.
 
-Entry point: ``python -m danus.strategy`` (bin/consult wraps this). Exit 0 on
+Entry point: ``consult`` (or ``python -m danus.strategy``). Exit 0 on
 success; non-zero on empty prompt / missing key / ``off``.
 """
 
@@ -18,6 +18,8 @@ import sys
 from dataclasses import replace
 from pathlib import Path
 from typing import Any, Dict, Optional
+
+from danus import runtime
 
 from .config import (
     load_claude_api_config, load_claude_code_config, load_config, resolve_transport,
@@ -80,6 +82,7 @@ def _build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: Optional[list] = None) -> int:
+    runtime.configure_environment()
     args = _build_parser().parse_args(argv)
 
     prompt = sys.stdin.read() if args.stdin else Path(args.file).read_text(encoding="utf-8")

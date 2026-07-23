@@ -1,0 +1,4 @@
+include .agents/skills/human-summary/REPORT_WRITER_PROMPT.md
+recursive-include .agents/skills/write-paper/boilerplate *
+recursive-include .agents/skills/write-paper/roles *
+recursive-include .agents/skills/write-paper/style *

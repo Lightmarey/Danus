@@ -1,7 +1,7 @@
 # Danus — Operating Guide
 
 How to run a project end to end, from the operator's seat. You do this by **talking
-to the main agent** (Claude Code) in natural language; it runs the CLI verbs and
+to the **Codex main agent** in natural language; it runs the CLI verbs and
 tools for you. Read `concepts.md` first; set up with `getting-started.md`.
 
 > This guide describes the human workflow. Command/tool details are in
@@ -59,7 +59,7 @@ new state:
 Cadence is roughly: a strategy consult every ~2h, a human-readable summary every
 ~1h, while your session is active. **When your session is inactive, only the
 workers keep looping** — no auto strategy beats fire (there is no resident cron).
-For unattended operation see `operations.md` (the tmux example).
+For unattended worker operation see `operations.md`.
 
 ## 3. Workers prove; facts accumulate
 
@@ -72,7 +72,7 @@ Monitor with:
 
 ```bash
 danus status <p>                          # per-worker liveness + round + last fact id
-bash scripts/services.sh up dashboard <p> # then port-forward :8099 for a visual view
+uv run danus services up dashboard <p> # then open or forward :8099 for a visual view
 ```
 
 You never hand-edit the truth stores and never write facts yourself — the fact
@@ -119,7 +119,7 @@ without one.
 - The pipeline drafts, compiles (a hard gate), audits + verifies citations online,
   and re-verifies the whole paper as written through a dedicated paper-math
   verifier before delivery. See the write-paper skill README
-  (`.claude/skills/write-paper/README.md`).
+  (`.agents/skills/write-paper/README.md`).
 
 ## 6. Anything that leaves the machine is your call
 

@@ -5,7 +5,8 @@ Danus has two control surfaces:
 1. **The `danus` CLI** — lifecycle verbs you (or the main agent on your behalf) run
    to manage projects and workers.
 2. **The MCP tools** — what the main agent calls in-session. Three MCP servers are
-   wired in `.mcp.json`: the role-gated **`danus`** gateway, **`write-paper`**, and
+   wired in `.codex/config.toml`: the role-gated **`danus`** gateway,
+   **`write-paper`**, and
    **`human-summary`**.
 
 You mostly talk to the main agent in natural language; it runs the CLI verbs and
@@ -15,8 +16,10 @@ calls the tools. This page is the reference for what exists.
 
 ## The `danus` CLI
 
-Run via `bin/danus` (which sources `scripts/env.sh`). Every verb names a project;
-there is no default project.
+Run via `uv run danus`. The Python entry point loads the non-executable
+`config/codex.env`, `config/danus.env`, and `runtime/runtime.env` chain with
+explicit process environment values taking precedence. Every verb names a
+project; there is no default project.
 
 | verb | form | what it does |
 |---|---|---|
@@ -34,6 +37,9 @@ Notes:
 - `start` launches each worker detached in its own process group, so it survives
   your session; `stop --force` can therefore kill a live worker and its in-flight
   codex child.
+- `danus codex api|login|status` configures the shared Codex backend for every
+  role without Bash. The API provider stores only the environment-variable name,
+  never the key itself.
 
 ---
 
@@ -86,7 +92,7 @@ context. Each tool returns a small honest envelope (status + paths + flags + a
 Most tools take an optional `paper_id` — a project can hold multiple papers (the
 default paper uses the legacy `<project>/paper/` workspace; any other `paper_id`
 gets an isolated `<project>/papers/<paper_id>/`). See the write-paper skill README
-(`.claude/skills/write-paper/README.md`) for the full workflow.
+(`.agents/skills/write-paper/README.md`) for the full workflow.
 
 ---
 
@@ -103,7 +109,7 @@ language in `OPERATOR.md`).
 
 ## Main-agent skills (invoked in-session, not MCP tools)
 
-The main agent also has Claude Code **skills** under `.claude/skills/`:
+The main agent has Codex skills under `.agents/skills/`:
 `initialize` (first-run setup), `elaboration` (the strategy synthesis),
 `consult` (the strategy consult), `human-summary`, and `write-paper`. These
 orchestrate the tools and CLI above; see `operating-guide.md` for how they fit the
@@ -111,17 +117,19 @@ lifecycle.
 
 ---
 
-## The persistent services (run via `scripts/services.sh`)
+## The persistent services (run via `uv run danus services`)
 
 | service | port | required? |
 |---|---|---|
 | `verify` | 127.0.0.1:8091 | **yes** — no verify ⇒ `fact_submit` fails ⇒ no facts |
 | `dashboard` | 127.0.0.1:8099 | optional (read-only view; port-forward to see it) |
 
-```bash
-bash scripts/services.sh up verify            # required before any proving
-bash scripts/services.sh up dashboard <p>     # optional
-bash scripts/services.sh status | logs <svc> [-f] | down <svc>|all
+```powershell
+uv run danus services up verify
+uv run danus services up dashboard <project>
+uv run danus services status
+uv run danus services logs <service>
+uv run danus services down <service-or-all>
 ```
 
 See `operations.md` for the runbook and `configuration.md` for the environment

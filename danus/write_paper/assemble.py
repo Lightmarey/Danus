@@ -22,7 +22,7 @@ Two problems this solves:
    Every role's prompt embeds ``roles/AGENTS.md`` verbatim (the PRIME DIRECTIVE).
 
 The fixed files live in the skill dir (operator-editable), located at call time
-via ``DANUS_WRITE_PAPER_SKILL_DIR`` (default ``<repo_root>/agents/skills/write-paper``);
+via ``DANUS_WRITE_PAPER_SKILL_DIR`` (default ``<repo_root>/.agents/skills/write-paper``);
 never read at import time. Every fixed file is read verbatim, in full — no
 summarizing, no truncation. Fact reading uses ``danus.core.FactGraph`` (never
 re-mining citations from prose).
@@ -42,13 +42,11 @@ from danus.authoring.common import (
     read_project,
     section,
 )
+from danus.authoring.assets import skill_dir as shipped_skill_dir
 from danus.core import FactGraph
 from danus.core.factgraph import parse_frontmatter, statement_of
 
-# The package lives at <repo_root>/danus/write_paper/assemble.py, so the repo root is
-# two parents up; the default skill dir is the shipped write-paper skill.
-_REPO_ROOT = Path(__file__).resolve().parents[2]
-_DEFAULT_SKILL_DIR = _REPO_ROOT / "agents" / "skills" / "write-paper"
+_DEFAULT_SKILL_DIR = shipped_skill_dir("write-paper")
 
 ROLES = ("writer", "auditor", "reviser", "verifier")
 

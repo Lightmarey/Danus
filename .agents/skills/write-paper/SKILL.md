@@ -252,10 +252,10 @@ shape on its own line):
 ### 1. Seed the reference ledger
 
 ```bash
-python3 .../write-paper/driver/seed_ledger.py <project_dir> --headline <headline_fact_ids> --out <project>/paper/REFERENCE_LEDGER.md
+uv run python .agents/skills/write-paper/driver/seed_ledger.py <project_dir> --headline <headline_fact_ids> --out <project>/paper/REFERENCE_LEDGER.md
 # multiple papers: add --paper <paper_id> to scope the closure to that paper's
 # recorded target and (with no --out) write the ledger into its own workspace:
-python3 .../write-paper/driver/seed_ledger.py <project_dir> --paper <paper_id>
+uv run python .agents/skills/write-paper/driver/seed_ledger.py <project_dir> --paper <paper_id>
 ```
 
 This aggregates the `external_refs` of the **target-closure facts** into
@@ -388,7 +388,7 @@ paper_write(project=<project>, headline=[<target fact ids>], paper_id=<paper_id|
   write-paper does not always mean the whole problem is proven; a *partial* result
   can be written up while the swarm keeps exploring the rest. **If you already
   stopped the swarm because the whole problem is proved** (the completion rule in
-  `CLAUDE.md` / the main-agent contract), this fork is moot — the swarm is already
+  `AGENTS.md` / the main-agent contract), this fork is moot — the swarm is already
   down; just write the paper. **Otherwise (a partial result, exploration ongoing),
   you decide:** at the start of write-paper (Stage 0) surface the fork to the operator
   — *"Start the paper — stop the swarm's exploration, or keep it running? (A partial
@@ -407,7 +407,7 @@ closure** (each fact's `## statement` / `## proof` / `## intuition` + the
 predecessor DAG, verbatim); and, iff the brief's `structural_exemplar` names an
 existing anchor, that ONE anchor as a structural exemplar. Those codex-facing
 fixed files (`roles/`, `style/`, `boilerplate/`) live under
-`agents/skills/write-paper/`, **not here** — the MCP reads and embeds them; you never do. It
+`.agents/skills/write-paper/` — the MCP reads and embeds them; you never do. It
 writes codex's stdout to `<project>/paper/main.tex` (a full `\documentclass{amsart}`
 … `\end{document}`, real `\ref`/`\cite`, manual `\begin{thebibliography}{99}`).
 
@@ -1004,7 +1004,7 @@ yours:
    part for the paper's main theorem takes the other designated results as
    established and closes the argument.
 3. **Drive the verifier yourself**, mirroring the tool: read
-   `agents/skills/write-paper/roles/PAPER_MATH_VERIFIER_PROMPT.md` (and
+   `.agents/skills/write-paper/roles/PAPER_MATH_VERIFIER_PROMPT.md` (and
    `roles/AGENTS.md`), append the confirmed `REFERENCE_LEDGER.md` and the part
    document, and run a fresh `bin/codex exec --sandbox read-only` per part; read
    the final verdict JSON from its output. Every part must return `correct`. A

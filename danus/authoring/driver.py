@@ -56,7 +56,7 @@ DEFAULT_TIMEOUT = 7200
 def _gateway_config_arg(gateway_role: str) -> str:
     """The ``-c`` MCP-injection string that mounts the danus gateway into codex,
     mirroring ``danus.verify.launcher._mcp_config_arg`` exactly: it runs the
-    installed package (``python3 -m danus.gateway``) with the given ``DANUS_ROLE``,
+    current interpreter with ``-m danus.gateway`` and the given ``DANUS_ROLE``,
     independent of CODEX_HOME. Reuse ``DANUS_ROLE=verifier`` for minimum privilege —
     that gateway role exposes ONLY ``search_arxiv_theorems`` (read-only). We do NOT
     define a new gateway role for the paper verifier."""

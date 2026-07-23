@@ -4,7 +4,7 @@ Day-to-day operation of a Danus deployment: the persistent services, health chec
 recovery after a restart, and unattended-operation helpers.
 
 > In normal operation you do not run these commands yourself — you talk to the
-> **main agent** (Claude Code), and it runs them for you. This page documents what
+> **Codex main agent**, and it runs them for you. This page documents what
 > happens underneath, and doubles as your fallback for the moments the main agent
 > is not there to act (a fresh host restart, a session that will not start,
 > debugging the stack by hand).
@@ -48,10 +48,10 @@ of `up` invocations, so a restart can replay them (see recovery).
 
 ## Health checks
 
-```bash
+```powershell
 uv run danus-doctor             # full stack configuration/tooling diagnosis
 uv run danus services test      # required verify identity + health only
-bash scripts/check-codex.sh     # one live codex ping + scan recent logs for API errors
+codex mcp list                  # confirm repo MCP configuration is visible
 ```
 
 - `danus services test` is deliberately narrow and exits nonzero unless this
@@ -120,9 +120,8 @@ danus stop   <project> --force  # kill the process group now
 
 Under `examples/ops/` (parameterized; nothing in the engine depends on them):
 
-- `main-agent-tmux.sh` — run Claude Code (the main agent) detached in a tmux
-  session, so strategic beats continue while you are away. **The only unattended
-  mode.**
+- Start `codex` at the repository root for the main-agent session. Worker loops
+  remain detached services managed by `uv run danus`.
 - `strategy-loop.sh <project>` — fire a strategy consult on a cadence
   (`DANUS_STRATEGY_BEAT`, default ~2h) when an elaboration is present.
 - `watchdog.sh <project>` — probe verify `/health` + parse `danus status`; alarm via

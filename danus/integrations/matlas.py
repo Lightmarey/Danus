@@ -88,7 +88,7 @@ def search(query: str, num_results: int = 10, timeout: int = _DEFAULT_TIMEOUT) -
     return {"query": q, "count": len(results), "results": results, "endpoint": _URL}
 
 
-if __name__ == "__main__":  # smoke: python3 -m danus.integrations.matlas "your statement"
+if __name__ == "__main__":  # smoke: uv run python -m danus.integrations.matlas "your statement"
     import sys
 
     out = search(sys.argv[1] if len(sys.argv) > 1

@@ -8,13 +8,12 @@ version = "0.1.0"
 description = "Danus — automated mathematics proof-search orchestration engine"
 readme = "README.md"
 requires-python = ">=3.10"
-license = { text = "Apache-2.0" }
+license = "Apache-2.0"
 authors = [{ name = "Bin Wu" }]
 keywords = ["mathematics", "proof-search", "multi-agent", "llm", "orchestration"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Science/Research",
-    "License :: OSI Approved :: Apache Software License",
     "Operating System :: Microsoft :: Windows",
     "Operating System :: POSIX :: Linux",
     "Programming Language :: Python :: 3",
@@ -35,6 +34,7 @@ danus-doctor = "danus.doctor:main"
 danus-mcp = "danus.gateway.__main__:main"
 danus-verify = "danus.verify.__main__:main"
 danus-observability = "danus.observability.__main__:main"
+consult = "danus.strategy.cli:main"
 write-paper-mcp = "danus.write_paper.__main__:main"
 human-summary-mcp = "danus.human_summary.__main__:main"
 

@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/env python
 """A stand-in for the ``codex`` CLI, for PLUMBING tests of danus.authoring.driver.
 
 The real driver runs ``codex exec ... -`` with the prompt on stdin and treats

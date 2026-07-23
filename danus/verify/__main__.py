@@ -5,6 +5,9 @@ from __future__ import annotations
 import os
 
 def main() -> int:
+    from danus import runtime
+
+    runtime.configure_environment()
     import uvicorn
 
     from .service import app

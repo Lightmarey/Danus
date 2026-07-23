@@ -53,7 +53,7 @@ From a checkout where the skill can import the `danus.core` package (see the ski
 README on dependencies), seeding the ledger from these facts:
 
 ```bash
-python3 ../../driver/seed_ledger.py project/ --out /tmp/REFERENCE_LEDGER.md
+uv run python ../../driver/seed_ledger.py project/ --out /tmp/REFERENCE_LEDGER.md
 ```
 
 aggregates the two synthetic references below into `unverified` rows — the

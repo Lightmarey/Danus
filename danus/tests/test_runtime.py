@@ -22,6 +22,31 @@ def test_module_cmd_uses_current_python():
     assert cmd[1:] == ["-m", "danus.gateway", "--help"]
 
 
+def test_configure_environment_loads_repo_files_with_process_precedence(
+    tmp_path,
+):
+    (tmp_path / "config").mkdir()
+    (tmp_path / "config" / "codex.env").write_text(
+        "FROM_CODEX=codex\nEXPLICIT=file\nCODEX_BACKEND=api\n", encoding="utf-8"
+    )
+    (tmp_path / "config" / "danus.env").write_text(
+        "FROM_DANUS=$FROM_CODEX-danus\n", encoding="utf-8"
+    )
+    configured = {"EXPLICIT": "process"}
+
+    assert runtime.configure_environment(tmp_path, configured) == tmp_path.resolve()
+    assert configured["FROM_CODEX"] == "codex"
+    assert configured["FROM_DANUS"] == "codex-danus"
+    assert configured["EXPLICIT"] == "process"
+    assert configured["CODEX_HOME"] == str((tmp_path / "runtime" / "codex-home").resolve())
+
+
+def test_chatgpt_backend_uses_normal_codex_home(tmp_path):
+    configured = {"CODEX_BACKEND": "chatgpt"}
+    runtime.configure_environment(tmp_path, configured)
+    assert "CODEX_HOME" not in configured
+
+
 def test_symlink_or_copy_falls_back_to_copy():
     with tempfile.TemporaryDirectory() as d:
         root = Path(d)

@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/env python
 """Seed a paper's REFERENCE_LEDGER from the project's verified facts.
 
 This is the payoff of the structured ``external_refs`` field: every fact records
@@ -19,11 +19,11 @@ side lemmas) would list references the paper never cites.
 If no target is recorded, the seed REFUSES (matching the writer, which will not
 guess). Pass ``--all-facts`` to seed from every fact regardless of the closure.
 
-    python3 seed_ledger.py <project_dir>                       # closure ledger → the paper workspace
-    python3 seed_ledger.py <project_dir> --out L.md
-    python3 seed_ledger.py <project_dir> --headline fact_a fact_b
-    python3 seed_ledger.py <project_dir> --paper thmA          # a non-default paper's workspace
-    python3 seed_ledger.py <project_dir> --all-facts           # legacy: every fact
+    uv run python seed_ledger.py <project_dir>                 # closure ledger → the paper workspace
+    uv run python seed_ledger.py <project_dir> --out L.md
+    uv run python seed_ledger.py <project_dir> --headline fact_a fact_b
+    uv run python seed_ledger.py <project_dir> --paper thmA    # a non-default paper's workspace
+    uv run python seed_ledger.py <project_dir> --all-facts     # legacy: every fact
 
 The output is a starting point, not the final bibliography: the auditor verifies
 authors/title/venue/year/arXiv id and flips ``unverified`` to ``verified``.

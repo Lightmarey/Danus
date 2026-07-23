@@ -50,11 +50,11 @@ _danus_path="$DANUS_ROOT/bin"
 [ -n "${DANUS_VENV:-}" ]     && [ -d "$DANUS_VENV/bin" ] && _danus_path="$_danus_path:$DANUS_VENV/bin"
 case ":$PATH:" in *":$_danus_path:"*) : ;; *) export PATH="$_danus_path:$PATH" ;; esac
 
-# 5) the python the engine runs on (venv if bootstrapped, else system python3)
+# 5) the python the engine runs on (venv if bootstrapped, else system python)
 if [ -n "${DANUS_VENV:-}" ] && [ -x "$DANUS_VENV/bin/python" ]; then
   export DANUS_PY="${DANUS_PY:-$DANUS_VENV/bin/python}"
 else
-  export DANUS_PY="${DANUS_PY:-$(command -v python3 || true)}"
+  export DANUS_PY="${DANUS_PY:-$(command -v python || true)}"
 fi
 
 # silent unless DANUS_ENV_VERBOSE=1

@@ -1,0 +1,17 @@
+[mcp_servers.danus]
+command = "uv"
+args = ["run", "danus-mcp"]
+cwd = "."
+env = { DANUS_ROLE = "main", DANUS_AUTHOR = "main_agent" }
+
+[mcp_servers.write-paper]
+command = "uv"
+args = ["run", "write-paper-mcp"]
+cwd = "."
+env = { DANUS_ROLE = "main", DANUS_AUTHOR = "main_agent" }
+
+[mcp_servers.human-summary]
+command = "uv"
+args = ["run", "human-summary-mcp"]
+cwd = "."
+env = { DANUS_ROLE = "main", DANUS_AUTHOR = "main_agent" }
