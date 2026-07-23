@@ -83,6 +83,20 @@ def test_spawn_detached_runs_child():
         assert marker.read_text(encoding="utf-8") == "ok"
 
 
+def test_process_identity_posix_ps_fallback(monkeypatch):
+    class _Completed:
+        returncode = 0
+        stdout = "Mon Jul 23 16:00:00 2026\n"
+
+    monkeypatch.setattr(runtime, "is_windows", lambda: False)
+    monkeypatch.setattr(
+        runtime.Path, "read_text",
+        lambda *args, **kwargs: (_ for _ in ()).throw(OSError("no procfs")),
+    )
+    monkeypatch.setattr(runtime.subprocess, "run", lambda *args, **kwargs: _Completed())
+    assert runtime.process_identity(123) == "posix:Mon Jul 23 16:00:00 2026"
+
+
 def test_configure_windows_api_sets_explicit_signatures():
     class _Fn:
         def __init__(self):
@@ -96,6 +110,7 @@ def test_configure_windows_api_sets_explicit_signatures():
             self.Process32NextW = _Fn()
             self.OpenProcess = _Fn()
             self.GetExitCodeProcess = _Fn()
+            self.GetProcessTimes = _Fn()
             self.TerminateProcess = _Fn()
             self.CloseHandle = _Fn()
 
@@ -109,6 +124,7 @@ def test_configure_windows_api_sets_explicit_signatures():
     assert kernel32.OpenProcess.argtypes == [runtime.wintypes.DWORD, runtime.wintypes.BOOL, runtime.wintypes.DWORD]
     assert kernel32.OpenProcess.restype is runtime.wintypes.HANDLE
     assert kernel32.GetExitCodeProcess.restype is runtime.wintypes.BOOL
+    assert kernel32.GetProcessTimes.restype is runtime.wintypes.BOOL
     assert kernel32.TerminateProcess.argtypes == [runtime.wintypes.HANDLE, runtime.wintypes.UINT]
     assert kernel32.CloseHandle.argtypes == [runtime.wintypes.HANDLE]
 

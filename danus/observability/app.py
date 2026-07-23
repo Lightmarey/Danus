@@ -345,6 +345,19 @@ def index() -> FileResponse:
 app.mount("/static", StaticFiles(directory=STATIC), name="static")
 
 
+@app.get("/health")
+def health() -> Dict[str, Any]:
+    from danus.runtime import process_identity
+
+    pid = os.getpid()
+    return {
+        "status": "ok",
+        "pid": pid,
+        "identity": process_identity(pid),
+        "project": str(_project_dir().resolve()),
+    }
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description="Danus read-only fact-graph + global-memory dashboard.")
     ap.add_argument("--project", help="project dir (or set DANUS_PROJECT_DIR)")

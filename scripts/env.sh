@@ -52,7 +52,7 @@ case ":$PATH:" in *":$_danus_path:"*) : ;; *) export PATH="$_danus_path:$PATH" ;
 
 # 5) the python the engine runs on (venv if bootstrapped, else system python3)
 if [ -n "${DANUS_VENV:-}" ] && [ -x "$DANUS_VENV/bin/python" ]; then
-  export DANUS_PY="$DANUS_VENV/bin/python"
+  export DANUS_PY="${DANUS_PY:-$DANUS_VENV/bin/python}"
 else
   export DANUS_PY="${DANUS_PY:-$(command -v python3 || true)}"
 fi

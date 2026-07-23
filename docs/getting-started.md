@@ -82,17 +82,18 @@ It is **backend-aware**, exits `0` on success, and appends a trace line to
 
 ## 4. Bring up the verify service (REQUIRED)
 
-```bash
-bash scripts/services.sh up verify
+```powershell
+uv run danus services up verify
 ```
 
 **Without the verify service, `fact_submit` fails and no facts are ever produced.**
-`services.sh` `setsid`-detaches it so it survives your shell. See `operations.md`.
+The native manager detaches it with the current uv Python on Windows and POSIX.
+See `operations.md`.
 
 ## 5. Health check
 
-```bash
-bash scripts/doctor.sh
+```powershell
+uv run danus-doctor
 ```
 
 Reports green / `FAIL` / `warn` across config, python + deps, node, the codex

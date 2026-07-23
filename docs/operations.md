@@ -11,17 +11,22 @@ recovery after a restart, and unattended-operation helpers.
 
 ## The persistent services
 
-Two services must be managed via `scripts/services.sh`, which `setsid`-detaches each
-so it **survives your shell / SSH session ending** (a bare `&` would die with the
-shell). Start them only this way.
+Use the native Python service manager. It detaches each service with the current
+uv Python and works on Windows and POSIX.
 
-```bash
-bash scripts/services.sh up verify            # REQUIRED — no verify ⇒ fact_submit fails ⇒ no facts
-bash scripts/services.sh up dashboard <p>     # optional read-only view of project <p>
-bash scripts/services.sh status               # what's up (+ a verify /health probe)
-bash scripts/services.sh logs <svc> [-f]      # tail a service log
-bash scripts/services.sh down <svc> | all     # stop
+```powershell
+uv run danus services up verify               # REQUIRED
+uv run danus services up dashboard <p>        # optional project dashboard
+uv run danus services status [--json]
+uv run danus services test [--json]
+uv run danus services logs <svc>              # last 50 lines
+uv run danus services down verify
+uv run danus services down dashboard
+uv run danus services down all
 ```
+
+The POSIX `scripts/services.sh` wrapper remains available for existing
+deployments; new cross-platform automation should use `danus services`.
 
 - **verify** — `127.0.0.1:8091`. The correctness gate. Must be up before starting
   any workers.
@@ -30,25 +35,28 @@ bash scripts/services.sh down <svc> | all     # stop
 
 > **Shared-host caveat.** These ports are per-host, not per-deployment. If a second
 > Danus deployment (another user/checkout) is already bound to `8091`, your
-> `services.sh up verify` will **fail to bind** (`address already in use`). A bare
+> `danus services up verify` will refuse to start. A bare
 > health probe cannot tell your verify from the other one, so `/health` now
-> **self-identifies with the serving process pid**: `doctor.sh` and `services.sh
+> **self-identifies with the serving process pid**: `danus services
 > status`/`test` match that pid against your `runtime/run/verify.pid` and report the
 > port as **`FAIL … answered by a FOREIGN process`** instead of a false `ok` when
 > another deployment holds it. On a shared host, give each deployment its own
 > `VERIFY_PORT` / `DASHBOARD_PORT` (`config/danus.env`).
 
-`services.sh` keeps a pid registry under `runtime/run/` and an `autostart` manifest
+`danus services` keeps exact PID files under `runtime/run/` and an `autostart` manifest
 of `up` invocations, so a restart can replay them (see recovery).
 
 ## Health checks
 
 ```bash
-bash scripts/doctor.sh          # green / FAIL / warn across the whole stack
+uv run danus-doctor             # full stack configuration/tooling diagnosis
+uv run danus services test      # required verify identity + health only
 bash scripts/check-codex.sh     # one live codex ping + scan recent logs for API errors
 ```
 
-- `doctor.sh` is read-only: config files, python + verify deps, node, the codex
+- `danus services test` is deliberately narrow and exits nonzero unless this
+  deployment's verify service is definitively up. It does not duplicate doctor.
+- `danus-doctor` is read-only: config files, python + verify deps, node, the codex
   wrapper + backend, a live verify `/health`, and soft checks for `pdflatex` /
   Chrome. Run it whenever something looks off. A real healthy run (chatgpt backend,
   no TeX installed):

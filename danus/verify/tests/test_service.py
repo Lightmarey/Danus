@@ -71,6 +71,7 @@ def test_health_ok():
     # against runtime/run/verify.pid to distinguish OUR verify from a foreign
     # deployment holding the same port on a shared host).
     assert isinstance(body["pid"], int) and body["pid"] > 0
+    assert isinstance(body["identity"], str) and body["identity"]
 
 
 # --------------------------------------------------------------------------- #

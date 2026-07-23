@@ -18,6 +18,7 @@ from typing import Any, Dict
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 
+from danus.runtime import process_identity
 from .launcher import _allocate_run_id, run_codex_verification
 from .prechecks import run_prechecks
 
@@ -37,7 +38,8 @@ async def health() -> Dict[str, Any]:
     # `pid` self-identifies this instance: a health probe alone cannot tell OUR
     # verify from another deployment's verify holding the same port on a shared
     # host — callers match this pid against runtime/run/verify.pid to be sure.
-    return {"status": "ok", "pid": os.getpid()}
+    pid = os.getpid()
+    return {"status": "ok", "pid": pid, "identity": process_identity(pid)}
 
 
 @app.post("/verify")

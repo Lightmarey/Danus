@@ -339,6 +339,8 @@ def build_parser() -> argparse.ArgumentParser:
     sp = sub.add_parser("stop", help="stop worker loop(s)")
     sp.add_argument("target", help="<project> or <project>/<worker>")
     sp.add_argument("--force", action="store_true", help="kill now (else finish current round)")
+    from danus import services
+    services.configure_parser(sub)
     return p
 
 
@@ -381,4 +383,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     elif args.cmd == "stop":
         for r in do_stop(args.target, force=args.force):
             print(f"{r['worker']}: {r['result']}")
+    elif args.cmd == "services":
+        from danus import services
+        return services.dispatch(args)
     return 0

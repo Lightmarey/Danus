@@ -92,6 +92,15 @@ def test_main_happy_path_runs_uvicorn():
     assert calls.get("application") is app.app
 
 
+def test_health_identifies_pid_and_canonical_project():
+    with tempfile.TemporaryDirectory() as d, _env(DANUS_DASHBOARD_PROJECT=d):
+        body = app.health()
+    assert body["status"] == "ok"
+    assert body["pid"] == os.getpid()
+    assert body["identity"]
+    assert body["project"] == str(Path(d).resolve())
+
+
 def test_module_entrypoint_runs_main():
     orig = app.main
     ran = {"v": False}

@@ -12,6 +12,7 @@ import contextlib
 import ctypes
 from ctypes import wintypes
 import os
+import re
 import shutil
 import signal
 import subprocess
@@ -44,6 +45,11 @@ def _configure_windows_api(kernel32) -> object:
     kernel32.OpenProcess.restype = wintypes.HANDLE
     kernel32.GetExitCodeProcess.argtypes = [wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD)]
     kernel32.GetExitCodeProcess.restype = wintypes.BOOL
+    kernel32.GetProcessTimes.argtypes = [
+        wintypes.HANDLE, ctypes.c_void_p, ctypes.c_void_p,
+        ctypes.c_void_p, ctypes.c_void_p,
+    ]
+    kernel32.GetProcessTimes.restype = wintypes.BOOL
     kernel32.TerminateProcess.argtypes = [wintypes.HANDLE, wintypes.UINT]
     kernel32.TerminateProcess.restype = wintypes.BOOL
     kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
@@ -73,6 +79,55 @@ def current_python(*override_env_names: str) -> str:
 
 def module_cmd(module: str, *args: str, python: Optional[str] = None) -> List[str]:
     return [python or current_python(), "-m", module, *args]
+
+
+def load_env_files(root: str | Path, environ: Optional[Dict[str, str]] = None) -> Dict[str, str]:
+    """Load Danus KEY=value files without executing shell code.
+
+    Existing environment values win. Files are read in the same order as the
+    legacy env.sh: codex, danus, then machine-derived runtime settings.
+    """
+    root = Path(root)
+    base = dict(os.environ if environ is None else environ)
+    protected = set(base)
+    loaded: Dict[str, str] = {}
+    for path in (
+        root / "config" / "codex.env",
+        root / "config" / "danus.env",
+        root / "runtime" / "runtime.env",
+    ):
+        if not path.is_file():
+            continue
+        for number, raw in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+            line = raw.strip()
+            if not line or line.startswith("#"):
+                continue
+            if line.startswith("export "):
+                line = line[7:].lstrip()
+            if "=" not in line:
+                raise ValueError(f"{path}:{number}: expected KEY=value")
+            key, value = line.split("=", 1)
+            key, value = key.strip(), value.strip()
+            if not key or not (key[0].isalpha() or key[0] == "_") or not all(
+                c.isalnum() or c == "_" for c in key
+            ):
+                raise ValueError(f"{path}:{number}: invalid environment name")
+            if value[:1] in ("'", '"'):
+                quote = value[0]
+                if len(value) < 2 or value[-1] != quote:
+                    raise ValueError(f"{path}:{number}: unterminated quote")
+                value = value[1:-1]
+            else:
+                value = value.split(" #", 1)[0].rstrip()
+            value = re.sub(
+                r"\$(?:\{([A-Za-z_][A-Za-z0-9_]*)\}|([A-Za-z_][A-Za-z0-9_]*))",
+                lambda match: base.get(match.group(1) or match.group(2), ""),
+                value,
+            )
+            if key not in protected:
+                loaded[key] = value
+                base[key] = value
+    return loaded
 
 
 def mcp_server_spec(module: str, *, env: Optional[Dict[str, str]] = None,
@@ -186,6 +241,49 @@ def pid_alive(pid: Optional[int]) -> bool:
         return True
 
 
+def process_identity(pid: Optional[int]) -> Optional[str]:
+    """Return a token that changes when an OS PID is reused."""
+    if not pid:
+        return None
+    if is_windows():
+        kernel32 = _kernel32()
+        handle = kernel32.OpenProcess(_PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+        if not handle:
+            return None
+        try:
+            creation = wintypes.FILETIME()
+            exit_time = wintypes.FILETIME()
+            kernel = wintypes.FILETIME()
+            user = wintypes.FILETIME()
+            if not kernel32.GetProcessTimes(
+                handle, ctypes.byref(creation), ctypes.byref(exit_time),
+                ctypes.byref(kernel), ctypes.byref(user),
+            ):
+                return None
+            ticks = (creation.dwHighDateTime << 32) | creation.dwLowDateTime
+            return f"windows:{ticks}"
+        finally:
+            kernel32.CloseHandle(handle)
+    try:
+        fields = Path(f"/proc/{pid}/stat").read_text(encoding="ascii").rsplit(")", 1)[1].split()
+        return f"linux:{fields[19]}"
+    except (OSError, IndexError):
+        pass
+    try:
+        completed = subprocess.run(
+            ["ps", "-o", "lstart=", "-p", str(pid)],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            timeout=2,
+            check=False,
+        )
+        started = completed.stdout.strip()
+        return f"posix:{started}" if completed.returncode == 0 and started else None
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+
+
 def spawn_detached(cmd: List[str], *, cwd: str | Path, env: Dict[str, str],
                    stdout, stderr=None, stdin=None) -> subprocess.Popen:
     return spawn_process(
@@ -262,6 +360,11 @@ def _windows_descendant_pids(pid: int) -> List[int]:
         descendants.append(child)
         stack.extend(parents.get(child, ()))
     return descendants
+
+
+def process_tree_pids(pid: int) -> List[int]:
+    """Return the known process tree rooted at pid (used during PID handoff)."""
+    return [pid, *_windows_descendant_pids(pid)] if is_windows() else [pid]
 
 
 def _wait_for_dead_pids(pids: List[int], *, timeout_seconds: float) -> List[int]:

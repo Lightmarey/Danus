@@ -91,25 +91,29 @@ examples/              unattended-ops examples + a toy project
 
 ## Quickstart
 
-```bash
-# 1. provision the toolchain (Node + venv + codex CLI) into runtime/
-bash scripts/bootstrap.sh
+```powershell
+# 1. create the Python environment (native Windows, macOS, or Linux)
+uv sync
 
 # 2. configure — copy the templates and fill in YOUR keys (never committed)
-cp config/danus.env.example config/danus.env
-cp config/codex.env.example config/codex.env      # BYO OpenAI-compatible endpoint + key
+Copy-Item config/danus.env.example config/danus.env
+Copy-Item config/codex.env.example config/codex.env
 
 # 3. health check + bring up the verify service (REQUIRED for any proving)
-bash scripts/doctor.sh
-bash scripts/services.sh up verify
+uv run danus-doctor
+uv run danus services up verify
+uv run danus services status
 
 # 4. connect Claude Code rooted at this repo dir; on first run it runs `initialize`.
 #    --dangerously-skip-permissions lets the main agent operate autonomously (no
 #    per-action permission prompts). That is the intended mode, but it means the
 #    agent acts with your shell privileges — run Danus on an isolated, disposable
 #    host, and read docs/security-and-trust.md first.
-claude --dangerously-skip-permissions
+codex
 ```
+
+On POSIX hosts the existing `scripts/*.sh` wrappers remain available, but are
+not required for service management.
 
 Everything runs on your own keys (BYO). Workers and the verifier run on your codex
 backend; the strategy consult runs on a top-tier reasoning model over the `gpt_pro`
