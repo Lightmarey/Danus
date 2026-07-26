@@ -38,14 +38,14 @@ def test_resolve_project_by_name_and_escape_validation():
                 pass
 
 
-def test_resolve_project_by_name_without_agents_root_raises():
-    # a project name given but DANUS_AGENTS_ROOT unset -> raise (common.py:45)
+def test_resolve_project_by_name_without_agents_root_uses_default():
+    # without an override, project names resolve under cwd/runtime/projects
     with env(DANUS_AGENTS_ROOT=None, DANUS_PROJECT_DIR=None):
         try:
             common.resolve_project("some_proj")
-            assert False, "project name without DANUS_AGENTS_ROOT should raise"
+            assert False, "missing default project should raise"
         except RuntimeError as e:
-            assert "DANUS_AGENTS_ROOT" in str(e)
+            assert "no such project" in str(e)
 
 
 def test_body_sections_no_heading_strips_frontmatter_fence():
@@ -150,8 +150,8 @@ def main() -> None:
     print("  [ok] resolve_project by name + path-escape validation")
     test_resolve_project_fallback_and_missing()
     print("  [ok] resolve_project DANUS_PROJECT_DIR fallback + missing raises")
-    test_resolve_project_by_name_without_agents_root_raises()
-    print("  [ok] resolve_project by name without DANUS_AGENTS_ROOT raises")
+    test_resolve_project_by_name_without_agents_root_uses_default()
+    print("  [ok] resolve_project by name uses cwd default")
     test_body_sections_no_heading_strips_frontmatter_fence()
     print("  [ok] body_sections no-heading -> strips frontmatter fence, keeps body")
     test_body_sections_no_heading_no_frontmatter_returns_content()

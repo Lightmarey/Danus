@@ -1773,10 +1773,17 @@ def style_distill(
             if not extractor:
                 warnings.append(f"{rel}: pdftotext not found")
                 continue
-            cp = subprocess.run(
-                [extractor, str(path), "-"],
-                capture_output=True, text=True, errors="replace", check=False,
-            )
+            from danus.authoring.summary import _run_with_timeout
+            try:
+                cp = _run_with_timeout(
+                    [extractor, str(path), "-"], env=dict(os.environ),
+                    timeout_seconds=int(os.environ.get(
+                        "DANUS_PDFTOTEXT_TIMEOUT_SECONDS", "60",
+                    )),
+                )
+            except RuntimeError as exc:
+                warnings.append(f"{rel}: {exc}")
+                continue
             if cp.returncode:
                 warnings.append(f"{rel}: pdftotext exited {cp.returncode}")
                 continue

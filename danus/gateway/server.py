@@ -68,11 +68,11 @@ def _project(project: Optional[str] = None) -> Path:
     several projects. With no ``project`` we fall back to ``DANUS_PROJECT_DIR``
     (a worker is always pinned this way). The name is validated to a single path
     segment — no ``/`` or ``..`` — so it can never escape the agents root."""
-    agents_root = os.environ.get("DANUS_AGENTS_ROOT", "")
+    agents_root = os.environ.get("DANUS_AGENTS_ROOT") or str(
+        Path.cwd() / "runtime" / "projects"
+    )
     project_dir = os.environ.get("DANUS_PROJECT_DIR", "")
     if project:
-        if not agents_root:
-            raise RuntimeError("DANUS_AGENTS_ROOT is not set; cannot resolve a project by name")
         if not _PROJECT_NAME_RE.match(project):
             raise RuntimeError(f"invalid project name: {project!r}")
         pdir = Path(agents_root) / project

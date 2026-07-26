@@ -20,7 +20,7 @@ _IDENTIFIER = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]*\Z")
 
 
 def repo_root() -> Path:
-    return Path(__file__).resolve().parents[1]
+    return Path(os.environ.get("DANUS_ROOT", Path.cwd())).resolve()
 
 
 def _identifier(value: str, label: str = "identifier") -> str:
@@ -377,6 +377,25 @@ def test(*, root: Optional[Path] = None) -> List[Dict]:
     return status(root=root)
 
 
+def recover(*, root: Optional[Path] = None) -> List[Dict]:
+    """Replay the validated service manifest after a host restart.
+
+    ``up`` performs the identity/health checks and clears only genuinely stale
+    PID evidence.  Live foreign or PID-reused processes are never killed or
+    overwritten.  Worker loops are deliberately outside this manifest.
+    """
+    env = service_env(root)
+    run, _ = _dirs(env)
+    entries = _manifest(run)  # validate the complete file before any mutation
+    rows: List[Dict] = []
+    for entry in entries:
+        if entry == "verify":
+            rows.append(up("verify", root=root))
+        else:
+            rows.append(up("dashboard", entry.removeprefix("dashboard "), root=root))
+    return rows
+
+
 def configure_parser(sub) -> None:
     services = sub.add_parser("services", help="manage verify and dashboard services")
     commands = services.add_subparsers(dest="services_cmd", required=True)
@@ -385,6 +404,7 @@ def configure_parser(sub) -> None:
     up_p.add_argument("project", nargs="?", type=_arg_identifier)
     commands.add_parser("status").add_argument("--json", action="store_true")
     commands.add_parser("test").add_argument("--json", action="store_true")
+    commands.add_parser("recover").add_argument("--json", action="store_true")
     log_p = commands.add_parser("logs")
     log_p.add_argument("service", type=_arg_service_name)
     down_p = commands.add_parser("down")
@@ -396,6 +416,12 @@ def dispatch(args) -> int:
         rows = [up(args.service, args.project)]
     elif args.services_cmd in ("status", "test"):
         rows = status() if args.services_cmd == "status" else test()
+    elif args.services_cmd == "recover":
+        rows = recover()
+        if not rows and not getattr(args, "json", False):
+            print("no recorded services to recover; start the required verifier with: "
+                  "uv run danus services up verify")
+            return 0
     elif args.services_cmd == "logs":
         print(logs(args.service))
         return 0

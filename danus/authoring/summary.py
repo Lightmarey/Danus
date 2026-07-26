@@ -66,11 +66,15 @@ def install_dependencies(directory: str | Path | None = None) -> Path:
     assets = skill_dir("human-summary")
     for name in ("package.json", "package-lock.json"):
         shutil.copy2(assets / name, root / name)
-    subprocess.run(
+    result = _run_with_timeout(
         [npm, "ci", "--no-fund", "--no-audit"],
-        cwd=root,
-        check=True,
+        env=dict(os.environ), cwd=root,
     )
+    if result.returncode:
+        raise RuntimeError(
+            f"npm ci failed ({result.returncode}): "
+            f"{(result.stdout or '')}{(result.stderr or '')}"
+        )
     if not dependencies_ready(root):
         raise RuntimeError(f"npm completed but dependencies are missing under {root}")
     return root
@@ -86,11 +90,14 @@ def doctor(environ: dict[str, str] | None = None) -> dict[str, object]:
     }
 
 
-def _run_with_timeout(command: list[str], *, env: dict[str, str]) -> subprocess.CompletedProcess:
-    timeout = int(env.get("DANUS_SUMMARY_COMMAND_TIMEOUT_SECONDS", "120"))
+def _run_with_timeout(
+    command: list[str], *, env: dict[str, str], cwd: str | Path | None = None,
+    timeout_seconds: int | None = None,
+) -> subprocess.CompletedProcess:
+    timeout = timeout_seconds or int(env.get("DANUS_SUMMARY_COMMAND_TIMEOUT_SECONDS", "120"))
     process = runtime.spawn_process(
         command,
-        cwd=Path.cwd(),
+        cwd=Path(cwd) if cwd is not None else Path.cwd(),
         env=env,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
@@ -103,8 +110,8 @@ def _run_with_timeout(command: list[str], *, env: dict[str, str]) -> subprocess.
         raise RuntimeError(f"command timed out after {timeout}s: {command[0]}")
     return subprocess.CompletedProcess(
         command, process.returncode,
-        stdout.decode(errors="replace") if isinstance(stdout, bytes) else stdout,
-        stderr.decode(errors="replace") if isinstance(stderr, bytes) else stderr,
+        stdout.decode("utf-8", errors="replace") if isinstance(stdout, bytes) else stdout,
+        stderr.decode("utf-8", errors="replace") if isinstance(stderr, bytes) else stderr,
     )
 
 

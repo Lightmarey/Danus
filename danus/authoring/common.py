@@ -38,11 +38,11 @@ def resolve_project(project: Optional[str] = None) -> Path:
     ``DANUS_AGENTS_ROOT`` (``<root>/<project>``); the name is validated to a
     single path segment so it can never escape the agents root. With no
     ``project`` we fall back to ``DANUS_PROJECT_DIR``."""
-    agents_root = os.environ.get("DANUS_AGENTS_ROOT", "")
+    agents_root = os.environ.get("DANUS_AGENTS_ROOT") or str(
+        Path.cwd() / "runtime" / "projects"
+    )
     project_dir = os.environ.get("DANUS_PROJECT_DIR", "")
     if project:
-        if not agents_root:
-            raise RuntimeError("DANUS_AGENTS_ROOT is not set; cannot resolve a project by name")
         if not PROJECT_NAME_RE.match(project):
             raise RuntimeError(f"invalid project name: {project!r}")
         pdir = Path(agents_root) / project

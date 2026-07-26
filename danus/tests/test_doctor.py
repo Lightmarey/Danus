@@ -46,3 +46,14 @@ def test_checks_report_missing_codex_for_nonexecutable_absolute_override(tmp_pat
             os.environ["DANUS_CODEX_BIN"] = old
     codex_row = next(row for row in rows if row[0] == "codex")
     assert codex_row[1] is False
+
+
+def test_missing_agent_assets_are_reported_without_traceback(monkeypatch):
+    missing = FileNotFoundError("packaged worker asset missing")
+    monkeypatch.setattr(doctor.L, "worker_md", lambda: (_ for _ in ()).throw(missing))
+    monkeypatch.setattr(
+        doctor.L, "worker_skills_dir", lambda: (_ for _ in ()).throw(missing),
+    )
+    rows = {name: (ok, detail) for name, ok, detail in doctor.checks()}
+    assert rows["worker_contract"] == (False, "packaged worker asset missing")
+    assert rows["worker_skills"] == (False, "packaged worker asset missing")

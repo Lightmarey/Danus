@@ -1,8 +1,8 @@
 """Run the write-paper service as a stdio MCP server:
 ``python -m danus.write_paper``.
 
-Launched by ``bin/write-paper-mcp`` (which exports DANUS_WRITE_PAPER_SKILL_DIR and the
-codex/project env).
+Launched by the installed ``write-paper-mcp`` entry point (normally
+``uv run write-paper-mcp``); Python loads the shared env-file chain first.
 """
 
 def main() -> int:

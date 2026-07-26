@@ -84,17 +84,15 @@ def test_latex_timeout_kills_the_process_tree(monkeypatch, tmp_path):
     class Process:
         returncode = None
 
-        def communicate(self, timeout=None):
-            if timeout is not None:
-                raise subprocess.TimeoutExpired("latexmk", timeout)
-            return b"partial", b"stopped"
+        def wait(self, timeout=None):
+            raise subprocess.TimeoutExpired("latexmk", timeout)
 
     process = Process()
     monkeypatch.setenv("DANUS_LATEX_TIMEOUT_SECONDS", "1")
     monkeypatch.setattr(paper.runtime, "spawn_process", lambda *args, **kwargs: process)
     monkeypatch.setattr(
         paper.runtime, "stop_process",
-        lambda proc, force: stopped.append((proc, force)),
+        lambda proc, force, **kwargs: stopped.append((proc, force)),
     )
     result = paper._run_with_timeout(["latexmk"], cwd=tmp_path)
     assert result.returncode == 124
@@ -162,6 +160,25 @@ def test_summary_missing_dependencies_has_explicit_install_command(tmp_path, mon
     monkeypatch.setattr(summary.shutil, "which", lambda name: "node" if name == "node" else None)
     with pytest.raises(RuntimeError, match="install-deps"):
         summary.render_pdf(source, tmp_path / "out.pdf")
+
+
+def test_summary_dependency_install_uses_bounded_process_tree_runner(tmp_path, monkeypatch):
+    assets = tmp_path / "assets"
+    assets.mkdir()
+    for name in ("package.json", "package-lock.json"):
+        (assets / name).write_text("{}", encoding="utf-8")
+    seen = {}
+    monkeypatch.setattr(summary, "skill_dir", lambda name: assets)
+    monkeypatch.setattr(summary.shutil, "which", lambda name: "npm" if name == "npm" else None)
+    monkeypatch.setattr(
+        summary, "_run_with_timeout",
+        lambda command, *, env, cwd=None: seen.update(command=command, cwd=cwd) or
+        subprocess.CompletedProcess(command, 0, "", ""),
+    )
+    monkeypatch.setattr(summary, "dependencies_ready", lambda root: True)
+    assert summary.install_dependencies(tmp_path / "node") == tmp_path / "node"
+    assert seen["command"][1:3] == ["ci", "--no-fund"]
+    assert seen["cwd"] == tmp_path / "node"
 
 
 def test_markdown_renderer_escapes_an_untrusted_title(tmp_path):

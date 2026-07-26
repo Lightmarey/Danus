@@ -1,7 +1,7 @@
 """Run the danus gateway as a stdio MCP server: ``python -m danus.gateway``.
 
-Role is taken from ``DANUS_ROLE`` (env). Launched by ``bin/danus-mcp`` (main) and
-by each worker's ``.codex/config.toml`` (worker) / the verifier's ``-c`` override.
+Role is taken from ``DANUS_ROLE`` (env). Launched by ``uv run danus-mcp`` for the
+main agent and by each worker config / the verifier's ``-c`` override.
 """
 
 def main() -> int:

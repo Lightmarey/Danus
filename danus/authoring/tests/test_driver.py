@@ -75,6 +75,36 @@ def test_timeout_raises():
                 pass
 
 
+def test_timeout_stops_the_whole_process_tree(tmp_path: Path):
+    child_pid = tmp_path / "child.pid"
+    script = (
+        "import subprocess, sys, time\n"
+        f"p=subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'])\n"
+        f"open({str(child_pid)!r}, 'w').write(str(p.pid))\n"
+        "time.sleep(60)\n"
+    )
+    sleeper = write_python_launcher(tmp_path, "tree_sleeper", script)
+    with env(DANUS_CODEX_BIN=str(sleeper)):
+        try:
+            driver.run_codex("anything", timeout=1)
+            assert False, "should have timed out"
+        except subprocess.TimeoutExpired:
+            pass
+    child = int(child_pid.read_text(encoding="utf-8"))
+    assert not __import__("danus.runtime", fromlist=["pid_alive"]).pid_alive(child)
+
+
+def test_stdout_is_decoded_as_utf8_independent_of_windows_acp(tmp_path: Path):
+    fake = write_python_launcher(
+        tmp_path, "unicode_codex",
+        "import sys\nsys.stdout.buffer.write('证明：平方非负 ∀x'.encode('utf-8'))\n",
+    )
+    with env(DANUS_CODEX_BIN=str(fake)):
+        cp = driver.run_codex("write", timeout=60)
+    assert cp.returncode == 0
+    assert cp.stdout == "证明：平方非负 ∀x"
+
+
 def test_missing_binary_raises_filenotfound():
     with env(DANUS_CODEX_BIN="/nonexistent/codex/binary"):
         try:

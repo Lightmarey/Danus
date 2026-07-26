@@ -287,17 +287,17 @@ def test_ensure_agent_home_provisions_missing_home():
             assert agents_md.exists(), "AGENTS.md must be provisioned"
             assert skills.exists(), ".agents/skills must be provisioned"
             # they point at the repo's canonical sources
-            assert agents_md.resolve() == (launcher._REPO_ROOT / "agents" / "contracts" / "verifier.md").resolve()
-            assert skills.resolve() == (launcher._REPO_ROOT / "agents" / "skills" / "verify").resolve()
+            assert agents_md.resolve() == launcher.agent_assets.contract("verifier").resolve()
+            assert skills.resolve() == launcher.agent_assets.skills("verifier").resolve()
             # idempotent: a second call is a no-op and still valid
             launcher.ensure_agent_home()
             assert agents_md.exists() and skills.exists()
 
 
 def test_ensure_agent_home_refreshes_copied_assets(tmp_path, monkeypatch):
-    repo = tmp_path / "repo"
-    contract = repo / "agents" / "contracts" / "verifier.md"
-    skills_source = repo / "agents" / "skills" / "verify"
+    source = tmp_path / "agents"
+    contract = source / "contracts" / "verifier.md"
+    skills_source = source / "skills" / "verify"
     contract.parent.mkdir(parents=True)
     skills_source.mkdir(parents=True)
     contract.write_text("fresh contract", encoding="utf-8")
@@ -308,7 +308,7 @@ def test_ensure_agent_home_refreshes_copied_assets(tmp_path, monkeypatch):
     copied_skills.mkdir(parents=True)
     (home / "AGENTS.md").write_text("stale contract", encoding="utf-8")
     (copied_skills / "removed.md").write_text("stale skill", encoding="utf-8")
-    monkeypatch.setattr(launcher, "_REPO_ROOT", repo)
+    monkeypatch.setattr(launcher.agent_assets, "_SOURCE_ROOT", source)
     monkeypatch.setenv("VERIFY_AGENT_HOME", str(home))
 
     launcher.ensure_agent_home()

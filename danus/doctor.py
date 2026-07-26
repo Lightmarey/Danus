@@ -30,8 +30,16 @@ def checks() -> Iterable[Tuple[str, bool, str]]:
     codex_bin = codex.resolve_bin()
     codex_ok = _command_exists(codex_bin)
     yield ("codex", codex_ok, codex_bin)
-    yield ("worker_contract", L.worker_md().exists(), str(L.worker_md()))
-    yield ("worker_skills", L.worker_skills_dir().exists(), str(L.worker_skills_dir()))
+    try:
+        contract = L.worker_md()
+        yield ("worker_contract", contract.exists(), str(contract))
+    except FileNotFoundError as exc:
+        yield ("worker_contract", False, str(exc))
+    try:
+        skills = L.worker_skills_dir()
+        yield ("worker_skills", skills.exists(), str(skills))
+    except FileNotFoundError as exc:
+        yield ("worker_skills", False, str(exc))
     for module in ("pytest", "mcp", "fastapi", "uvicorn", "pydantic"):
         yield (f"import:{module}", importlib.util.find_spec(module) is not None, module)
 

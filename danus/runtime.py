@@ -453,16 +453,22 @@ def terminate_process_tree(pid: int, *, force: bool, wait_seconds: float = 5.0) 
     """Best-effort stop of a detached worker loop and its descendants."""
     if is_windows():
         tracked_pids = [pid, *_windows_descendant_pids(pid)]
-        _taskkill_windows_pid(pid, force=force)
-        survivors = _wait_for_dead_pids(tracked_pids, timeout_seconds=wait_seconds)
         if force:
-            for survivor in survivors:
-                _taskkill_windows_pid(survivor, force=True)
-            survivors = _wait_for_dead_pids(survivors, timeout_seconds=wait_seconds)
+            # Kill the snapshot immediately. Waiting for a dead wrapper PID
+            # before touching its live descendants turns a 1s timeout into a
+            # multi-stage 20-30s stall and leaves inherited pipes open.
+            for target in reversed(tracked_pids):
+                _taskkill_windows_pid(target, force=True)
+            survivors = _wait_for_dead_pids(
+                tracked_pids, timeout_seconds=wait_seconds,
+            )
             for survivor in survivors:
                 _terminate_windows_pid(survivor)
             if survivors:
                 _wait_for_dead_pids(survivors, timeout_seconds=wait_seconds)
+            return
+        _taskkill_windows_pid(pid, force=force)
+        survivors = _wait_for_dead_pids(tracked_pids, timeout_seconds=wait_seconds)
         return
 
     try:
@@ -489,6 +495,23 @@ def stop_process(proc: subprocess.Popen, *, wait_seconds: float = 5.0,
                  force: bool = False) -> Optional[int]:
     """Stop a process and its descendants, then reap the parent process."""
     if proc.poll() is not None:
+        # A short-lived wrapper may exit while a descendant still owns inherited
+        # stdout/stderr handles.  On Windows the child's recorded parent PID is
+        # still discoverable after the parent exits, so force-clean that tree
+        # before returning or a subsequent ``communicate`` can hang indefinitely.
+        if force:
+            if is_windows():
+                descendants = _windows_descendant_pids(proc.pid)
+                for target in reversed(descendants):
+                    _taskkill_windows_pid(target, force=True)
+                survivors = _wait_for_dead_pids(
+                    descendants, timeout_seconds=wait_seconds,
+                )
+                for survivor in survivors:
+                    _terminate_windows_pid(survivor)
+            else:
+                with contextlib.suppress(ProcessLookupError, PermissionError):
+                    os.killpg(proc.pid, _SIGKILL)
         return proc.returncode
     terminate_process_tree(proc.pid, force=force, wait_seconds=wait_seconds)
     try:

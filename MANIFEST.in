@@ -6,5 +6,11 @@ recursive-include .agents/skills/write-paper/boilerplate *
 recursive-include .agents/skills/write-paper/roles *
 recursive-include .agents/skills/write-paper/style *
 recursive-include .agents/skills/write-paper/templates *
+include agents/contracts/worker.md
+include agents/contracts/verifier.md
+include agents/skills/worker/check_conformance.py
+include agents/skills/verify/test_verification_schema.py
+recursive-include agents/skills/worker SKILL.md openai.yaml
+recursive-include agents/skills/verify SKILL.md openai.yaml
 prune .agents/skills/write-paper/driver
 global-exclude __pycache__ *.py[cod]

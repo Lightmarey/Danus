@@ -188,14 +188,14 @@ def test_role_env_default_and_build_app():
         assert server._role() == "verifier"  # unset falls back read-only (fail-closed)
 
 
-def test_project_by_name_without_agents_root_raises():
-    # a project name is given but DANUS_AGENTS_ROOT is unset -> RuntimeError
+def test_project_by_name_without_agents_root_uses_default():
+    # without an override, project names resolve under cwd/runtime/projects
     with _env(DANUS_AGENTS_ROOT=None, DANUS_PROJECT_DIR="/tmp/whatever"):
         try:
             server._project("proj_a")
-            assert False, "should require DANUS_AGENTS_ROOT to resolve by name"
+            assert False, "missing default project should raise"
         except RuntimeError as e:
-            assert "DANUS_AGENTS_ROOT" in str(e)
+            assert "no such project" in str(e)
 
 
 def test_verify_http_roundtrip_and_errors():
@@ -313,8 +313,8 @@ def main() -> None:
     print("  [ok] role table (main no fact_submit; verifier read-only; worker submits)")
     test_role_env_default_and_build_app()
     print("  [ok] build_app reads DANUS_ROLE; _role default")
-    test_project_by_name_without_agents_root_raises()
-    print("  [ok] project-by-name without DANUS_AGENTS_ROOT -> RuntimeError")
+    test_project_by_name_without_agents_root_uses_default()
+    print("  [ok] project-by-name without override uses cwd default")
     test_verify_http_roundtrip_and_errors()
     print("  [ok] _verify HTTP round-trip + unset-URL + bad-timeout fallback")
     test_fact_revoke_cascades()

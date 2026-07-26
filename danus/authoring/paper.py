@@ -68,30 +68,31 @@ def _command(engine: str, executable: str, tex: Path, build: Path) -> list[str]:
 
 def _run_with_timeout(command: list[str], *, cwd: Path) -> subprocess.CompletedProcess:
     timeout = int(os.environ.get("DANUS_LATEX_TIMEOUT_SECONDS", "300"))
-    process = runtime.spawn_process(
-        command,
-        cwd=cwd,
-        env=os.environ.copy(),
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        new_process_group=True,
-    )
-    try:
-        stdout, stderr = process.communicate(timeout=timeout)
-    except subprocess.TimeoutExpired:
-        runtime.stop_process(process, force=True)
-        stdout, stderr = process.communicate()
-        message = f"LaTeX command timed out after {timeout}s"
-        stderr = (stderr or b"") + ("\n" + message).encode()
-        returncode = 124
-    else:
-        returncode = process.returncode
-    return subprocess.CompletedProcess(
-        command,
-        returncode,
-        stdout.decode(errors="replace") if isinstance(stdout, bytes) else stdout,
-        stderr.decode(errors="replace") if isinstance(stderr, bytes) else stderr,
-    )
+    with tempfile.TemporaryFile() as stdout_file, tempfile.TemporaryFile() as stderr_file:
+        process = runtime.spawn_process(
+            command,
+            cwd=cwd,
+            env=os.environ.copy(),
+            stdout=stdout_file,
+            stderr=stderr_file,
+            new_process_group=True,
+        )
+        try:
+            process.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            runtime.stop_process(process, wait_seconds=2, force=True)
+            message = f"LaTeX command timed out after {timeout}s"
+            returncode = 124
+        else:
+            message = ""
+            returncode = process.returncode
+        stdout_file.seek(0)
+        stderr_file.seek(0)
+        stdout = stdout_file.read().decode("utf-8", errors="replace")
+        stderr = stderr_file.read().decode("utf-8", errors="replace")
+        if message:
+            stderr += f"\n{message}"
+        return subprocess.CompletedProcess(command, returncode, stdout, stderr)
 
 
 def compile_tex(

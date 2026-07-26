@@ -31,9 +31,9 @@ from fastapi import HTTPException
 
 from danus import codex
 from danus import runtime
+from danus import agent_assets
 
 _HERE = Path(__file__).resolve().parent  # danus/verify/
-_REPO_ROOT = _HERE.parent.parent         # repo root (danus/verify -> danus -> root)
 VERIFICATION_FILENAMES = ("verification.json", "verificationt.json")
 
 
@@ -50,19 +50,13 @@ def ensure_agent_home() -> Path:
 
     Unlike a worker home (assembled per project by ``danus new``), the verify
     agent home is a singleton with no scaffolder — so a fresh checkout has none and
-    the codex ``-C`` dir would not exist. This builds it the same way a worker home
-    is built: ``AGENTS.md`` (the verifier contract) + ``.agents/skills`` (the verify
-    skills), symlinked to the repo's canonical sources so they stay in sync.
-    Idempotent (a no-op once the links exist); skips silently if the canonical
-    sources are absent (e.g. an installed package without the ``agents/`` tree),
-    leaving the existing missing-home error to surface honestly."""
+    the codex ``-C`` dir would not exist. Assets resolve from a source checkout
+    first and from package data when installed from a wheel."""
     home = _agent_home()
-    contract = _REPO_ROOT / "agents" / "contracts" / "verifier.md"
-    skills = _REPO_ROOT / "agents" / "skills" / "verify"
+    contract = agent_assets.contract("verifier")
+    skills = agent_assets.skills("verifier")
     agents_md = home / "AGENTS.md"
     skills_link = home / ".agents" / "skills"
-    if not (contract.exists() and skills.exists()):
-        return home  # nothing to link from — do not create broken links
     (home / ".agents").mkdir(parents=True, exist_ok=True)
     runtime.sync_symlink_or_copy(contract, agents_md)
     runtime.sync_symlink_or_copy(skills, skills_link)

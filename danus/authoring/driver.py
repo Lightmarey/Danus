@@ -130,12 +130,38 @@ def run_codex(
         )
     cmd = codex.exec_cmd(codex_bin, model, effort, *tail)
     with tempfile.TemporaryDirectory(prefix="danus-authoring-codex-") as empty_cwd:
-        return subprocess.run(
-            cmd,
-            input=prompt,
-            cwd=empty_cwd,
-            env=codex.subprocess_env(codex_bin),
-            capture_output=True,
-            text=True,
-            timeout=timeout if timeout and timeout > 0 else None,
-        )
+        # Files avoid Windows ``communicate`` reader threads. A malformed
+        # wrapper whose child inherits a pipe can otherwise make timeout cleanup
+        # block forever even after the wrapper itself exits.
+        with tempfile.TemporaryFile() as stdin_file, \
+                tempfile.TemporaryFile() as stdout_file, \
+                tempfile.TemporaryFile() as stderr_file:
+            stdin_file.write(prompt.encode("utf-8"))
+            stdin_file.seek(0)
+            proc = runtime.spawn_process(
+                cmd,
+                cwd=empty_cwd,
+                env=codex.subprocess_env(codex_bin),
+                stdin=stdin_file,
+                stdout=stdout_file,
+                stderr=stderr_file,
+                new_process_group=True,
+            )
+            try:
+                proc.wait(timeout=timeout if timeout and timeout > 0 else None)
+            except subprocess.TimeoutExpired as exc:
+                runtime.stop_process(proc, wait_seconds=2, force=True)
+                stdout_file.seek(0)
+                stderr_file.seek(0)
+                raise subprocess.TimeoutExpired(
+                    cmd, exc.timeout,
+                    output=stdout_file.read().decode("utf-8", errors="replace"),
+                    stderr=stderr_file.read().decode("utf-8", errors="replace"),
+                ) from exc
+            stdout_file.seek(0)
+            stderr_file.seek(0)
+            return subprocess.CompletedProcess(
+                cmd, proc.returncode,
+                stdout_file.read().decode("utf-8", errors="replace"),
+                stderr_file.read().decode("utf-8", errors="replace"),
+            )

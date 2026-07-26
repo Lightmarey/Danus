@@ -25,8 +25,8 @@ Key defaults:
   - ``agents_root`` defaults to ``runtime/projects`` under the cwd, overridable with
     ``DANUS_AGENTS_ROOT``;
   - the worker contract + skills are resolved at CALL time from env
-    (``DANUS_WORKER_CONTRACT`` / ``DANUS_WORKER_SKILLS``), defaulting to the
-    repo-root ``agents/`` tree — testable + relocatable.
+    (``DANUS_WORKER_CONTRACT`` / ``DANUS_WORKER_SKILLS``), then from a source
+    checkout or installed package data — testable + relocatable.
 
 Everything reads env at CALL time (not import time) to match core/gateway/verify.
 """
@@ -38,6 +38,8 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import List, Optional, Tuple
+
+from danus import agent_assets
 
 # --------------------------------------------------------------------------- #
 # per-worker control-file names — the single source of truth                  #
@@ -57,15 +59,6 @@ DEADLINE_FILE = ".run_deadline"
 # roots (env read at call time)                                               #
 # --------------------------------------------------------------------------- #
 
-def repo_root() -> Path:
-    """The repo root that holds the ``agents/`` tree (contracts + skills).
-
-    The package lives at ``<repo>/danus/execution/layout.py``; the ``agents/``
-    tree is its sibling ``<repo>/agents``. Used only to locate the worker
-    contract + skills defaults (both env-overridable)."""
-    return Path(__file__).resolve().parents[2]
-
-
 def agents_root() -> Path:
     """Where projects live. Override with ``DANUS_AGENTS_ROOT``; defaults to
     ``runtime/projects`` under the current working directory."""
@@ -81,7 +74,7 @@ def worker_md() -> Path:
     env = os.environ.get("DANUS_WORKER_CONTRACT")
     if env:
         return Path(env).resolve()
-    return repo_root() / "agents" / "contracts" / "worker.md"
+    return agent_assets.contract("worker")
 
 
 def worker_skills_dir() -> Path:
@@ -90,7 +83,7 @@ def worker_skills_dir() -> Path:
     env = os.environ.get("DANUS_WORKER_SKILLS")
     if env:
         return Path(env).resolve()
-    return repo_root() / "agents" / "skills" / "worker"
+    return agent_assets.skills("worker")
 
 
 # --------------------------------------------------------------------------- #

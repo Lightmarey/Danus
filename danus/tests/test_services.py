@@ -36,6 +36,13 @@ def root(tmp: Path) -> Path:
     return tmp
 
 
+def test_default_service_deployment_root_is_current_directory(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("DANUS_ROOT", raising=False)
+    monkeypatch.delenv("DANUS_RUNTIME", raising=False)
+    assert Path(services.service_env()["DANUS_RUNTIME"]) == (tmp_path / "runtime").resolve()
+
+
 def test_env_loader_order_quotes_comments_and_process_precedence():
     with tempfile.TemporaryDirectory() as td:
         r = root(Path(td))
@@ -273,6 +280,41 @@ def test_safe_paths_and_manifest_reject_escape_or_injection(tmp_path):
     (run / "autostart").write_text("verify\ndashboard ok\nbad\ninjected")
     with pytest.raises(ValueError, match="invalid autostart"):
         services._manifest(run)
+
+
+def test_recover_replays_validated_manifest_in_order(monkeypatch, tmp_path):
+    r = root(tmp_path)
+    run = r / "runtime" / "run"
+    run.mkdir(parents=True)
+    (r / "runtime" / "projects" / "alpha").mkdir(parents=True)
+    (run / "autostart").write_text("verify\ndashboard alpha\n", encoding="utf-8")
+    calls = []
+
+    def fake_up(service, project=None, *, root=None):
+        calls.append((service, project, root))
+        return {"service": service if not project else f"dashboard-{project}",
+                "state": "up", "pid": 1}
+
+    monkeypatch.setattr(services, "up", fake_up)
+    rows = services.recover(root=r)
+    assert calls == [("verify", None, r), ("dashboard", "alpha", r)]
+    assert [row["state"] for row in rows] == ["up", "up"]
+
+
+def test_recover_rejects_manifest_before_starting_anything(monkeypatch, tmp_path):
+    r = root(tmp_path)
+    run = r / "runtime" / "run"
+    run.mkdir(parents=True)
+    (run / "autostart").write_text("verify\nbad command\n", encoding="utf-8")
+    calls = []
+    monkeypatch.setattr(services, "up", lambda *a, **k: calls.append(a))
+    with pytest.raises(ValueError, match="invalid autostart"):
+        services.recover(root=r)
+    assert calls == []
+
+
+def test_recover_empty_manifest_is_a_safe_noop(tmp_path):
+    assert services.recover(root=root(tmp_path)) == []
 
 
 def test_real_verify_lifecycle_offline(tmp_path):

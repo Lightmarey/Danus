@@ -160,7 +160,7 @@ def test_terminate_process_tree_waits_for_windows_descendants():
 
     calls = []
     terminated = []
-    waits = [[101], [101], []]
+    waits = [[101], []]
     real_descendants = runtime._windows_descendant_pids
     real_wait = runtime._wait_for_dead_pids
     real_taskkill = runtime._taskkill_windows_pid
@@ -176,8 +176,9 @@ def test_terminate_process_tree_waits_for_windows_descendants():
         runtime._wait_for_dead_pids = real_wait  # type: ignore[assignment]
         runtime._taskkill_windows_pid = real_taskkill  # type: ignore[assignment]
         runtime._terminate_windows_pid = real_terminate  # type: ignore[assignment]
-    assert calls == [(100, True), (101, True)]
+    assert calls == [(101, True), (100, True)]  # descendants first; no pre-kill wait
     assert terminated == [101]
+    assert waits == []
 
 
 def test_terminate_process_tree_force_uses_sigkill_on_posix():

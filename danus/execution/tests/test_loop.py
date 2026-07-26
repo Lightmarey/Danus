@@ -458,8 +458,8 @@ def test_dunder_main_usage_guard():
 def test_layout_defaults_and_empties(tmp: Path):
     with _env(DANUS_WORKER_CONTRACT=None, DANUS_WORKER_SKILLS=None,
               DANUS_AGENTS_ROOT=None):
-        # repo_root / worker_md / worker_skills_dir defaults
-        rr = L.repo_root()
+        # worker contract / skills default to the source checkout assets
+        rr = Path(__file__).resolve().parents[3]
         assert L.worker_md() == rr / "agents" / "contracts" / "worker.md"
         assert L.worker_skills_dir() == rr / "agents" / "skills" / "worker"
         # agents_root default = <cwd>/runtime/projects
