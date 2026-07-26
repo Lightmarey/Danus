@@ -157,7 +157,8 @@ def _set_manifest(run: Path, entry: str, present: bool) -> None:
 
 def _http_health(port: int, timeout: float = 0.4) -> Optional[Dict]:
     try:
-        with urllib.request.urlopen(f"http://127.0.0.1:{port}/health", timeout=timeout) as response:
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        with opener.open(f"http://127.0.0.1:{port}/health", timeout=timeout) as response:
             value = json.load(response)
             return value if isinstance(value, dict) else {}
     except (OSError, ValueError, urllib.error.URLError):

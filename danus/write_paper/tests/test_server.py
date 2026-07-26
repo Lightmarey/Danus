@@ -76,7 +76,7 @@ def _fake_compile(results):
     orig = server._compile_check
     state = {"n": 0}
 
-    def fake(tex):
+    def fake(tex, resource_dir=None):
         i = min(state["n"], len(results) - 1)
         state["n"] += 1
         base = {"ok": True, "log": "", "engine_available": True}
@@ -178,7 +178,24 @@ def test_build_app_registers_all_tools():
     app = server.build_app()
     assert app is not None
     assert set(server._TOOLS) == {"paper_subgraph", "paper_write", "reference_audit",
-                                  "reference_verify", "paper_revise", "paper_verify_math"}
+                                  "reference_verify", "paper_revise", "paper_verify_math",
+                                  "style_distill"}
+
+
+def test_style_distill_empty_anchors_is_current_without_codex():
+    import tempfile
+
+    original = server.assemble.skill_dir
+    with tempfile.TemporaryDirectory() as directory, temp_project() as pdir, \
+            env(DANUS_PROJECT_DIR=str(pdir), DANUS_AGENTS_ROOT=None):
+        skill = Path(directory)
+        (skill / "style" / "anchors").mkdir(parents=True)
+        server.assemble.skill_dir = lambda: skill
+        try:
+            out = server.style_distill()
+        finally:
+            server.assemble.skill_dir = original
+    assert out == {"status": "current", "proposal": "", "anchors": [], "warnings": []}
 
 
 def test_main_module_runs_build_app(monkeypatch=None):

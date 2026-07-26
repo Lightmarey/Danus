@@ -129,6 +129,11 @@ remain available but are not required by the core path.
   verified facts. In our experience the single highest-leverage fix is to provide
   a few papers of your own as exemplars when you ask for the write-up — the writer
   imitates them, and readability improves substantially.
+- **Build artifacts natively on Windows or POSIX.** `uv run danus artifacts paper
+  compile <main.tex>` uses `latexmk` when available and applies the strict compile
+  gate. For reader reports, run `uv run danus artifacts summary doctor`, explicitly
+  install the locked Node dependencies once with `summary install-deps`, then use
+  `summary render <report.md> <report.pdf>`.
 
 ## Design invariants (see ARCHITECTURE.md §3)
 

@@ -16,6 +16,12 @@ from __future__ import annotations
 from danus.authoring.driver import run_codex
 
 from .assemble import build_prompt
-from .server import build_app
+
+
+def build_app(*args, **kwargs):
+    """Import the optional MCP dependency only when the server is requested."""
+    from .server import build_app as _build_app
+
+    return _build_app(*args, **kwargs)
 
 __all__ = ["build_prompt", "run_codex", "build_app"]

@@ -31,6 +31,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
 import subprocess
 import tempfile
 from concurrent.futures import ThreadPoolExecutor
@@ -79,6 +80,13 @@ def _effort() -> str:
     return os.environ.get("DANUS_WRITE_PAPER_EFFORT") or driver.default_effort()
 
 
+def _timeout() -> int:
+    return int(os.environ.get(
+        "DANUS_WRITE_PAPER_TIMEOUT_SECONDS",
+        os.environ.get("DANUS_AUTHORING_TIMEOUT_SECONDS", driver.DEFAULT_TIMEOUT),
+    ))
+
+
 # --------------------------------------------------------------------------- #
 # codex driving + honesty                                                     #
 # --------------------------------------------------------------------------- #
@@ -104,7 +112,9 @@ def _drive(prompt: str, effort: Optional[str] = None) -> Dict[str, Any]:
     ``_attach_raw``). ``effort`` overrides the reasoning effort for this call (e.g.
     ``"low"`` for a mechanical compile-fix retry — no reasoning needed)."""
     try:
-        cp: Any = driver.run_codex(prompt, model=_model(), effort=effort or _effort())
+        cp: Any = driver.run_codex(
+            prompt, model=_model(), effort=effort or _effort(), timeout=_timeout()
+        )
     except (subprocess.TimeoutExpired, FileNotFoundError) as e:
         cp = e
     return _attach_raw(classify_outcome(cp, artifact_noun="artifact"), cp)
@@ -120,6 +130,7 @@ def _drive_networked(prompt: str) -> Dict[str, Any]:
     attaches ``stderr_full`` + ``cmd`` for the run log."""
     try:
         cp: Any = driver.run_codex(prompt, model=_model(), effort=_effort(),
+                                   timeout=_timeout(),
                                    networked=True, gateway_role="verifier")
     except (subprocess.TimeoutExpired, FileNotFoundError) as e:
         cp = e
@@ -447,43 +458,27 @@ def _compile_fix_prompt(tex: str, compile_log: str) -> str:
     )
 
 
-def _compile_verify_script() -> Path:
-    """Locate the shipped ``driver/compile_verify.sh`` (the main-agent skill half).
-    Resolved at CALL time (not import) so the layout stays overridable."""
-    repo_root = Path(__file__).resolve().parents[2]
-    return repo_root / ".agents" / "skills" / "write-paper" / "driver" / "compile_verify.sh"
-
-
-def _compile_check(tex: str) -> Dict[str, Any]:
+def _compile_check(tex: str, resource_dir: Optional[Path] = None) -> Dict[str, Any]:
     """Compile-gate the tex OUTSIDE the reviser (the compile is the tool's gate, not
     the reviser's self-check). Writes ``tex`` to a temp ``main.tex`` and runs
-    ``driver/compile_verify.sh`` on it, returning
+    the native artifact compile gate on it, returning
     ``{"ok": bool, "log": str, "engine_available": bool}``.
 
-    ``compile_verify.sh`` exits 3 when the LaTeX engine (pdflatex) is missing → we
+    A missing LaTeX engine is reported with ``engine_available=False`` so we
     report ``engine_available=False`` (and ``ok=False``) so the caller does NOT loop
     and does NOT gate on something it cannot run. A clean compile → ``ok=True``. Any
     other nonzero exit → ``ok=False`` with the combined stdout/stderr as ``log``.
 
     Factored behind this single function so the offline tests mock it (no real
     pdflatex needed)."""
-    script = _compile_verify_script()
-    with tempfile.TemporaryDirectory(prefix="wp_compile_check_") as d:
-        tex_path = Path(d) / "main.tex"
-        tex_path.write_text(tex, encoding="utf-8")
-        try:
-            cp = subprocess.run(
-                ["bash", str(script), str(tex_path)],
-                capture_output=True, text=True,
-            )
-        except (FileNotFoundError, OSError) as e:
-            # bash / the script itself is missing — treat as engine-unavailable so
-            # we degrade honestly rather than loop forever.
-            return {"ok": False, "log": f"compile_check could not run: {e}", "engine_available": False}
-        log = (cp.stdout or "") + (cp.stderr or "")
-        if cp.returncode == 3:
-            return {"ok": False, "log": log, "engine_available": False}
-        return {"ok": cp.returncode == 0, "log": log, "engine_available": True}
+    from danus.authoring.paper import compile_tex_text
+
+    result = compile_tex_text(tex, resource_dir=resource_dir)
+    return {
+        "ok": result.ok,
+        "log": result.log,
+        "engine_available": result.engine_available,
+    }
 
 
 def _log_tail(text: str, max_chars: int = 4000) -> str:
@@ -646,7 +641,7 @@ def paper_write(project: Optional[str] = None,
     invention — so proven-but-unused side lemmas are excluded and the writer's
     facts match the ledger's closure.
 
-    Does NOT compile — the compile gate stays ``compile_verify.sh`` (main-agent,
+    Does NOT compile — the compile gate stays ``danus artifacts paper compile`` (main-agent,
     SKILL step 3).
 
     **Side effect (default OFF): optionally stops the project's worker swarm.**
@@ -1467,7 +1462,7 @@ def paper_revise(project: Optional[str] = None, compile_log: Optional[str] = Non
                  "compile_outcomes": compile_outcomes}, envelope=out, paper_id=paper_id)
             return out
 
-        check = _compile_check(tex)
+        check = _compile_check(tex, tex_path.parent)
         last_log = check["log"]
         if not check["engine_available"]:
             # Cannot gate what we cannot run — write once, honest note, no loop.
@@ -1747,11 +1742,90 @@ def paper_verify_math(project: Optional[str] = None,
     return out
 
 
+def style_distill(
+    project: Optional[str] = None,
+    operator_notes: Optional[str] = None,
+    force: bool = False,
+) -> Dict[str, Any]:
+    """Propose style-guide edits from all anchors; never apply or mark accepted."""
+    from danus.authoring.paper import anchors_stale
+
+    pdir = resolve_project(project)
+    sdir = assemble.skill_dir()
+    anchors_dir = sdir / "style" / "anchors"
+    anchors = [
+        path for path in anchors_dir.rglob("*")
+        if path.is_file() and path != anchors_dir / "README.md"
+    ] if anchors_dir.is_dir() else []
+    if not anchors:
+        return {"status": "current", "proposal": "", "anchors": [], "warnings": []}
+    if not force and not anchors_stale(sdir):
+        return {
+            "status": "current", "proposal": "",
+            "anchors": [str(path) for path in anchors], "warnings": [],
+        }
+    warnings: List[str] = []
+    evidence: List[str] = []
+    for path in anchors:
+        rel = path.relative_to(anchors_dir)
+        if path.suffix.lower() == ".pdf":
+            extractor = shutil.which("pdftotext")
+            if not extractor:
+                warnings.append(f"{rel}: pdftotext not found")
+                continue
+            cp = subprocess.run(
+                [extractor, str(path), "-"],
+                capture_output=True, text=True, errors="replace", check=False,
+            )
+            if cp.returncode:
+                warnings.append(f"{rel}: pdftotext exited {cp.returncode}")
+                continue
+            text = cp.stdout
+        else:
+            try:
+                text = path.read_text(encoding="utf-8")
+            except (OSError, UnicodeError) as exc:
+                warnings.append(f"{rel}: {exc}")
+                continue
+        evidence.append(f"===== ANCHOR {rel} =====\n{text}")
+    if not evidence:
+        return {
+            "status": "needs_tool", "proposal": "",
+            "anchors": [str(path) for path in anchors], "warnings": warnings,
+        }
+    prompt = "\n\n".join((
+        "You are the style distiller. Propose edits only; never apply them.",
+        assemble._read_fixed("roles/AGENTS.md"),
+        assemble._read_fixed("roles/STYLE_DISTILLER_PROMPT.md"),
+        assemble._read_fixed("style/STYLE_GUIDE.md"),
+        "\n\n".join(evidence),
+        f"===== OPERATOR NOTES =====\n{operator_notes or '_(none)_'}",
+    ))
+    result = _drive(prompt)
+    out = {
+        "status": result["status"],
+        "proposal": result["stdout"] if result["status"] == "ok" else "",
+        "anchors": [str(path) for path in anchors],
+        "warnings": warnings,
+        "style_guide_path": str(sdir / "style" / "STYLE_GUIDE.md"),
+        "marker_path": str(sdir / "style" / ".distilled_at"),
+    }
+    if result["status"] != "ok":
+        out["error"] = result.get("error")
+    out["log_path"] = _write_run_log(
+        "style_distill", pdir, prompt, result,
+        {"anchors": len(anchors), "warnings": warnings, "proposal_only": True},
+        envelope=out,
+    )
+    return out
+
+
 # --------------------------------------------------------------------------- #
 # app                                                                         #
 # --------------------------------------------------------------------------- #
 
 _TOOLS = {
+    "style_distill": style_distill,
     "paper_subgraph": paper_subgraph,
     "paper_write": paper_write,
     "reference_audit": reference_audit,

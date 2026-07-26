@@ -7,9 +7,13 @@
 // (no CDN) so PDF render works offline / air-gapped.
 const fs = require('fs');
 const path = require('path');
+const { pathToFileURL } = require('url');
 const MarkdownIt = require('markdown-it');
 const katex = require('katex');
 const [, , inF, outF, title] = process.argv;
+const escapeHtml = (value) => String(value).replace(/[&<>"']/g, (char) => ({
+  '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+}[char]));
 let text = fs.readFileSync(inF, 'utf8');
 const md = new MarkdownIt({ html: false, linkify: true, breaks: false });
 // protect math so markdown doesn't mangle _ * { }
@@ -23,14 +27,14 @@ let body = md.render(text);
 body = body.replace(/@@MATH(\d+)@@/g, (_, i) => {
   const { tex, disp } = store[i];
   try { return katex.renderToString(tex, { displayMode: disp, throwOnError: false }); }
-  catch (e) { return tex; }
+  catch (e) { return escapeHtml(tex); }
 });
 // Vendor the KaTeX CSS from the local install (offline; no CDN). katex.min.css
 // references its sibling dist/fonts/, so a file:// link to it renders fully local.
 let katexHref = '';
 try {
   const cssPath = path.join(path.dirname(require.resolve('katex')), 'katex.min.css');
-  if (fs.existsSync(cssPath)) katexHref = 'file://' + cssPath;
+  if (fs.existsSync(cssPath)) katexHref = pathToFileURL(cssPath).href;
 } catch (e) { /* leave empty; math still renders, only unstyled */ }
 const css = `
 body{font-family:"Noto Serif CJK SC","Songti SC",serif;font-size:11.5pt;line-height:1.7;color:#1a202c;max-width:760px;margin:0 auto;padding:24px 8px;}
@@ -47,6 +51,6 @@ table{border-collapse:collapse;margin:10px 0;font-size:10.5pt;} th,td{border:1px
 const link = katexHref ? `<link rel="stylesheet" href="${katexHref}">` : '';
 const html = `<!doctype html><html><head><meta charset="utf-8">
 ${link}
-<title>${title || ''}</title><style>${css}</style></head><body class="md">${body}</body></html>`;
+<title>${escapeHtml(title || '')}</title><style>${css}</style></head><body class="md">${body}</body></html>`;
 fs.writeFileSync(outF, html);
 console.log('wrote', outF, html.length, 'chars');

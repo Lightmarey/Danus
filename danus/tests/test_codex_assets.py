@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import shutil
 import subprocess
 import sys
 import tomllib
@@ -139,10 +140,16 @@ def test_wheel_install_layout_contains_authoring_assets(tmp_path):
         }
         assert shipped
         assert all(
-            name == "human-summary/REPORT_WRITER_PROMPT.md"
+            name in {
+                "human-summary/REPORT_WRITER_PROMPT.md",
+                "human-summary/md2html.js",
+                "human-summary/package.json",
+                "human-summary/package-lock.json",
+            }
             or name.startswith("write-paper/boilerplate/")
             or name.startswith("write-paper/roles/")
             or name.startswith("write-paper/style/")
+            or name.startswith("write-paper/templates/")
             for name in shipped
         )
         assert not any(
@@ -153,12 +160,21 @@ def test_wheel_install_layout_contains_authoring_assets(tmp_path):
         wheel.extractall(install)
     env = os.environ.copy()
     env["PYTHONPATH"] = str(install)
+    project = tmp_path / "project"
+    shutil.copytree(
+        ROOT / ".agents" / "skills" / "write-paper" / "examples" / "paper" / "project",
+        project,
+    )
     code = (
+        "import sys;"
         "from danus.human_summary.assemble import skill_dir as h;"
         "from danus.write_paper.assemble import skill_dir as w;"
+        "from danus.write_paper.seed_ledger import seed;"
         "assert (h() / 'REPORT_WRITER_PROMPT.md').is_file();"
         "assert (w() / 'roles' / 'AGENTS.md').is_file();"
-        "assert '.agents' not in str(h()); assert '.agents' not in str(w())"
+        "assert '.agents' not in str(h()); assert '.agents' not in str(w());"
+        f"assert seed({str(project)!r}).is_file();"
+        "assert 'mcp' not in sys.modules"
     )
     subprocess.run(
         [sys.executable, "-c", code],
@@ -168,3 +184,29 @@ def test_wheel_install_layout_contains_authoring_assets(tmp_path):
         capture_output=True,
         text=True,
     )
+
+
+def test_sdist_can_build_the_same_clean_authoring_wheel(tmp_path):
+    env = os.environ.copy()
+    env["UV_CACHE_DIR"] = str(tmp_path / "uv-cache")
+    sdist_dir = tmp_path / "sdist"
+    wheel_dir = tmp_path / "wheel"
+    subprocess.run(
+        ["uv", "build", "--sdist", "--out-dir", str(sdist_dir)],
+        cwd=ROOT, env=env, check=True, capture_output=True, text=True,
+    )
+    sdist = next(sdist_dir.glob("*.tar.gz"))
+    subprocess.run(
+        ["uv", "build", "--wheel", "--out-dir", str(wheel_dir), str(sdist)],
+        cwd=tmp_path, env=env, check=True, capture_output=True, text=True,
+    )
+    with zipfile.ZipFile(next(wheel_dir.glob("*.whl"))) as wheel:
+        names = set(wheel.namelist())
+    for required in (
+        "danus/_authoring_assets/human-summary/md2html.js",
+        "danus/_authoring_assets/human-summary/package-lock.json",
+        "danus/_authoring_assets/write-paper/templates/PROJECT_BRIEF.md.template",
+        "danus/_authoring_assets/write-paper/templates/REVISION_LOG.md.template",
+    ):
+        assert required in names
+    assert not any("__pycache__" in name or name.endswith((".pyc", ".pyo")) for name in names)

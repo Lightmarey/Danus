@@ -30,7 +30,10 @@ Config resolution (env read at CALL time):
 from __future__ import annotations
 
 import os
+import json
 import subprocess
+import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -73,16 +76,58 @@ def _effort() -> str:
     return os.environ.get("DANUS_HUMAN_SUMMARY_EFFORT") or driver.default_effort()
 
 
+def _timeout() -> int:
+    return int(os.environ.get(
+        "DANUS_HUMAN_SUMMARY_TIMEOUT_SECONDS",
+        os.environ.get("DANUS_AUTHORING_TIMEOUT_SECONDS", driver.DEFAULT_TIMEOUT),
+    ))
+
+
 def _drive(prompt: str) -> Dict[str, Any]:
     """Run the codex driver once and classify the outcome honestly (see
     ``authoring.common.classify_outcome``: ``ok`` needs a zero exit AND non-empty
     stdout; a nonzero exit, timeout, missing binary, or empty output is not
     ``ok``)."""
     try:
-        cp: Any = driver.run_codex(prompt, model=_model(), effort=_effort())
+        cp: Any = driver.run_codex(
+            prompt, model=_model(), effort=_effort(), timeout=_timeout()
+        )
     except (subprocess.TimeoutExpired, FileNotFoundError) as e:
         cp = e
-    return classify_outcome(cp, artifact_noun="report")
+    result = classify_outcome(cp, artifact_noun="report")
+    result["stderr_full"] = str(getattr(cp, "stderr", "") or "")
+    result["cmd"] = getattr(cp, "args", None) or getattr(cp, "cmd", None)
+    return result
+
+
+def _write_run_log(project: Path, prompt: str, result: Dict[str, Any],
+                   envelope: Dict[str, Any]) -> Optional[str]:
+    """Persist diagnostics without allowing a logging failure to break the tool."""
+    if os.environ.get("DANUS_HUMAN_SUMMARY_RUN_LOG", "1").lower() in (
+        "0", "false", "no",
+    ):
+        return None
+    try:
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S.%fZ")
+        directory = project / "report" / ".runs" / f"{stamp}-{uuid.uuid4().hex[:8]}"
+        directory.mkdir(parents=True, exist_ok=False)
+        path = directory / "log.md"
+        path.write_text(
+            "\n".join((
+                "# human-summary run",
+                "", "## command", "```json",
+                json.dumps(result.get("cmd"), ensure_ascii=False, indent=2),
+                "```", "", "## prompt", "```text", prompt, "```",
+                "", "## stdout", "```text", result.get("stdout", ""), "```",
+                "", "## stderr", "```text", result.get("stderr_full", ""), "```",
+                "", "## envelope", "```json",
+                json.dumps(envelope, ensure_ascii=False, indent=2), "```", "",
+            )),
+            encoding="utf-8",
+        )
+        return str(path)
+    except Exception:  # diagnostic logging is never the primary operation
+        return None
 
 
 def leak_findings(report: str) -> List[str]:
@@ -148,7 +193,9 @@ def summary_write(project: Optional[str] = None, language: Optional[str] = None)
         "stderr_tail": res["stderr_tail"],
     }
     if res["status"] != "ok":
+        report_path.unlink(missing_ok=True)
         out["error"] = res.get("error")
+        out["log_path"] = _write_run_log(pdir, prompt, res, out)
         return out
 
     report = res["stdout"]
@@ -165,9 +212,11 @@ def summary_write(project: Optional[str] = None, language: Optional[str] = None)
         out["status"] = "leak"
         out["error"] = "report contains leaked identifiers/machinery; not kept as report.md"
         out["leaky_md_path"] = str(leaky_path)
+        out["log_path"] = _write_run_log(pdir, prompt, res, out)
         return out
 
     report_path.write_text(report, encoding="utf-8")
+    out["log_path"] = _write_run_log(pdir, prompt, res, out)
     return out
 
 

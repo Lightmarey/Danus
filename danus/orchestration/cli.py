@@ -343,6 +343,8 @@ def build_parser() -> argparse.ArgumentParser:
     services.configure_parser(sub)
     from danus import codex_backend
     codex_backend.configure_parser(sub)
+    from danus.authoring import cli as authoring_cli
+    authoring_cli.configure_parser(sub)
     return p
 
 
@@ -392,4 +394,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     elif args.cmd == "codex":
         from danus import codex_backend
         return codex_backend.dispatch(args)
+    elif args.cmd == "artifacts":
+        from danus.authoring import cli as authoring_cli
+        return authoring_cli.dispatch(args)
     return 0

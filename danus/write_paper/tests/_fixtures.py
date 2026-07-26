@@ -10,15 +10,15 @@ ledger to embed.
 from __future__ import annotations
 
 import contextlib
-import importlib.util
 import os
 import shutil
 from pathlib import Path
 
+from danus.write_paper import seed_ledger
+
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 SKILL_DIR = _REPO_ROOT / ".agents" / "skills" / "write-paper"
 EXAMPLE_PROJECT = SKILL_DIR / "examples" / "paper" / "project"
-MAIN_SKILL_DIR = SKILL_DIR
 
 _MINIMAL_TEX = (
     "\\documentclass{amsart}\n"
@@ -36,20 +36,8 @@ _MINIMAL_TEX = (
 )
 
 
-def _seed_ledger_module():
-    """Load the shipped ``driver/seed_ledger.py`` (it lives in the main-agent skill
-    half, not an importable package) so tests seed the ledger exactly as the
-    pipeline does."""
-    path = MAIN_SKILL_DIR / "driver" / "seed_ledger.py"
-    spec = importlib.util.spec_from_file_location("_wp_seed_ledger", path)
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)  # type: ignore[union-attr]
-    return mod
-
-
 def seed_ledger_text(project_dir: Path) -> str:
-    mod = _seed_ledger_module()
-    return mod.render(mod.collect(Path(project_dir)))
+    return seed_ledger.render(seed_ledger.collect(Path(project_dir)))
 
 
 def write_ledger(project_dir: Path) -> Path:

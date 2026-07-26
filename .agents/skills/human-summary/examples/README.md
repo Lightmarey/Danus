@@ -20,22 +20,22 @@ provided so you can test the renderer directly.
 
 ## Smoke test
 
-Prerequisites: node (`scripts/bootstrap.sh`) and a headless Chrome/Chromium
+Prerequisites: Node.js on PATH and a headless Chrome/Chromium
 (`DANUS_CHROME_BIN` or `google-chrome`). Check with:
 
-```bash
-bash ../doctor.sh
+```powershell
+uv run danus artifacts summary doctor
 ```
 
 Render the sample report to PDF:
 
-```bash
-bash ../render_pdf.sh report.md /tmp/odd-sum-report.pdf "Odd-sum progress report"
+```powershell
+uv run danus artifacts summary render report.md odd-sum-report.pdf --title "Odd-sum progress report"
 # -> PDF -> /tmp/odd-sum-report.pdf (<N> bytes)
 ```
 
 The mandatory id self-check must return nothing on a clean report:
 
-```bash
-grep -E '[0-9a-f]{16}' report.md    # exits 1 (no match) => clean
+```powershell
+rg -n '[0-9a-f]{16}' report.md    # exits 1 (no match) => clean
 ```

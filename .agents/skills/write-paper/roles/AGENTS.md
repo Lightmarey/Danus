@@ -60,8 +60,8 @@ once for each, and either confirm compliance or insert `\note{[prime/blocker]
 - **No reference fabrication.** When you need a citation you cannot verify, leave
   a `\note{[cite/blocker] ...]}` flag. The auditor verifies; it never invents.
 - **Every paper carries an `\author{}` block.** Preserve every author present in the input verbatim. If the brief names the authors, use exactly those. If neither the input nor the brief supplies authorship, emit a neutral placeholder (`\author{Author}`) rather than omitting the block, and flag `\note{[author/blocker] no author supplied}` so the operator fills it in. Never invent a person, affiliation, or email, and never let a pipeline/system codename appear as an author value.
-- **No git; no pushing outward on your own.** A role does not run `git commit`, `git push`, `git branch`, `git checkout`, or any other git command, and it never publishes the paper outward (arXiv, a LaTeX git remote) by itself. Sending the paper outward is a deliberate, operator-gated step run through the configured push driver (`latex_git_push.sh`, driven by the `LATEX_GIT_*` environment) — not something a role triggers as part of writing or revising.
-- **The compile gate is law.** A `.tex` that does not pass `compile_verify.sh`
+- **No git; no pushing outward on your own.** A role does not run `git commit`, `git push`, `git branch`, `git checkout`, or any other git command, and it never publishes the paper outward (arXiv, a LaTeX git remote) by itself. Sending the paper outward is a deliberate, operator-gated step run through `uv run danus artifacts paper push` with the `LATEX_GIT_*` environment — not something a role triggers as part of writing or revising.
+- **The compile gate is law.** A `.tex` that does not pass `uv run danus artifacts paper compile`
   (zero LaTeX errors, no undefined citations/references) is not done.
 - **Honesty.** State only what you verified. "It should compile" is not a
   compiled paper; an `unverified` bibliography is not a checked one.

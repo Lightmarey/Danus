@@ -22,28 +22,19 @@ Runs standalone (``python -m danus.write_paper.tests.test_multi_paper``) and pyt
 
 from __future__ import annotations
 
-import importlib.util
 import subprocess
 from contextlib import contextmanager
 from pathlib import Path
 
 from danus.core import FactGraph
-from danus.write_paper import assemble, server
+from danus.write_paper import assemble, seed_ledger, server
 
-from ._fixtures import MAIN_SKILL_DIR, env, temp_project
+from ._fixtures import env, temp_project
 
 
 # --------------------------------------------------------------------------- #
 # helpers                                                                     #
 # --------------------------------------------------------------------------- #
-
-def _seed_ledger_mod():
-    path = MAIN_SKILL_DIR / "driver" / "seed_ledger.py"
-    spec = importlib.util.spec_from_file_location("_wp_seed_ledger_multi", path)
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)  # type: ignore[union-attr]
-    return mod
-
 
 def _add_second_theorem(pdir: Path) -> str:
     """Add a SECOND terminal theorem to the example graph with its own predecessor
@@ -110,7 +101,7 @@ def _scaffold_paper_workspace(pdir: Path, paper_id, headline) -> None:
     (ws / "PROJECT_BRIEF.md").write_text(
         f"# BRIEF for paper {paper_id}\nheadline_fact_ids:\n"
         "structural_exemplar:\n", encoding="utf-8")
-    mod = _seed_ledger_mod()
+    mod = seed_ledger
     assert mod.main([str(pdir), "--paper", str(paper_id)]) == 0
 
 
@@ -280,7 +271,7 @@ def test_finalize_rejects_bad_paper_id():
 # --------------------------------------------------------------------------- #
 
 def test_writer_and_ledger_share_one_closure_per_paper():
-    mod = _seed_ledger_mod()
+    mod = seed_ledger
     with temp_project(with_ledger=False) as pdir:
         second = _add_second_theorem(pdir)
         assemble.write_target_fact_ids(pdir, ["fact_odd_sum_main"], paper_id="thmA")

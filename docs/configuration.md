@@ -107,15 +107,23 @@ defaults apply everywhere; per-service overrides win.
 | variable | default | meaning |
 |---|---|---|
 | `DANUS_CHROME_BIN` | (auto-detect) | headless Chrome/Chromium for human-summary PDF |
-| `TEX_ENGINE` | `pdflatex` | write-paper LaTeX engine (`xelatex`/`lualatex`/`tectonic`) |
+| `DANUS_CHROME_NO_SANDBOX` | off | opt in to Chrome's `--no-sandbox` only on an already isolated host |
+| `TEX_ENGINE` | auto (`latexmk` preferred) | write-paper LaTeX engine (`latexmk`/`pdflatex`/`xelatex`/`lualatex`/`tectonic`) |
+| `DANUS_LATEX_TIMEOUT_SECONDS` | `300` | wall-clock cap for each native LaTeX command |
+| `DANUS_SUMMARY_COMMAND_TIMEOUT_SECONDS` | `120` | wall-clock cap for each Node/npm/Chrome summary command |
+| `DANUS_AUTHORING_TIMEOUT_SECONDS` | driver default | shared Codex writer/summary call cap |
+| `DANUS_WRITE_PAPER_TIMEOUT_SECONDS` | shared authoring cap | write-paper Codex call override |
+| `DANUS_HUMAN_SUMMARY_TIMEOUT_SECONDS` | shared authoring cap | human-summary Codex call override |
 | `DANUS_WRITE_PAPER_RUN_LOG` | on | per-call write-paper diagnostic logs (`0` disables) |
+| `DANUS_HUMAN_SUMMARY_RUN_LOG` | on | per-call human-summary diagnostic logs (`0` disables) |
 | `DANUS_PAPER_VERIFY_WHOLE_DOC_CAP` | `700000` | char budget for one whole-paper math-verify call; over it the tool reports `too_large` (the main agent decomposes — the tool never auto-splits) |
 
 ## LaTeX-git push (write-paper deliver, optional)
 
 In `config/latex-git.env` (gitignored): `LATEX_GIT_URL`, `LATEX_GIT_TOKEN`, and
 optional `LATEX_GIT_AUTHOR_NAME` / `_EMAIL`. Pushing outward is an operator-gated
-action.
+action. `DANUS_GIT_TIMEOUT_SECONDS` defaults to `120`; Git credential prompts
+are disabled so a failed unattended delivery exits instead of opening a dialog.
 
 ---
 

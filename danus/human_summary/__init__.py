@@ -15,6 +15,18 @@ its leak check). Run as ``python -m danus.human_summary``.
 from __future__ import annotations
 
 from .assemble import build_prompt
-from .server import build_app, summary_write
+
+
+def build_app(*args, **kwargs):
+    """Import the optional MCP dependency only when the server is requested."""
+    from .server import build_app as _build_app
+
+    return _build_app(*args, **kwargs)
+
+
+def summary_write(*args, **kwargs):
+    from .server import summary_write as _summary_write
+
+    return _summary_write(*args, **kwargs)
 
 __all__ = ["build_prompt", "build_app", "summary_write"]

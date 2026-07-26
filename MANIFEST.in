@@ -1,4 +1,10 @@
 include .agents/skills/human-summary/REPORT_WRITER_PROMPT.md
+include .agents/skills/human-summary/md2html.js
+include .agents/skills/human-summary/package.json
+include .agents/skills/human-summary/package-lock.json
 recursive-include .agents/skills/write-paper/boilerplate *
 recursive-include .agents/skills/write-paper/roles *
 recursive-include .agents/skills/write-paper/style *
+recursive-include .agents/skills/write-paper/templates *
+prune .agents/skills/write-paper/driver
+global-exclude __pycache__ *.py[cod]

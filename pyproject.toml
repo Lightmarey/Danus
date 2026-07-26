@@ -37,6 +37,7 @@ danus-observability = "danus.observability.__main__:main"
 consult = "danus.strategy.cli:main"
 write-paper-mcp = "danus.write_paper.__main__:main"
 human-summary-mcp = "danus.human_summary.__main__:main"
+danus-artifacts = "danus.authoring.cli:main"
 
 [project.urls]
 Repository = "https://github.com/frenzymath/Danus"

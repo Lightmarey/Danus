@@ -48,7 +48,7 @@ Build the mathematics from the project's **verified facts**
   cross-reference structure **with zero invention**.
 - **Citations come structured, from the source.** Each fact's `external_refs`
   (key / authors / title / arxiv / year / cited_for) records the published
-  results its proof cited. `driver/seed_ledger.py` aggregates them across the
+  results its proof cited. The native ledger command aggregates them across the
   project into the starting `REFERENCE_LEDGER.md`. Do not re-mine citations from
   prose — that is the #1 failure mode (hallucinated references).
 - **Preserve all mathematics. Invent nothing** — no assumptions, lemmas,
@@ -251,11 +251,11 @@ shape on its own line):
 
 ### 1. Seed the reference ledger
 
-```bash
-uv run python .agents/skills/write-paper/driver/seed_ledger.py <project_dir> --headline <headline_fact_ids> --out <project>/paper/REFERENCE_LEDGER.md
+```powershell
+uv run danus artifacts paper seed-ledger <project_dir> --headline <headline_fact_ids> --out <project>/paper/REFERENCE_LEDGER.md
 # multiple papers: add --paper <paper_id> to scope the closure to that paper's
 # recorded target and (with no --out) write the ledger into its own workspace:
-uv run python .agents/skills/write-paper/driver/seed_ledger.py <project_dir> --paper <paper_id>
+uv run danus artifacts paper seed-ledger <project_dir> --paper <paper_id>
 ```
 
 This aggregates the `external_refs` of the **target-closure facts** into
@@ -281,7 +281,7 @@ Trigger rule (all offline; the distiller only PROPOSES, never auto-applies):
   complete paper; nothing to distil).
 - If `anchors/` is **non-empty** AND **stale** — its newest content is newer than
   the `style/.distilled_at` marker, or the marker is absent — then run the
-  `STYLE_DISTILLER` (`roles/STYLE_DISTILLER_PROMPT.md`) to **propose**
+  MCP `style_distill` tool to **propose**
   `STYLE_GUIDE.md` updates. Present the proposals to the operator; on **accept**,
   apply the accepted edits to `STYLE_GUIDE.md` and **touch** `style/.distilled_at`
   (record the distill time). On reject, still touch `.distilled_at` only if the
@@ -292,9 +292,14 @@ Trigger rule (all offline; the distiller only PROPOSES, never auto-applies):
 
 A tiny helper compares mtimes so the check stays clean:
 
-```bash
-bash .../write-paper/driver/anchors_stale.sh <skill_dir>   # rc 0 = stale (distil), rc 1 = fresh/empty (skip)
+```text
+uv run danus artifacts paper anchors-stale   # rc 0 = stale (distil), rc 1 = fresh/empty (skip)
 ```
+
+After the operator accepts the applied proposals, or explicitly says the current
+guide stands, record the review with
+`uv run danus artifacts paper anchors-reviewed`. The proposal tool never edits
+the guide or marker itself.
 
 **Why operator-gated, never auto-applied:** the distiller edits the guide that
 governs *every* future paper; a bad distill would silently corrupt them all. The
@@ -464,10 +469,11 @@ deterministic path choked on.
 2. **Drive codex yourself.** The prompt is large — write it to a temp file and put it
    on **stdin** (never argv), and run the repo's codex wrapper at `xhigh`, read-only
    (the same flags the tool uses — see `danus.authoring.driver`):
-   ```bash
-   bin/codex exec --model "$DANUS_CODEX_MODEL" --config model_reasoning_effort=xhigh \
-     --sandbox read-only --skip-git-repo-check - < /tmp/writer_prompt.md \
-     > <project>/paper/main.tex          # or <project>/papers/<paper_id>/main.tex
+   ```powershell
+   Get-Content -Raw <writer_prompt.md> |
+     codex exec --model <model> --config 'model_reasoning_effort="xhigh"' `
+       --sandbox read-only --skip-git-repo-check `
+       -o <project>/paper/main.tex -
    ```
    In this fallback the bytes DO enter your context (you read/assemble the prompt) —
    that is the trade for flexibility, and it is acceptable because it is the rare last
@@ -499,7 +505,8 @@ it. Instead, YOU author the paper as a **tree of curated single-pass writes**:
    complete development is given in the dedicated technical section inserted
    below." (never a fabricated `\ref`), and prove ONLY the top-level assembly.
    Each CHAPTER is its own `paper_write` call with its own workspace
-   (`paper_id=ch_*`), its own brief/ledger (`seed_ledger.py --paper`), and a
+   (`paper_id=ch_*`), its own brief/ledger (`danus artifacts paper seed-ledger
+   --paper`), and a
    **curated support layer (≤ ~10 facts — the BINDING RULE applies at every
    node)**; its instructions say: ONE short intro paragraph, a setup section, the
    lemmas in logical order, complete proofs; any prerequisite that is a result of
@@ -574,14 +581,14 @@ it. Instead, YOU author the paper as a **tree of curated single-pass writes**:
 
 ### 3. Compile-verify (hard gate)
 
-```bash
-bash .../write-paper/driver/compile_verify.sh <project>/paper/main.tex
+```powershell
+uv run danus artifacts paper compile <project>/paper/main.tex
 ```
 
-Runs the LaTeX engine (default `pdflatex`; `xelatex`/`lualatex`/`tectonic` via
-`TEX_ENGINE`); fails on any LaTeX error or any undefined citation/reference. With
-no TeX Live installed, `TEX_ENGINE=tectonic` (after `bash scripts/install-tex.sh`)
-is the zero-dependency engine.
+Runs the LaTeX engine (preferring `latexmk`; explicit
+`latexmk`/`pdflatex`/`xelatex`/`lualatex`/`tectonic` via `TEX_ENGINE`); fails on
+any LaTeX error or any undefined citation/reference. If no MiKTeX/TeX Live is
+installed, install Tectonic and set `TEX_ENGINE=tectonic`.
 **Do not proceed past a failed compile** — feed the offending log lines back to a
 codex revise round (stage 5) and recompile. The compile is the **tool's /
 orchestrator's** gate, never the reviser's own self-check (the reviser runs in an
@@ -697,7 +704,7 @@ findings as `notes`.
   `DANUS_WRITE_PAPER_COMPILE_ATTEMPTS` (default 3). On success it writes `main.tex`
   and returns `compile="ok"` + `compile_attempts`. If the LaTeX engine is missing it
   cannot gate what it cannot run: it writes once, returns `compile="skipped: no
-  engine"`, and you should run the standalone `compile_verify.sh` when a toolchain
+  engine"`, and you should run the native `artifacts paper compile` command when a toolchain
   is available. If attempts are exhausted it does **not** overwrite `main.tex`,
   quarantines the last attempt to `main.uncompiled.tex`, and returns
   `status="compile_failed"` with a log tail.
@@ -1006,7 +1013,7 @@ yours:
 3. **Drive the verifier yourself**, mirroring the tool: read
    `.agents/skills/write-paper/roles/PAPER_MATH_VERIFIER_PROMPT.md` (and
    `roles/AGENTS.md`), append the confirmed `REFERENCE_LEDGER.md` and the part
-   document, and run a fresh `bin/codex exec --sandbox read-only` per part; read
+   document, and run a fresh `codex exec --sandbox read-only` per part; read
    the final verdict JSON from its output. Every part must return `correct`. A
    `wrong` in the part for R_k → the revise loop above for those findings, then
    re-verify that part and every part that took R_k's statement as established.
@@ -1034,7 +1041,7 @@ whole-paper verification `correct`, or an explicit operator `overridden`) — ne
 deliver a paper whose math was not re-verified
 as written. **Pushing to a LaTeX git repo (e.g.
 Overleaf) / posting to arXiv is outward — an operator fork** (your standing red
-line: confirm anything that leaves the machine). `driver/latex_git_push.sh`
+line: confirm anything that leaves the machine). `uv run danus artifacts paper push`
 handles the push; if it lacks the repo URL / token, **ask the operator, store the
 non-secret config in your own notes and the token in the gitignored secrets file**
 (see the script header), then confirm before pushing.
@@ -1054,7 +1061,7 @@ operator's to change (edit those files, or override per paper in
 
 ## Honesty (load-bearing)
 
-State only what you verified. A paper is "produced" only after `compile_verify.sh`
+State only what you verified. A paper is "produced" only after `artifacts paper compile`
 passed (PDF, zero errors, no undefined citations) **and `paper_verify_math` shows
 `deliver_ok=True`** (the paper re-verified `correct` as written, or an
 operator `overridden`) — "it should compile" / "the facts were already verified" is

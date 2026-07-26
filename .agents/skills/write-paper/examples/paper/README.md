@@ -36,10 +36,10 @@ Three facts build it:
 | Source of content: the fact graph | `project/fact_graph/facts/*.md` |
 | Verbatim goal | `project/PROBLEM.md` |
 | Stage 0 — PROJECT_BRIEF (interview) | `project/paper/PROJECT_BRIEF.md` |
-| Stage 1 — seed the reference ledger | run `seed_ledger.py` on `project/` (see below) |
+| Stage 1 — seed the reference ledger | run `uv run danus artifacts paper seed-ledger` on `project/` (see below) |
 | Stage 2-5 — write / compile / audit / revise | `expected_main.tex` (illustrative result) |
 
-The fact files match the format `driver/seed_ledger.py` and the fact-graph
+The fact files match the packaged `danus.write_paper.seed_ledger` logic and the fact-graph
 reader expect exactly: YAML frontmatter (`fact_id` / `problem_id` / `author` /
 `predecessors` / `glossary_introduces` / `external_refs`) followed by
 `## statement`, `## proof`, and an optional `## intuition`. The `external_refs`
@@ -52,8 +52,8 @@ source*, not re-mined from prose.
 From a checkout where the skill can import the `danus.core` package (see the skill
 README on dependencies), seeding the ledger from these facts:
 
-```bash
-uv run python ../../driver/seed_ledger.py project/ --out /tmp/REFERENCE_LEDGER.md
+```powershell
+uv run danus artifacts paper seed-ledger project/ --out .tmp/REFERENCE_LEDGER.md
 ```
 
 aggregates the two synthetic references below into `unverified` rows — the

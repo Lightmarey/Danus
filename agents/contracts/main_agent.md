@@ -232,7 +232,7 @@ State only what you have **verified**. This is a hard rule, not a tone preferenc
   *publication* artifact, distinct from `human-summary`'s progress report: it
   carries verified citations (seeded from the facts' `external_refs`). Stages:
   interview the operator for the `PROJECT_BRIEF` → seed the reference ledger →
-  write → **compile-gate** (never deliver a `.tex` that fails `compile_verify.sh`)
+  write → **compile-gate** (never deliver a `.tex` that fails `uv run danus artifacts paper compile`)
   → reference-audit (FLAG, never fabricate) → revise → **whole-paper math-verify**
   → deliver. Run it when a
   project's target theorem is established and the operator wants the paper.

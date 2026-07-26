@@ -348,8 +348,8 @@ no-pipeline-metadata items are the non-negotiable floor and hold regardless.
    no fact graph and no ledger; conformance of results to their
    source is checked by a separate verification pass, not a self-check you can run.)
 10. Compile is gated OUTSIDE you, not by your self-check: your output is
-    split, leak-checked, and compiled (`compile_verify.sh`), and you are re-driven
-    with the failing log on a compile error. You cannot run `compile_verify.sh`
+    split, leak-checked, and compiled (`uv run danus artifacts paper compile`), and you are re-driven
+    with the failing log on a compile error. You cannot run the native compile gate
     (empty cwd, no shell), so do not claim a compile result — emit clean LaTeX and
     let the gate run.
 

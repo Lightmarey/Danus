@@ -13,9 +13,13 @@ class BuildPy(build_py):
         rmtree(target, ignore_errors=True)
         human = target / "human-summary"
         human.mkdir(parents=True, exist_ok=True)
-        copy2(source / "human-summary" / "REPORT_WRITER_PROMPT.md", human)
+        for name in (
+            "REPORT_WRITER_PROMPT.md", "md2html.js", "package.json",
+            "package-lock.json",
+        ):
+            copy2(source / "human-summary" / name, human)
         paper = target / "write-paper"
-        for name in ("boilerplate", "roles", "style"):
+        for name in ("boilerplate", "roles", "style", "templates"):
             copytree(source / "write-paper" / name, paper / name, dirs_exist_ok=True)
 
 

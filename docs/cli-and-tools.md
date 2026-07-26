@@ -74,7 +74,7 @@ the verifier can write nothing. See `security-and-trust.md`.
 
 ## MCP server 2 — `write-paper`: fact graph → publishable paper
 
-Six tools (`danus/write_paper/server.py`), each wrapping an isolated codex role.
+Seven tools (`danus/write_paper/server.py`), each wrapping an isolated codex role.
 The main agent calls them with small structured args; the heavy bytes (style guide,
 fact-graph math) are assembled inside the tool and never enter the main agent's
 context. Each tool returns a small honest envelope (status + paths + flags + a
@@ -88,6 +88,7 @@ context. Each tool returns a small honest envelope (status + paths + flags + a
 | `reference_verify` | reference verifier | **online** — verify flagged citations (arXiv + web) and update the reference ledger in place |
 | `paper_revise` | reviser | revise `main.tex` for compile fixes / operator annotations / citation fixes (in-tool compile-retry loop) |
 | `paper_verify_math` | (math re-verification) | re-check the whole paper's math, as written, through a dedicated verifier before delivery |
+| `style_distill` | style distiller | read all changed style anchors and return operator-gated proposals; never edits the guide or review marker |
 
 Most tools take an optional `paper_id` — a project can hold multiple papers (the
 default paper uses the legacy `<project>/paper/` workspace; any other `paper_id`
@@ -104,6 +105,12 @@ gets an isolated `<project>/papers/<paper_id>/`). See the write-paper skill READ
 
 `summary_write` takes an optional `language` (else it follows the operator's
 language in `OPERATOR.md`).
+
+Native artifact gates are exposed through `uv run danus artifacts`: use
+`paper compile`, `paper seed-ledger`, and the operator-gated `paper push` for
+publication artifacts; use `summary doctor`, the explicit one-time
+`summary install-deps`, and `summary render` for report PDFs. Rendering itself
+never installs dependencies or contacts the package registry.
 
 ---
 

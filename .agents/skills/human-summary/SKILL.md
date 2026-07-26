@@ -59,8 +59,8 @@ locked there, not here.
 
 Once you have a clean `report.md`, render it to a self-contained PDF:
 
-```bash
-bash ".agents/skills/human-summary/render_pdf.sh" <report.md> <out.pdf> "Title"
+```powershell
+uv run danus artifacts summary render <report.md> <out.pdf> --title "Title"
 ```
 
 This server-renders markdown + KaTeX into self-contained HTML and prints it to
@@ -74,8 +74,8 @@ The tool's leak check is the primary guard, and the scrub makes a leak
 structurally impossible. As a belt-and-braces backstop before you deliver, you
 may still grep the rendered source:
 
-```bash
-grep -E '[0-9a-f]{16}' <report.md>    # must return nothing (no fact_id / hash prefix)
+```powershell
+rg -n '[0-9a-f]{16}' <report.md>    # must return nothing (no fact_id / hash prefix)
 ```
 
 If this (or the tool's `leak_findings`) ever fires, treat the report as
@@ -121,13 +121,15 @@ progress report, not a publication artifact.
 
 ## Prerequisites for the render (declare them; the ops layer provisions them)
 
-- A **headless Chrome / Chromium** binary — resolved via `DANUS_CHROME_BIN` (from
-  `scripts/env.sh`) or a `google-chrome` on PATH. This is a local PDF-render
-  binary only; it is unrelated to any browser transport. Confirm with
-  `bash ".agents/skills/human-summary/doctor.sh"`.
-- **node** (provisioned by `scripts/bootstrap.sh`) + the pinned node deps
-  (`markdown-it`, `katex`) in `package.json`. `render_pdf.sh` installs them once if
-  absent; the KaTeX CSS is then vendored from the local install, so subsequent
-  renders need **no network**.
+- A **headless Chrome / Chromium** binary — resolved via `DANUS_CHROME_BIN`,
+  standard Windows Chrome/Edge locations, or a Chrome/Chromium command on PATH.
+  This is a local PDF-render binary only; it is unrelated to any browser
+  transport. Confirm with
+  `uv run danus artifacts summary doctor`.
+- **node** on PATH + the pinned node deps
+  (`markdown-it`, `katex`) at exact versions in `package.json`. Install them only
+  through the explicit `uv run danus artifacts summary install-deps` command;
+  rendering never installs or contacts the network. The KaTeX CSS is then local,
+  so subsequent renders need **no network**.
 
 A tiny 3-fact example under `examples/` exercises the render pipeline end to end.

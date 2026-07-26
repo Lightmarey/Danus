@@ -149,6 +149,10 @@ def test_summary_write_clean_writes_report_and_status_ok():
         assert out["leak_findings"] == []
         report_path = Path(out["report_md_path"])
         assert report_path.exists() and report_path.read_text(encoding="utf-8") == _CLEAN_REPORT
+        run_log = Path(out["log_path"])
+        assert run_log.is_file()
+        log_text = run_log.read_text(encoding="utf-8")
+        assert "## command" in log_text and "## stdout" in log_text
         # small return: the full report body is not leaked into the dict
         assert "stdout" not in out and _CLEAN_REPORT not in str(out)
 
@@ -189,6 +193,17 @@ def test_summary_write_timeout_is_honest():
         out = server.summary_write()
         assert out["status"] == "timeout"
         assert not Path(out["report_md_path"]).exists()
+
+
+def test_summary_failure_removes_a_stale_clean_report():
+    with temp_project() as pdir, env(DANUS_PROJECT_DIR=str(pdir), DANUS_AGENTS_ROOT=None):
+        report = pdir / "report" / "report.md"
+        report.parent.mkdir(parents=True, exist_ok=True)
+        report.write_text(_CLEAN_REPORT, encoding="utf-8")
+        with _fake_codex(stdout="partial", returncode=2, stderr="failed"):
+            out = server.summary_write()
+        assert out["status"] == "error"
+        assert not report.exists()
 
 
 def test_leak_findings_catches_machinery_terms():

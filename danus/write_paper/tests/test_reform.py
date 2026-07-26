@@ -15,28 +15,19 @@ Runs standalone (``python -m danus.write_paper.tests.test_reform``) and pytest.
 
 from __future__ import annotations
 
-import importlib.util
 import shutil
 import tempfile
 from pathlib import Path
 
 from danus.core import FactGraph
-from danus.write_paper import assemble
+from danus.write_paper import assemble, seed_ledger
 
-from ._fixtures import MAIN_SKILL_DIR, SKILL_DIR, env, temp_project, seed_ledger_text
+from ._fixtures import SKILL_DIR, env, temp_project, seed_ledger_text
 
 
 # --------------------------------------------------------------------------- #
 # helpers                                                                     #
 # --------------------------------------------------------------------------- #
-
-def _seed_ledger_mod():
-    path = MAIN_SKILL_DIR / "driver" / "seed_ledger.py"
-    spec = importlib.util.spec_from_file_location("_wp_seed_ledger_reform", path)
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)  # type: ignore[union-attr]
-    return mod
-
 
 def _add_side_lemma(pdir: Path) -> str:
     """Add a proven-but-UNUSED side lemma to the example graph: it is nothing's
@@ -161,7 +152,7 @@ def test_explicit_headline_leaf_excludes_the_other_branch():
 # --------------------------------------------------------------------------- #
 
 def test_ledger_scoped_to_closure_excludes_side_lemma_ref():
-    mod = _seed_ledger_mod()
+    mod = seed_ledger
     with temp_project() as pdir:
         _add_side_lemma(pdir)
         # default (closure) seeding: the closure is fact_odd_sum_main + its two
@@ -172,7 +163,7 @@ def test_ledger_scoped_to_closure_excludes_side_lemma_ref():
 
 
 def test_ledger_all_facts_flag_restores_side_lemma_ref():
-    mod = _seed_ledger_mod()
+    mod = seed_ledger
     with temp_project() as pdir:
         _add_side_lemma(pdir)
         ledger_all = mod.render(mod.collect(Path(pdir), all_facts=True))
@@ -181,7 +172,7 @@ def test_ledger_all_facts_flag_restores_side_lemma_ref():
 
 def test_ledger_and_writer_share_one_closure():
     # the ledger's cited_by facts are exactly the writer's closure facts.
-    mod = _seed_ledger_mod()
+    mod = seed_ledger
     with temp_project() as pdir:
         _add_side_lemma(pdir)
         closure = set(mod.closure_fact_ids(Path(pdir)))
@@ -190,7 +181,7 @@ def test_ledger_and_writer_share_one_closure():
 
 
 def test_ledger_headline_arg_scopes_to_a_single_leaf():
-    mod = _seed_ledger_mod()
+    mod = seed_ledger
     with temp_project() as pdir:
         _add_side_lemma(pdir)
         # headline = odd_recurrence only (a leaf with the AC24 ref); closure = {itself}

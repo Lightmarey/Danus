@@ -105,7 +105,10 @@ def _verify(statement: str, proof: str) -> Dict[str, Any]:
     req = urllib.request.Request(
         verify_url, data=data, headers={"Content-Type": "application/json"}
     )
-    with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310 (trusted local URL)
+    # The verifier is a loopback service.  Bypass host proxy variables so a
+    # machine-wide HTTP_PROXY cannot redirect local proof material elsewhere.
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    with opener.open(req, timeout=timeout) as resp:  # noqa: S310 (trusted local URL)
         return json.loads(resp.read().decode("utf-8"))
 
 

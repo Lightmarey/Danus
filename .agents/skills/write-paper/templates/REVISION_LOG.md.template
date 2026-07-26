@@ -10,4 +10,4 @@
 - **did:** <one-line summary of the round>
 - **changed:** <sections / theorems / bibliography touched>
 - **open / handed off:** <flags left for the next role, e.g. `\note{[cite/blocker] ...}`>
-- **compile:** <pass/fail + PDF size, from compile_verify.sh>
+- **compile:** <pass/fail + PDF size, from `uv run danus artifacts paper compile`>
