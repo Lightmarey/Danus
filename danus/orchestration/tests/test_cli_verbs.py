@@ -552,7 +552,7 @@ def test_do_list_bad_project_json(tmp: Path):
         cli.do_new("P", roles="high:1", model="gpt-5.5")
         (L.project_dir("P") / "project.json").write_text("{ broken", encoding="utf-8")
         rows = {r["project"]: r for r in cli.do_list()}
-        assert rows["P"]["model"] == "—"               # unparseable meta => dash
+        assert rows["P"]["model"] == "-"               # unparseable meta => dash
 
 
 def test_do_list_missing_project_json(tmp: Path):
@@ -560,7 +560,7 @@ def test_do_list_missing_project_json(tmp: Path):
         cli.do_new("P", roles="high:1")
         (L.project_dir("P") / "project.json").unlink()
         rows = {r["project"]: r for r in cli.do_list()}
-        assert rows["P"]["model"] == "—"
+        assert rows["P"]["model"] == "-"
 
 
 # --------------------------------------------------------------------------- #
@@ -584,7 +584,7 @@ def test_fmt_status_rows():
     out = cli._fmt_status(rows)
     assert "WORKER" in out and "high" in out and "xhigh" in out
     assert "12s" in out                                # age rendered from float
-    assert "—" in out                                  # None age / fact => dash
+    assert "-" in out                                  # None age / fact => dash
 
 
 # --------------------------------------------------------------------------- #
@@ -645,6 +645,14 @@ def test_build_parser_all_verbs():
         raise AssertionError("expected argparse to require a subcommand")
     except SystemExit:
         pass
+
+
+def test_cli_help_is_safe_on_legacy_windows_code_pages():
+    """Windows may redirect stdout through cp1252 instead of a UTF-8 console."""
+    parser = cli.build_parser()
+    parser.format_help().encode("cp1252")
+    finalize = parser._subparsers._group_actions[0].choices["finalize"]
+    finalize.format_help().encode("cp1252")
 
 
 # --------------------------------------------------------------------------- #

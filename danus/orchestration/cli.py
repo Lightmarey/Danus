@@ -183,7 +183,7 @@ def worker_status(wl: L.WorkerLayout) -> Dict:
     pid = _read_pid(wl)
     alive = _alive(pid)
     st = _read_status(wl)
-    state = st.get("state", "—")
+    state = st.get("state", "-")
     now = time.time()
     last = st.get("last_round_at") or st.get("round_started_at") or st.get("updated_at")
     age = (now - last) if isinstance(last, (int, float)) else None
@@ -232,7 +232,7 @@ def do_list() -> List[Dict]:
         live = sum(1 for w in workers
                    if _alive(_read_pid(L.WorkerLayout(L.worker_dir(project, w)))))
         out.append({"project": project, "workers": len(workers), "live": live,
-                    "model": meta.get("model", "—")})
+                    "model": meta.get("model", "-")})
     return out
 
 
@@ -248,9 +248,9 @@ def _fmt_status(rows: List[Dict]) -> str:
     head = f"{'WORKER':<14}{'LABEL':<12}{'STATE':<13}{'ROUND':>6}  {'AGE':>7}  {'LAST_FACT':<16}"
     lines = [head, "-" * len(head)]
     for r in rows:
-        age = f"{r['age_s']:.0f}s" if r["age_s"] is not None else "—"
+        age = f"{r['age_s']:.0f}s" if r["age_s"] is not None else "-"
         lines.append(f"{r['worker']:<14}{r['label']:<12}{r['state']:<13}"
-                     f"{r['round']:>6}  {age:>7}  {str(r['last_fact_id'] or '—'):<16}")
+                     f"{r['round']:>6}  {age:>7}  {str(r['last_fact_id'] or '-'):<16}")
     return "\n".join(lines)
 
 
@@ -324,7 +324,7 @@ def build_parser() -> argparse.ArgumentParser:
     f.add_argument("project")
     f.add_argument("--paper", default=None,
                    help="the paper_id (multiple papers per project). Default / 'main' "
-                        "→ legacy <project>/TARGET.md; else "
+                        "-> legacy <project>/TARGET.md; else "
                         "<project>/papers/<paper_id>/TARGET.md")
     f.add_argument("fact_ids", nargs="*",
                    help="the target fact id(s); omit to print candidate terminal facts")
@@ -368,7 +368,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         if "suggested" in r:
             sug = r["suggested"]
             if sug:
-                print(f"no fact_id given — candidate target facts for {r['project']}{paper_note} "
+                print(f"no fact_id given - candidate target facts for {r['project']}{paper_note} "
                       f"(terminal facts; nothing depends on them):")
                 for fid in sug:
                     print(f"  {fid}")
