@@ -111,6 +111,7 @@ defaults apply everywhere; per-service overrides win.
 | `TEX_ENGINE` | auto (`latexmk` preferred) | write-paper LaTeX engine (`latexmk`/`pdflatex`/`xelatex`/`lualatex`/`tectonic`) |
 | `DANUS_LATEX_TIMEOUT_SECONDS` | `300` | wall-clock cap for each native LaTeX command |
 | `DANUS_SUMMARY_COMMAND_TIMEOUT_SECONDS` | `120` | wall-clock cap for each Node/npm/Chrome summary command |
+| `DANUS_PDFTOTEXT_TIMEOUT_SECONDS` | `60` | wall-clock cap for each PDF style-anchor extraction |
 | `DANUS_AUTHORING_TIMEOUT_SECONDS` | driver default | shared Codex writer/summary call cap |
 | `DANUS_WRITE_PAPER_TIMEOUT_SECONDS` | shared authoring cap | write-paper Codex call override |
 | `DANUS_HUMAN_SUMMARY_TIMEOUT_SECONDS` | shared authoring cap | human-summary Codex call override |

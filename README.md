@@ -99,10 +99,11 @@ uv sync
 Copy-Item config/danus.env.example config/danus.env
 Copy-Item config/codex.env.example config/codex.env
 
-# 3. health check + bring up the verify service (REQUIRED for any proving)
+# 3. static prerequisites, Codex authentication, and required verifier health
 uv run danus-doctor
+uv run danus codex status
 uv run danus services up verify
-uv run danus services status
+uv run danus services test
 
 # 4. start Codex rooted at this repo; AGENTS.md and .codex/config.toml load here
 codex

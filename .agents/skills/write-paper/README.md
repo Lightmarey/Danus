@@ -3,7 +3,7 @@
 These are the **codex-facing** fixed files for the paper roles. They are **not**
 read directly by the main agent. Unlike `agents/skills/worker` and
 `agents/skills/verify`, they are not copied into generated homes. The **`write-paper`
-MCP service** (`danus.write_paper`, launched by `bin/write-paper-mcp`) reads them
+MCP service** (`danus.write_paper`, launched by `uv run write-paper-mcp`) reads them
 at call time and **embeds them verbatim into the one-shot codex prompt** — the
 paper codex runs in an empty cwd and reads nothing from disk.
 

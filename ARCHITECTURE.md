@@ -62,8 +62,7 @@ Danus/
 ├─ .agents/skills/              canonical Codex main-agent skills
 │  ├─ elaboration/  consult/  human-summary/  initialize/
 │  └─ write-paper/              recipe, role prompts, style, drivers, and templates
-├─ bin/                         thin wrappers: danus · danus-mcp · write-paper-mcp · human-summary-mcp · codex · consult
-├─ scripts/                     bootstrap · doctor · services · env · setup/check-codex · start-verify/-dashboard · recover · install-tex
+├─ bin/ scripts/                optional POSIX compatibility wrappers; not used by the native core
 ├─ docs/                        human docs: getting started · concepts · operating guide · security & trust · …
 └─ examples/                    unattended-ops examples + a toy project
 ```
@@ -127,4 +126,4 @@ Danus/
 | global-memory kinds | the 11 `GLOBAL_KINDS` (incl. `master_guidance`/`elaboration`/`verification`) | `danus.core` ↔ agents · strategy · consult |
 | consult JSON envelope | `{transport,reply,usage,cost_usd,…}` | `danus.strategy` CLI ↔ consult skill |
 | main assets | one canonical source under `.agents/skills/`; worker/verifier skills stay isolated under `agents/skills/` | Codex main + authoring assemblers ↔ canonical assets |
-| env-var contract | `DANUS_* / CODEX_* / VERIFY_* / CONSULT_*` names; the codex CALL + env (bin/model/effort/PATH/`exec` prefix) is resolved through the shared `danus.codex` launcher: neutral `DANUS_CODEX_BIN` / `DANUS_CODEX_MODEL` / `DANUS_CODEX_EFFORT` + per-service `DANUS_{VERIFY,WRITE_PAPER,HUMAN_SUMMARY}_{MODEL,EFFORT}` overrides | `danus.codex` + `config/` + `scripts/env.sh` ↔ every codex-exec site (`danus.execution.loop` · `danus.verify.launcher` · `danus.authoring.driver`) |
+| env-var contract | `DANUS_* / CODEX_* / VERIFY_* / CONSULT_*` names; Python loads the non-executable env-file chain and the codex CALL + env (bin/model/effort/PATH/`exec` prefix) is resolved through the shared `danus.codex` launcher | `danus.runtime` + `danus.codex` + `config/` ↔ every codex-exec site (`danus.execution.loop` · `danus.verify.launcher` · `danus.authoring.driver`) |

@@ -49,55 +49,39 @@ of `up` invocations, so a restart can replay them (see recovery).
 ## Health checks
 
 ```powershell
-uv run danus-doctor             # full stack configuration/tooling diagnosis
+uv run danus-doctor             # static executable/import/agent-asset checks
+uv run danus codex status       # configured backend + real Codex authentication
 uv run danus services test      # required verify identity + health only
+uv run danus artifacts summary doctor  # optional Node/Chrome report tooling
 codex mcp list                  # confirm repo MCP configuration is visible
 ```
 
-- `danus services test` is deliberately narrow and exits nonzero unless this
-  deployment's verify service is definitively up. It does not duplicate doctor.
-- `danus-doctor` is read-only: config files, python + verify deps, node, the codex
-  wrapper + backend, a live verify `/health`, and soft checks for `pdflatex` /
-  Chrome. Run it whenever something looks off. A real healthy run (chatgpt backend,
-  no TeX installed):
-
-  ```
-  == Danus doctor ==
-  DANUS_ROOT=/home/you/Danus
-    ok   config/danus.env present
-    ok   config/codex.env present
-    ok   python: .../runtime/venv/bin/python
-    ok   python dep: mcp
-    ok   python pkg: danus (importable from any cwd)
-    ok   python deps: fastapi/uvicorn/pydantic
-    ok   python dep: openai (gpt_pro consult)
-    ok   python dep: anthropic (claude_api consult)
-    ok   node: .../runtime/node22/bin/node
-    ok   codex: codex-cli 0.142.5
-    ok   codex login ok (/home/you/codex-home)
-    ok   verify service up :8091 (ours)
-    warn no pdflatex on PATH (write-paper PDF render needs it; set TEX_ENGINE or install TeX)
-    ok   chrome: /usr/bin/chromium-browser (human-summary PDF)
-  consult transport: gpt_pro
-  done.
-  ```
-
-  (`warn` lines are soft/optional deps, not failures; on the api backend the codex
-  lines read `codex backend: api provider configured` + `codex API live ping ok`.)
-- `check-codex.sh` exits `0` if the backend answered; history in
-  `runtime/logs/codex-health.jsonl`. Use it when workers/verify show API errors.
+- `danus-doctor` is deliberately static and read-only. It exits nonzero when the
+  Python/Codex executable, required imports, or packaged worker assets are absent.
+- `danus codex status` is the authentication check. It exits nonzero when the
+  selected ChatGPT or API route is not usable.
+- `danus services test` exits nonzero unless this deployment's verifier is
+  definitively healthy and its process identity matches the retained sidecar.
+- LaTeX and report dependencies are optional until artifact generation. Check
+  report tooling with `danus artifacts summary doctor`; a paper compile reports a
+  missing TeX engine directly.
 
 ## Recovery after a host restart
 
-```bash
-bash scripts/recover.sh
+```powershell
+uv sync
+uv run danus codex status
+uv run danus services recover
+uv run danus services test
 ```
 
-One command: re-runs `bootstrap.sh` (rebuilds the possibly-dangling venv + codex
-provider), clears stale pidfiles, **replays the `runtime/run/autostart` manifest**
-(brings the services back up), and prints codex + services health. Idempotent.
+The native recovery command validates and replays the
+`runtime/run/autostart` manifest. It reuses the normal identity/health checks,
+so dead PID evidence is replaced while a foreign or PID-reused live process is
+never killed or overwritten. The command is idempotent. `uv sync` remains an
+explicit first step so a moved Python installation can rebuild the environment.
 
-> Note: after a restart, worker loops are **not** auto-resumed by `recover.sh` — it
+> Note: after a restart, worker loops are **not** auto-resumed by recovery — it
 > restores the services. Restart workers with `danus start <project>` (they resume
 > from persisted memory).
 

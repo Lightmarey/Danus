@@ -135,6 +135,7 @@ lifecycle.
 uv run danus services up verify
 uv run danus services up dashboard <project>
 uv run danus services status
+uv run danus services recover
 uv run danus services logs <service>
 uv run danus services down <service-or-all>
 ```

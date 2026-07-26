@@ -14,8 +14,8 @@ uv run danus-doctor
 ```
 
 `uv sync` creates the environment from the checked-in lockfile.
-`danus-doctor` reports missing required configuration separately from optional
-authoring tools.
+`danus-doctor` checks the static Python, Codex executable, and packaged agent
+assets. Authentication and live service health are checked explicitly below.
 
 ## 2. Configure
 
