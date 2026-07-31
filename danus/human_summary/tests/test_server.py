@@ -129,7 +129,7 @@ def test_build_app_registers_summary_write():
 def test_main_module_runs_build_app():
     # __main__.py — `python -m danus.human_summary` builds the app and calls run().
     import runpy
-    from mcp.server.fastmcp import FastMCP
+    from danus._mcp import FastMCP
 
     orig_run = FastMCP.run
     calls = {"n": 0}

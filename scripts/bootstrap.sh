@@ -50,7 +50,7 @@ export PATH="$NODE_DIR/bin:$PATH"
 # + imports the deps, and REBUILD it from a fresh base python if not.
 VENV="$RT/venv"
 export PIP_DISABLE_PIP_VERSION_CHECK=1
-DEPS='import mcp,fastapi,uvicorn,pydantic,openai,anthropic'
+DEPS='from danus._mcp import FastMCP; import fastapi,uvicorn,pydantic,openai,anthropic'
 if "$VENV/bin/python" -c "$DEPS" 2>/dev/null; then
   log "venv present + healthy"
 else

@@ -37,7 +37,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-from mcp.server.fastmcp import FastMCP
+from danus._mcp import FastMCP
 
 from danus.authoring import driver
 from danus.authoring.common import classify_outcome, leak_findings, resolve_project

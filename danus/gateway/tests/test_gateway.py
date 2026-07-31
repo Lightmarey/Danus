@@ -295,7 +295,7 @@ def test_main_module_builds_and_runs():
     # `python -m danus.gateway` builds an app from DANUS_ROLE and calls .run();
     # stub FastMCP.run so no stdio server actually starts.
     import runpy
-    from mcp.server.fastmcp import FastMCP
+    from danus._mcp import FastMCP
 
     orig_run = FastMCP.run
     calls = {"n": 0}
