@@ -185,7 +185,7 @@ def test_main_module_runs_build_app(monkeypatch=None):
     # __main__.py — `python -m danus.write_paper` builds the app and calls .run().
     # We stub FastMCP.run so nothing blocks / opens stdio, then run the module.
     import runpy
-    from mcp.server.fastmcp import FastMCP
+    from danus._mcp import FastMCP
 
     orig_run = FastMCP.run
     calls = {"n": 0}
