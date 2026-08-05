@@ -35,6 +35,7 @@ from pathlib import Path
 from typing import Optional
 
 from . import layout as L
+from . import scaffold
 from danus import codex
 
 _FACT_ID_RE = re.compile(r'"?fact_id"?\s*[:=]\s*"?([0-9a-f]{16})"?')
@@ -187,6 +188,12 @@ def main(worker_dir: str) -> int:
     project = wl.project
     worker = wl.name
     role = _read_role(wl)
+
+    # Pin the worker's gateway to THIS interpreter (sys.executable = the venv
+    # python danus runs on), rewritten every start: a moved/rebuilt venv is
+    # picked up, and a bare `python3` on codex's PATH can never resolve the
+    # gateway to a different install.
+    scaffold.write_codex_config(wl)
 
     beat = float(os.environ.get("DANUS_ROUND_BEAT", "5"))
     hard_timeout = int(os.environ.get("DANUS_ROUND_HARD_TIMEOUT", "14400"))
