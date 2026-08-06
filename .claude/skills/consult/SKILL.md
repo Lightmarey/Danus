@@ -58,8 +58,10 @@ sides, then start the workers.
      runs the paid OpenAI-compatible endpoint; `claude_api` runs the native Anthropic
      API (per-token, BYO key); `claude_code` runs the consult through the Claude Code
      CLI (`claude -p`); `off` short-circuits (see the `off` path below).
-   - **Effort** (`--effort high|xhigh`, default `high`): `high` is the workhorse,
-     `xhigh` for the hardest forks.
+   - **Effort** (`--effort high|xhigh|max`, default `high`): `high` is the
+     workhorse; reserve stronger levels for the hardest forks. All transports
+     support through `max`; on `gpt_pro`, `max` fails rather than silently running
+     without the requested reasoning effort when an endpoint rejects it.
    - `--project` records the spend: one line per call appended to
      `<project_dir>/spend/consult.jsonl`, and the CLI returns the running
      `project_total_usd`. **Always pass `--project`.**

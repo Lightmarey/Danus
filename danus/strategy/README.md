@@ -18,9 +18,16 @@ danus/strategy/
 ## Transports (`DANUS_CONSULT_TRANSPORT`)
 
 - **`gpt_pro`** (default) — a paid OpenAI-compatible Responses endpoint
-  (`DANUS_CONSULT_API_KEY`/`_BASE_URL`/`_MODEL`). Driven `background=True, stream=True`
-  (a sync xhigh call would hang the proxy); **400-only** graceful param step-down
-  (`full → no-tools → no-effort → bare`). Cost is computed per-call.
+  (`DANUS_CONSULT_API_KEY`/`_BASE_URL`/`_MODEL`). Driven `background=True,
+  stream=True, store=False` with the canonical message-list `input` shape (a sync
+  xhigh call would hang the proxy, and consult prompts must not be server-stored).
+  Gateways that explicitly reject `background` or `max_output_tokens` are retried
+  without that parameter while preserving effort/tools. Other 400s use the
+  graceful lower-effort step-down (`full → no-tools → no-effort → bare`);
+  `max` instead preserves its effort (`full → no-tools → no-summary →
+  effort-only`). Cost is computed per-call. Streamed output-text deltas are
+  retained as the reply when a compatible gateway returns a sparse final
+  `response.completed` object.
 - **`claude_api`** — the native Anthropic API (per-token, BYO key; the envelope cost
   is the response's REAL usage × the per-1M rates). Streamed; adaptive thinking +
   `output_config.effort`; server-side web search; refusal-fallback param attached
@@ -35,6 +42,15 @@ danus/strategy/
   Knobs: `DANUS_CONSULT_CLAUDE_CODE_MODEL`/`_BIN`/`DANUS_CONSULT_CLAUDE_CODE_MAX_WALL`.
 - **`off`** — no consult; the main agent reasons on its own (the CLI returns a valid
   `$0` envelope with a non-zero exit as an expected signal).
+
+## Reasoning effort
+
+`--effort` accepts `minimal`, `low`, `medium`, `high`, `xhigh`, and `max`.
+All transports support through `max`. On `gpt_pro`, a `max` request may simplify
+unsupported summary/tool parameters, but it never falls back to a request with no
+reasoning effort; an endpoint that rejects `max` therefore fails visibly instead
+of producing a misleading strongest-level ledger entry. Lower levels retain the
+documented compatibility step-down, exposed through the envelope's `attempt` field.
 
 ## The envelope (pinned §6 contract with the consult skill)
 
