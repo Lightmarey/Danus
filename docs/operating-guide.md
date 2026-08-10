@@ -35,9 +35,10 @@ Tell the main agent the problem. It will:
 
 1. **Ask the worker roster** — how many `high` + `xhigh` workers (default
    `high:3,xhigh:4` = 3 + 4).
-2. **Write `PROBLEM.md`** — your goal, verbatim, under `runtime/projects/<p>/`.
-3. **Scaffold** — `danus new <p> --roles high:N,xhigh:M` (creates the workers, the
-   empty `global_memory/` + `fact_graph/`).
+2. **Write `PROBLEM.md`** — your goal verbatim, then scaffold with
+   `danus new <p> --problem PROBLEM.md --roles high:N,xhigh:M`.
+3. **Approve the target** — propose and diff a versioned `TargetContract`, then
+   explicitly `danus target approve <p> <version>` before assigning routes.
 
 A **project** is the unit of work: one problem, its own memory and fact graph. You
 can run several at once; every operation names a project.
@@ -63,10 +64,15 @@ For unattended worker operation see `operations.md`.
 
 ## 3. Workers prove; facts accumulate
 
-`danus start <p>` launches the autonomous worker loops. Each worker reads its
-`TASK.md` + `master_guidance`, picks proving skills, works, and submits results via
+`danus start <p>` launches only workers with a valid assignment. A v2 worker reads
+its approved target, obligation, route, `TASK.md`, and `master_guidance`, works one
+structured exploration slice, and submits results via
 `fact_submit` — which the **verifier** gates. A submission becomes a **fact** only
 on a `correct` verdict; every verdict is traced to global memory either way.
+
+Two consecutive low-information checkpoints trigger a fresh route audit; only a
+third low-gain audit stalls the route. Validated exploratory evidence can renew a
+lease without already being a theorem. See [research-control-v2.md](research-control-v2.md).
 
 Monitor with:
 

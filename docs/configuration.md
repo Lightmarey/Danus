@@ -102,6 +102,12 @@ defaults apply everywhere; per-service overrides win.
 | `DANUS_MAX_CONSEC_FAILURES` | `5` | bail after N consecutive failed rounds |
 | `DANUS_ROUND_BEAT` | `5` | seconds between rounds |
 
+Those variables govern legacy loops. V2 slice timeout and route limits are stored
+on each structured assignment (`--slice-timeout`, `--max-slices`). Optional
+`TargetContract.budget` limits total wall time and/or USD cost. When the Codex
+backend exposes token usage, `DANUS_CODEX_PRICE_IN` and
+`DANUS_CODEX_PRICE_OUT` give per-million-token rates for cost attribution.
+
 ## Rendering & misc
 
 | variable | default | meaning |

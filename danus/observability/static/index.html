@@ -20,6 +20,7 @@
       <a class="nav-link active" data-tab="overview">Overview</a>
       <a class="nav-link" data-tab="graph">Fact Graph</a>
       <a class="nav-link" data-tab="memory">Global Memory</a>
+      <a class="nav-link" data-tab="control">Research Control</a>
     </nav>
     <span id="refresh-note" class="refresh-note"></span>
   </header>
@@ -56,6 +57,16 @@
     <section id="tab-memory" class="tab">
       <div id="mem-subtabs" class="subtabs"></div>
       <div id="mem-list" class="mem-list"></div>
+    </section>
+
+    <!-- Danus v2 research control -->
+    <section id="tab-control" class="tab">
+      <div id="control-summary" class="cards"></div>
+      <div class="ov-grid">
+        <div class="panel"><div class="panel-h">Target versions</div><div id="control-targets" class="mem-list"></div></div>
+        <div class="panel"><div class="panel-h">Obligations</div><div id="control-obligations" class="mem-list"></div></div>
+        <div class="panel"><div class="panel-h">Routes and assignments</div><div id="control-routes" class="mem-list"></div></div>
+      </div>
     </section>
   </main>
 

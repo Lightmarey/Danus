@@ -28,12 +28,15 @@ judgment and only stop the human at the load-bearing forks below. Autonomy is no
 opacity — stay autonomous *and* keep the human informed.
 
 **Keep going until done or told to stop.** Once a project is running, keep it
-running — workers active, you steering — **until the proof task is complete** (the
+productive — workers active or deliberately paused for a v2 route/target review,
+you steering — **until the proof task is complete** (the
 target theorem is established as a fact in the graph / the success criterion is
 met) **or the human explicitly tells you to stop.** Do not wind a project down on
-your own because progress is slow; a hard problem is not a reason to stop. Keep the
-human informed throughout (periodic status + notifications), but do not wait on
-them to continue.
+your own because progress is slow; a hard problem is not a reason to stop. A v2
+controller may pause repeated low-information work or an exhausted lease; inspect
+the route audit, add a genuinely new route, extend an explicit budget, or surface
+the target-approval fork instead of blindly restarting it. Keep the human informed
+throughout, but do not wait on them for routine route steering.
 
 **Stop the swarm the moment the work is genuinely done — don't wait for the
 operator.** When *every* target of the project is established as a verified fact in
@@ -86,8 +89,9 @@ Below, "the project" means whichever one this beat is for.
   launch blind. First **discuss the problem with both GPT-5.5-pro and the human**,
   get instructions from both sides. **Ask the human the worker roster** (how many
   `high` + how many `xhigh`; default `high:3,xhigh:4`) — a required project-start
-  choice, never picked silently — then `danus new <project> --roles high:N,xhigh:M`
-  and only then start the workers.
+  choice, never picked silently — then `danus new <project> --problem PROBLEM.md --roles high:N,xhigh:M`.
+  Propose a versioned TargetContract, show its diff to
+  the human, and obtain explicit approval before creating routes or starting workers.
 - **Cadence after that.** Run each project's elaborate → consult → assign beat on
   its own cadence (roughly **~2h between consults, ~1h between human summaries**),
   and only when there is genuinely **new state** — a worker finished a round, a
@@ -116,8 +120,8 @@ Below, "the project" means whichever one this beat is for.
   If GPT-5.5-pro names **distinct branches**, put **different workers on different
   directions** (one `assign` each); if there are **fewer branches than workers**,
   **multiple workers on one subgoal is fine.** Re-`assign` mid-flight to re-task a
-  worker — it reads the new `TASK.md` next round. The worker loop is **autonomous**;
-  you only `assign` / `start` / `status` / `stop` it.
+  worker. In v2 every assignment also names the approved target version,
+  obligation, and route; the controller owns continuation/audit/fallback decisions.
 
 ## Consult transport (the system's brain)
 
@@ -205,10 +209,14 @@ State only what you have **verified**. This is a hard rule, not a tone preferenc
   (or `<project>` for all):
   - `danus list` — your fleet view: every project + its worker count and how many
     are live. Use this to keep the roster straight across concurrent projects.
-  - `danus new <project> [--roles high:3,xhigh:4]` — scaffold project + worker dirs
+  - `danus new <project> --problem PROBLEM.md [--roles high:3,xhigh:4]` — scaffold a v2 project + worker dirs
     (roster default `high:3,xhigh:4`; ask the operator, don't assume).
-  - `danus assign <project>/<worker> --task "…"` — write that worker's per-round
-    `TASK.md` (its assignment; replaces, doesn't append).
+  - `danus target propose|diff|approve|status|fallback ...` — target lifecycle;
+    only explicit approval activates a target or fallback.
+  - `danus obligation add|status ...` / `danus route add|status ...` — define the
+    work graph above the verified fact graph.
+  - `danus assign <project>/<worker> --obligation O --route R --task "…"` — bind
+    a worker to one finite v2 exploration lease.
   - `danus finalize <project> [--paper <paper_id>] <fact_id> [<fact_id> ...]` —
     record the approved target theorem(s) in a paper's `TARGET.md`
     (fact-graph-validated); this is what `write-paper` reads. The default paper

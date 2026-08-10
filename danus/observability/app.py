@@ -307,6 +307,67 @@ def build_channel(kind: str, project: Optional[Path] = None) -> Dict[str, Any]:
     return {"kind": kind, "count": len(entries), "entries": entries}
 
 
+def build_control(project: Optional[Path] = None) -> Dict[str, Any]:
+    """Read-only fold of the v2 control files and append-only events."""
+    project = project or _project_dir()
+    try:
+        meta = json.loads((project / "project.json").read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        meta = {}
+    if meta.get("control_version") != 2:
+        return {"enabled": False}
+    root = project / "control"
+    events = _load_jsonl(root / "events.jsonl")
+
+    def objects(directory: str) -> List[Dict[str, Any]]:
+        out = []
+        for path in sorted((root / directory).glob("*.json")):
+            try:
+                value = json.loads(path.read_text(encoding="utf-8"))
+                if isinstance(value, dict):
+                    out.append(value)
+            except (OSError, json.JSONDecodeError):
+                pass
+        return out
+
+    target_state: Dict[str, str] = {}
+    obligation_state: Dict[str, str] = {}
+    route_state: Dict[str, str] = {}
+    current = None
+    for event in events:
+        kind = event.get("event")
+        version = event.get("target_version")
+        if kind == "target_proposed" and version:
+            target_state[version] = "draft"
+        elif kind == "target_approved" and version:
+            target_state[version] = "approved"
+            current = version
+        elif kind == "target_superseded" and version:
+            target_state[version] = "superseded"
+            if current == version:
+                current = None
+        elif kind == "obligation_state" and event.get("obligation_id"):
+            obligation_state[event["obligation_id"]] = event.get("state", "open")
+        elif kind == "route_state" and event.get("route_id"):
+            route_state[event["route_id"]] = event.get("state", "proposed")
+    targets = [{**item, "state": target_state.get(item.get("version"), "draft")} for item in objects("targets")]
+    obligations = [{**item, "state": obligation_state.get(item.get("id"), "open")} for item in objects("obligations")]
+    routes = [{**item, "state": route_state.get(item.get("id"), "proposed")} for item in objects("routes")]
+    assignments = objects("assignments")
+    costs = [event for event in events if event.get("event") == "cost"]
+    return {
+        "enabled": True, "current_target": current, "targets": targets,
+        "obligations": obligations, "routes": routes, "assignments": assignments,
+        "cost": {
+            "events": len(costs),
+            "wall_seconds": sum(float(item.get("wall_seconds") or 0) for item in costs),
+            "cost_usd": sum(float(item.get("cost_usd") or 0) for item in costs if item.get("cost_usd") is not None),
+            "threshold": next((item for item in reversed(events) if item.get("event") == "budget_threshold"), None),
+        },
+        "recent_events": events[-50:],
+    }
+
+
 # ------------------------------------------------------------------------- #
 # app                                                                        #
 # ------------------------------------------------------------------------- #
@@ -327,6 +388,11 @@ def factgraph() -> JSONResponse:
 @app.get("/api/channels", response_model=ChannelsResp)
 def channels() -> JSONResponse:
     return JSONResponse(build_channels())
+
+
+@app.get("/api/control")
+def control() -> JSONResponse:
+    return JSONResponse(build_control())
 
 
 @app.get("/api/channel/{kind}", response_model=ChannelResp)

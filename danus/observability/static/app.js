@@ -49,6 +49,7 @@ function switchTab(name) {
   if (name === 'overview') loadOverview();
   if (name === 'graph') loadGraph();
   if (name === 'memory') loadMemory();
+  if (name === 'control') loadControl();
   if (name === 'graph' && graphChart) setTimeout(() => graphChart.resize(), 50);
 }
 document.querySelectorAll('.nav-link').forEach((a) => (a.onclick = () => switchTab(a.dataset.tab)));
@@ -220,6 +221,39 @@ async function loadChannel(kind) {
       list.appendChild(card);
     }
   } catch (err) { list.innerHTML = '<div class="empty">failed to load</div>'; }
+}
+
+// ---- Danus v2 research control ----------------------------------------- //
+function controlRows(container, rows, describe) {
+  container.innerHTML = '';
+  if (!rows.length) { container.appendChild(el('div', 'empty', 'none')); return; }
+  rows.forEach((row) => {
+    const card = el('div', 'entry');
+    const head = el('div', 'entry-head');
+    head.appendChild(el('span', 'entry-author', row.id || row.version || row.worker || '?'));
+    if (row.state || row.status) head.appendChild(el('span', 'tag', row.state || row.status));
+    card.appendChild(head);
+    card.appendChild(el('div', 'entry-claim', describe(row)));
+    container.appendChild(card);
+  });
+}
+async function loadControl() {
+  try {
+    const d = await api('/api/control'); connError(false);
+    const summary = $('#control-summary'); summary.innerHTML = '';
+    if (!d.enabled) { summary.appendChild(el('div', 'empty', 'Legacy project — v2 control is not enabled.')); return; }
+    const cards = [
+      ['Current target', d.current_target || 'draft', `${d.targets.length} version(s)`],
+      ['Obligations', d.obligations.length, `${d.obligations.filter((x) => x.state === 'closed').length} closed`],
+      ['Routes', d.routes.length, `${d.routes.filter((x) => x.state === 'stalled').length} stalled`],
+      ['Control cost', '$' + Number(d.cost.cost_usd || 0).toFixed(4), `${Math.round(d.cost.wall_seconds || 0)}s · ${d.cost.events} events`],
+    ];
+    cards.forEach(([k, v, sub]) => { const c = el('div', 'card'); c.appendChild(el('div', 'k', k)); c.appendChild(el('div', 'v', String(v))); c.appendChild(el('div', 'sub', sub)); summary.appendChild(c); });
+    controlRows($('#control-targets'), d.targets, (x) => x.statement || '');
+    controlRows($('#control-obligations'), d.obligations, (x) => `${x.target_version} · ${x.statement || ''}`);
+    const assignments = Object.fromEntries(d.assignments.map((x) => [x.route_id, x]));
+    controlRows($('#control-routes'), d.routes, (x) => { const a = assignments[x.id]; return `${x.obligation_id} · ${x.method_family}${a ? ` · ${a.worker}: ${a.status} (${a.slice_count}/${a.max_slices})` : ''}`; });
+  } catch (e) { connError(true); }
 }
 
 // ---- init + polling ------------------------------------------------------ //

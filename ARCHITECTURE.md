@@ -15,6 +15,7 @@ For the main agent's operating contract, see `AGENTS.md`
 
 ```
 operator → ① orchestration (main agent + danus CLI)   — conducts, never does math
+              ↕ v2 control (approved target → obligation → route → finite assignment)
               ② strategy   (elaboration → consult → master_guidance)
               ③ execution  (worker swarm; each round = one codex session running the Rethlas proving skills)
    gm_* │         │ fact_submit
@@ -85,7 +86,10 @@ Danus/
    citations without breaking the DAG.
 5. Autonomy and resumability. Workers run detached; a "round" continues from
    persisted memory rather than adding one increment, so no single crash loses
-   verified work.
+   verified work. In a v2 project, autonomy is bounded by an approved target and
+   a finite route lease: structured checkpoints renew useful exploration,
+   repeated low-gain work is independently audited, and stale target epochs
+   cannot write facts.
 6. The strategy consult is the brain. Between rounds the main agent consults a
    top-tier reasoning model (gpt-5.5-pro over the `gpt_pro` transport, or
    claude-fable-5 over the `claude_api` / `claude_code` transports) to set direction;
@@ -122,6 +126,8 @@ Danus/
 | MCP tool set + role gating | 6 tools; `roles.py` `ROLE_TOOLS` (main has NO `fact_submit`; verifier read-only) | `danus.gateway` ↔ worker/main/verifier agents |
 | MCP launch | current Python/uv + `DANUS_ROLE` env | verifier launcher · worker `.codex/config.toml` · main `.codex/config.toml` → gateway |
 | verify HTTP | `POST /verify {statement,proof}` → `{verification_report,verdict,repair_hints}`; verdict ⟺ no critical_errors & no gaps | `danus.gateway.fact_submit` ↔ `danus.verify` |
+| v2 control | immutable target/obligation/route JSON + assignment projection + append-only `control/events.jsonl`; SQLite is derived | orchestration · execution · gateway · observability |
+| v2 fact binding | legacy arguments plus current `target_version, obligation_id, route_id, assignment_epoch, claim_role, assumptions_used, closes_obligation` | worker ↔ gateway ↔ v2 control |
 | fact id inputs | `problem_id + sorted(predecessors) + sorted(glossary) + normalized(statement,proof)`; **external_refs EXCLUDED** | `danus.core` ↔ everyone (write-paper reads `external_refs`) |
 | global-memory kinds | the 11 `GLOBAL_KINDS` (incl. `master_guidance`/`elaboration`/`verification`) | `danus.core` ↔ agents · strategy · consult |
 | consult JSON envelope | `{transport,reply,usage,cost_usd,…}` | `danus.strategy` CLI ↔ consult skill |

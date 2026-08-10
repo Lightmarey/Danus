@@ -24,8 +24,11 @@ project; there is no default project.
 | verb | form | what it does |
 |---|---|---|
 | `list` | `danus list [--json]` | all projects + live worker counts + model |
-| `new` | `danus new <project> [--roles high:3,xhigh:4] [--model M]` | scaffold a project + worker dirs; default roster 3 `high` + 4 `xhigh` |
-| `assign` | `danus assign <project>/<worker> (--task "…" \| --file P \| --stdin)` | write that worker's per-round `TASK.md` (**replaces**, not appends) |
+| `new` | `danus new <project> --problem PROBLEM.md [--roles high:3,xhigh:4] [--model M]` | scaffold a v2 project; use `--legacy` only for an explicit v1 project |
+| `target` | `danus target propose\|diff\|approve\|status\|fallback ...` | versioned target lifecycle; fallback is always a draft |
+| `obligation` / `route` | `danus obligation add\|status ...`; `danus route add\|status ...` | create and inspect v2 proof obligations and routes |
+| `assign` | `danus assign <project>/<worker> ... --obligation O --route R` | bind a v2 worker to a finite route lease; legacy projects still replace `TASK.md` only |
+| `control` | `danus control rebuild ...`; `danus control taint ...` | rebuild SQLite/FTS5 or mark a suspect fact pending review |
 | `finalize` | `danus finalize <project> [--paper <paper_id>] [<fact_id> …]` | record the approved target theorem(s) in the paper's `TARGET.md` (what write-paper reads; default paper → `<project>/TARGET.md`, a non-default `--paper` → `<project>/papers/<paper_id>/TARGET.md`). **With no id:** print candidate terminal facts as suggestions (writes nothing) |
 | `start` | `danus start <project>[/<worker>]` | launch the autonomous worker loop(s) |
 | `status` | `danus status <project>[/<worker>] [--json]` | per-worker liveness + round + last activity (`stuck?` is a soft signal) |
@@ -54,7 +57,7 @@ main agent runs as `role=main`.
 |---|---|---|
 | `gm_add` | `kind, claim, evidence, verifiable?, glossary?, links?, project?` | publish a finding to shared global memory |
 | `gm_search` | `query, kinds?, limit_per_kind?, project?` | search global-memory findings |
-| `fact_submit` | `statement, proof, predecessors?, glossary_introduces?, intuition?, source_id?, external_refs?` | **the write-gate** — verify, then write the fact iff `correct`, always trace the verdict |
+| `fact_submit` | legacy arguments; v2 additionally requires target/obligation/route/epoch/role/assumptions binding | **the write-gate** — validate control scope, verify, then write/link the fact iff `correct` |
 | `fact_search` | `query, limit?, project?` | search the verified fact graph |
 | `fact_revoke` | `fact_id, reason, project?` | cascade-revoke a fact + its dependents |
 | `search_arxiv_theorems` | `query, num_results?` | semantic search over arXiv theorem statements |

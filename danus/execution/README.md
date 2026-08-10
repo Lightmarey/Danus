@@ -1,6 +1,6 @@
 # danus/execution — the worker swarm (round loop + scaffolding + layout)
 
-Where autonomous `codex` workers actually prove. This module owns the on-disk
+Where `codex` workers actually prove. This module owns the on-disk
 **layout**, project/worker **scaffolding**, and the per-worker **round loop**. The
 `danus` CLI (`danus/orchestration`) is a thin UX layer over this; the real lifecycle
 lives here.
@@ -37,7 +37,10 @@ not process state — a fresh `start` rebuilds context from memory + the fact gr
 
 ## Connects to
 
-Reads `TASK.md` (from `danus assign`) + `master_guidance` (strategy). Writes facts
+Legacy projects read `TASK.md` + `master_guidance` and retain the autonomous
+round loop. V2 projects instead require an approved target and a structured
+assignment, run one JSON-schema-constrained exploration slice at a time, and let
+the controller renew, audit, fall back, or pause the route. Both write facts
 only via a worker's `fact_submit` (gateway → verify). The loop itself never writes
 the truth stores — it only scrapes the resulting `fact_id` from the round log for
 status.

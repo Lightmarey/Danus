@@ -28,6 +28,7 @@ from danus.observability import app as obs_app  # the FastAPI instance
 from danus.observability.app import (
     build_channel,
     build_channels,
+    build_control,
     build_factgraph,
     build_overview,
 )
@@ -178,6 +179,34 @@ def test_channels_and_channel():
         assert ch["kind"] == "plan" and ch["count"] == 2
         # newest-first by timestamp_utc
         assert ch["entries"][0]["timestamp_utc"] == "2026-07-02T09:00:00"
+
+
+def test_v2_control_view_folds_targets_obligations_routes_assignments_and_cost():
+    from danus.control import ControlStore
+
+    with tempfile.TemporaryDirectory() as d:
+        root = Path(d)
+        (root / "project.json").write_text('{"name":"P","control_version":2}', encoding="utf-8")
+        (root / "PROBLEM.md").write_text("Prove T", encoding="utf-8")
+        store = ControlStore(root)
+        store.scaffold()
+        target = store.propose_target({
+            "statement": "T", "allowed_assumptions": [], "forbidden_assumptions": [],
+            "required_conclusions": ["T"], "fallback_candidates": [],
+        })
+        store.approve_target(target["version"])
+        store.add_route({
+            "id": "r1", "obligation_id": "v0001-root-1", "method_family": "direct",
+            "expected_result": "T",
+        })
+        store.assign("high", obligation_id="v0001-root-1", route_id="r1", task="T")
+        store.record_cost(component="worker_slice", wall_seconds=5, cost_usd=1.25)
+        view = build_control(root)
+        assert view["enabled"] is True and view["current_target"] == "v0001"
+        assert view["obligations"][0]["state"] == "active"
+        assert view["routes"][0]["state"] == "active"
+        assert view["assignments"][0]["worker"] == "high"
+        assert view["cost"]["cost_usd"] == 1.25
 
         try:
             build_channel("nope", root)
