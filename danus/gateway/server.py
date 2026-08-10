@@ -35,8 +35,7 @@ import urllib.request
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from mcp.server.fastmcp import FastMCP
-
+from danus._mcp import FastMCP
 from danus.core import FactGraph, GlobalMemory
 from danus.integrations import search as _arxiv_search
 

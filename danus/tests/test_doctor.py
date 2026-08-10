@@ -57,3 +57,13 @@ def test_missing_agent_assets_are_reported_without_traceback(monkeypatch):
     rows = {name: (ok, detail) for name, ok, detail in doctor.checks()}
     assert rows["worker_contract"] == (False, "packaged worker asset missing")
     assert rows["worker_skills"] == (False, "packaged worker asset missing")
+
+
+def test_incompatible_mcp_is_reported(monkeypatch):
+    def fail_import(name: str):
+        assert name == "danus._mcp"
+        raise ImportError("FastMCP API missing")
+
+    monkeypatch.setattr(doctor, "import_module", fail_import)
+    rows = {name: (ok, detail) for name, ok, detail in doctor.checks()}
+    assert rows["import:mcp"] == (False, "FastMCP API missing")

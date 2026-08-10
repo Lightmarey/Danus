@@ -196,8 +196,13 @@ def test_run_round_timeout_then_kill(tmp: Path):
 
 def test_main_stops_on_stop_flag(tmp: Path):
     wl = _mk_worker(tmp)
+    wl.codex_config.parent.mkdir()
+    wl.codex_config.write_text("stale", encoding="utf-8")
     wl.stop.touch()          # stop before the first round
-    with _restore_sigterm(), _env(DANUS_ROUND_BEAT="0"):
+    configured = str(tmp / "custom-python")
+    with _restore_sigterm(), _env(
+        DANUS_ROUND_BEAT="0", DANUS_PYTHON_BIN=configured,
+    ):
         _patch_run_round(lambda *a, **k: 0)
         try:
             rc = loop.main(str(wl.dir))
@@ -206,6 +211,8 @@ def test_main_stops_on_stop_flag(tmp: Path):
     assert rc == 0
     assert not wl.stop.exists()                       # consumed
     assert json.loads(wl.status.read_text())["state"] == "stopped"
+    escaped = configured.replace("\\", "\\\\")
+    assert f'command = "{escaped}"' in wl.codex_config.read_text(encoding="utf-8")
 
 
 # --- main loop: deadline → stop -------------------------------------------- #

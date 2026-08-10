@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from importlib import import_module
 import importlib.util
 import os
 import shutil
@@ -40,7 +41,13 @@ def checks() -> Iterable[Tuple[str, bool, str]]:
         yield ("worker_skills", skills.exists(), str(skills))
     except FileNotFoundError as exc:
         yield ("worker_skills", False, str(exc))
-    for module in ("pytest", "mcp", "fastapi", "uvicorn", "pydantic"):
+    try:
+        mcp_server = import_module("danus._mcp").FastMCP
+    except (ImportError, AttributeError) as exc:
+        yield ("import:mcp", False, str(exc))
+    else:
+        yield ("import:mcp", True, f"{mcp_server.__module__}.{mcp_server.__name__}")
+    for module in ("pytest", "fastapi", "uvicorn", "pydantic"):
         yield (f"import:{module}", importlib.util.find_spec(module) is not None, module)
 
 

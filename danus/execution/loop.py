@@ -35,6 +35,7 @@ from pathlib import Path
 from typing import Optional
 
 from . import layout as L
+from . import scaffold
 from danus import codex, runtime
 
 _FACT_ID_RE = re.compile(r'"?fact_id"?\s*[:=]\s*"?([0-9a-f]{16})"?')
@@ -209,6 +210,10 @@ def main(worker_dir: str) -> int:
     project = wl.project
     worker = wl.name
     role = _read_role(wl)
+
+    # Refresh the worker gateway command from the shared runtime resolver on every
+    # start, so a moved/rebuilt or explicitly configured interpreter is picked up.
+    scaffold.write_codex_config(wl)
 
     beat = float(os.environ.get("DANUS_ROUND_BEAT", "5"))
     hard_timeout = int(os.environ.get("DANUS_ROUND_HARD_TIMEOUT", "14400"))
