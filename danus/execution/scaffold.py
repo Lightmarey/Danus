@@ -17,6 +17,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import shutil
 from pathlib import Path
 from typing import Dict, List, Optional
 
@@ -106,13 +107,25 @@ def write_codex_config(wl: "L.WorkerLayout") -> None:
 # --------------------------------------------------------------------------- #
 
 def do_new(project: str, roles: str = "high:3,xhigh:4",
-           model: Optional[str] = None) -> Dict:
+           model: Optional[str] = None, *, problem: Optional[Path] = None,
+           control_version: Optional[int] = None) -> Dict:
     """Scaffold a project dir + one worker home per role. Refuses to clobber an
     existing project dir (no silent overwrite of a live fact graph). Returns
     ``{"project_dir", "workers"}``."""
     pdir = L.project_dir(project)
     if pdir.exists():
         raise SystemExit(f"project already exists: {pdir} (pick another name or remove it)")
+    if control_version is None:
+        # Direct library callers retain the legacy fixture-friendly path; the
+        # public CLI always passes an explicit version and defaults new projects
+        # to v2.
+        control_version = 2 if problem is not None else 1
+    if control_version not in {1, 2}:
+        raise SystemExit(f"unsupported control version: {control_version}")
+    if control_version == 2:
+        if problem is None or not Path(problem).is_file():
+            raise SystemExit("Danus v2 requires --problem <file>")
+        problem = Path(problem).resolve()
     role_pairs = L.parse_roles(roles)
     model = model or _default_model()
 
@@ -141,8 +154,13 @@ def do_new(project: str, roles: str = "high:3,xhigh:4",
         created.append(worker)
 
     meta = {"name": project, "model": model, "roles": roles, "workers": created}
+    if control_version == 2:
+        meta["control_version"] = 2
+        shutil.copyfile(problem, pdir / "PROBLEM.md")  # type: ignore[arg-type]
+        from danus.control import ControlStore
+        ControlStore(pdir).scaffold()
     atomic_write(pdir / "project.json", json.dumps(meta, ensure_ascii=False, indent=2))
-    return {"project_dir": str(pdir), "workers": created}
+    return {"project_dir": str(pdir), "workers": created, "control_version": control_version}
 
 
 # --------------------------------------------------------------------------- #

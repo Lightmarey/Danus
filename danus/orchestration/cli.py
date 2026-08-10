@@ -31,6 +31,7 @@ from typing import Dict, List, Optional
 from danus.execution import layout as L
 from danus.execution.scaffold import atomic_write, do_new, spawn_loop
 from danus import runtime
+from danus.control import ControlError, ControlStore, is_v2_project
 
 __all__ = [
     "do_new", "do_assign", "do_start", "do_status", "worker_status",
@@ -70,7 +71,9 @@ def _read_status(wl: L.WorkerLayout) -> Dict:
 # assign                                                                       #
 # --------------------------------------------------------------------------- #
 
-def do_assign(target: str, task: str) -> Dict:
+def do_assign(target: str, task: str, *, obligation: Optional[str] = None,
+              route: Optional[str] = None, max_slices: int = 12,
+              slice_timeout: int = 5400) -> Dict:
     """Overwrite (replace, NOT append) a worker's TASK.md, ensuring a trailing
     newline. Rejects a bare project, a nonexistent worker, and an empty task."""
     project, worker = L.resolve_target(target)
@@ -81,8 +84,21 @@ def do_assign(target: str, task: str) -> Dict:
         raise SystemExit(f"no such worker: {project}/{worker}")
     if not task.strip():
         raise SystemExit("refusing to assign an empty task")
+    control = ControlStore(wl.project_dir)
+    assignment = None
+    if control.enabled:
+        if not obligation or not route:
+            raise SystemExit("Danus v2 assign requires --obligation and --route")
+        try:
+            assignment = control.assign(
+                worker, obligation_id=obligation, route_id=route, task=task,
+                max_slices=max_slices, slice_timeout=slice_timeout,
+            )
+        except ControlError as exc:
+            raise SystemExit(f"cannot assign: {exc}") from exc
     atomic_write(wl.task, task if task.endswith("\n") else task + "\n")
-    return {"worker": f"{project}/{worker}", "task_file": str(wl.task)}
+    return {"worker": f"{project}/{worker}", "task_file": str(wl.task),
+            "assignment": assignment}
 
 
 # --------------------------------------------------------------------------- #
@@ -171,7 +187,15 @@ def do_start(target: str, stagger: float = 0.2) -> List[Dict]:
     for i, wdir in enumerate(dirs):
         if i and stagger:
             time.sleep(stagger)
-        out.append({"worker": wdir.name, "result": _start_one(L.WorkerLayout(wdir))})
+        wl = L.WorkerLayout(wdir)
+        control = ControlStore(wl.project_dir)
+        if control.enabled:
+            try:
+                control.validate_assignment(wl.name)
+            except ControlError as exc:
+                out.append({"worker": wdir.name, "result": "waiting", "reason": str(exc)})
+                continue
+        out.append({"worker": wdir.name, "result": _start_one(wl)})
     return out
 
 
@@ -199,11 +223,25 @@ def worker_status(wl: L.WorkerLayout) -> Dict:
     else:
         label = state if state in ("stopped", "deadline", "max_rounds", "error",
                                    "terminated", "created") else "dead"
-    return {
+    out = {
         "worker": wl.name, "pid": pid, "alive": alive, "state": state,
         "round": st.get("round", 0), "age_s": round(age, 1) if age is not None else None,
         "last_fact_id": st.get("last_fact_id"), "label": label,
     }
+    control = ControlStore(wl.project_dir)
+    if control.enabled:
+        assignment = control.assignment(wl.name)
+        out["control"] = ({
+            "status": assignment.get("status"),
+            "target_version": assignment.get("target_version"),
+            "obligation_id": assignment.get("obligation_id"),
+            "route_id": assignment.get("route_id"),
+            "slice_count": assignment.get("slice_count"),
+            "max_slices": assignment.get("max_slices"),
+            "consecutive_low": assignment.get("consecutive_low"),
+            "audit_required": assignment.get("audit_required"),
+        } if assignment else {"status": "unassigned"})
+    return out
 
 
 def do_status(target: str) -> List[Dict]:
@@ -287,6 +325,91 @@ def do_stop(target: str, force: bool = False) -> List[Dict]:
 
 
 # --------------------------------------------------------------------------- #
+# Danus v2 research control                                                   #
+# --------------------------------------------------------------------------- #
+
+def _control(project: str) -> ControlStore:
+    pdir = L.project_dir(project)
+    if not pdir.is_dir():
+        raise SystemExit(f"no such project: {project}")
+    store = ControlStore(pdir)
+    if not store.enabled:
+        raise SystemExit(f"project {project} is legacy; v2 control commands are unavailable")
+    return store
+
+
+def _json_object(path: str) -> Dict:
+    try:
+        value = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise SystemExit(f"cannot read JSON object {path}: {exc}") from exc
+    if not isinstance(value, dict):
+        raise SystemExit(f"JSON input must be an object: {path}")
+    return value
+
+
+def do_target(project: str, action: str, *, file: Optional[str] = None,
+              version: Optional[str] = None, against: Optional[str] = None) -> Dict:
+    store = _control(project)
+    try:
+        if action == "propose":
+            return {"target": store.propose_target(_json_object(file or ""))}
+        if action == "approve":
+            result = store.approve_target(version or "")
+            stopped = []
+            for worker in result["stale_workers"]:
+                stopped.append({"worker": worker, "result": _stop_one(
+                    L.WorkerLayout(L.worker_dir(project, worker)), force=True,
+                )})
+            return {**result, "stopped": stopped}
+        if action == "diff":
+            return {"version": version, "against": against, "diff": store.target_diff(version or "", against)}
+        if action == "fallback":
+            return {"target": store.propose_fallback(), "approved": False}
+        if action == "status":
+            versions = [{"version": item, "state": store.target_state(item)} for item in store.target_versions()]
+            return {"current": store.current_target_version(), "versions": versions}
+    except ControlError as exc:
+        raise SystemExit(f"target {action} failed: {exc}") from exc
+    raise SystemExit(f"unknown target action: {action}")
+
+
+def do_obligation(project: str, action: str, *, file: Optional[str] = None) -> Dict:
+    store = _control(project)
+    try:
+        if action == "add":
+            return {"obligation": store.add_obligation(_json_object(file or ""))}
+        rows = []
+        for path in sorted(store.obligations.glob("*.json")):
+            item = json.loads(path.read_text(encoding="utf-8"))
+            rows.append({**item, "state": store.obligation_state(item["id"])})
+        return {"obligations": rows}
+    except ControlError as exc:
+        raise SystemExit(f"obligation {action} failed: {exc}") from exc
+
+
+def do_route(project: str, action: str, *, file: Optional[str] = None) -> Dict:
+    store = _control(project)
+    try:
+        if action == "add":
+            return {"route": store.add_route(_json_object(file or ""))}
+        rows = []
+        for path in sorted(store.routes.glob("*.json")):
+            item = json.loads(path.read_text(encoding="utf-8"))
+            rows.append({**item, "state": store.route_state(item["id"])})
+        return {"routes": rows}
+    except ControlError as exc:
+        raise SystemExit(f"route {action} failed: {exc}") from exc
+
+
+def do_control_rebuild(project: str) -> Dict:
+    try:
+        return _control(project).rebuild_read_model()
+    except ControlError as exc:
+        raise SystemExit(f"control rebuild failed: {exc}") from exc
+
+
+# --------------------------------------------------------------------------- #
 # argparse                                                                      #
 # --------------------------------------------------------------------------- #
 
@@ -312,12 +435,51 @@ def build_parser() -> argparse.ArgumentParser:
     n.add_argument("project")
     n.add_argument("--roles", default="high:3,xhigh:4", help="e.g. high:3,xhigh:4 (default)")
     n.add_argument("--model", default=None)
+    n.add_argument("--problem", default=None, help="PROBLEM.md source; required for v2 projects")
+    n.add_argument("--legacy", action="store_true", help="explicitly create a legacy v1 project")
 
     a = sub.add_parser("assign", help="write a worker's per-round TASK.md")
     a.add_argument("target", help="<project>/<worker>")
     a.add_argument("--task", default=None)
     a.add_argument("--file", default=None)
     a.add_argument("--stdin", action="store_true")
+    a.add_argument("--obligation", default=None, help="required v2 obligation id")
+    a.add_argument("--route", default=None, help="required v2 route id")
+    a.add_argument("--max-slices", type=int, default=12)
+    a.add_argument("--slice-timeout", type=int, default=5400, help="seconds; default 90 minutes")
+
+    target = sub.add_parser("target", help="versioned v2 target lifecycle")
+    target_actions = target.add_subparsers(dest="target_action", required=True)
+    for name in ("propose", "approve", "diff", "status", "fallback"):
+        tp = target_actions.add_parser(name)
+        tp.add_argument("project")
+        if name == "propose":
+            tp.add_argument("--file", required=True)
+        if name in {"approve", "diff"}:
+            tp.add_argument("version")
+        if name == "diff":
+            tp.add_argument("--against", default=None)
+
+    obligation = sub.add_parser("obligation", help="v2 proof obligations")
+    obligation_actions = obligation.add_subparsers(dest="obligation_action", required=True)
+    for name in ("add", "status"):
+        op = obligation_actions.add_parser(name)
+        op.add_argument("project")
+        if name == "add":
+            op.add_argument("--file", required=True)
+
+    route = sub.add_parser("route", help="v2 research routes")
+    route_actions = route.add_subparsers(dest="route_action", required=True)
+    for name in ("add", "status"):
+        rp = route_actions.add_parser(name)
+        rp.add_argument("project")
+        if name == "add":
+            rp.add_argument("--file", required=True)
+
+    control = sub.add_parser("control", help="v2 derived control state")
+    control_actions = control.add_subparsers(dest="control_action", required=True)
+    rebuild = control_actions.add_parser("rebuild")
+    rebuild.add_argument("project")
 
     f = sub.add_parser("finalize", help="record the finalized target fact_id(s) in "
                                         "a paper's TARGET.md (write-paper reads this)")
@@ -355,12 +517,38 @@ def main(argv: Optional[List[str]] = None) -> int:
         rows = do_list()
         print(json.dumps(rows, ensure_ascii=False, indent=2) if args.json else _fmt_list(rows))
     elif args.cmd == "new":
-        r = do_new(args.project, roles=args.roles, model=args.model)
+        if args.legacy and args.problem:
+            raise SystemExit("new accepts either --problem (v2) or --legacy, not both")
+        if not args.legacy and not args.problem:
+            raise SystemExit("new projects default to v2 and require --problem; use --legacy explicitly for v1")
+        r = do_new(
+            args.project, roles=args.roles, model=args.model,
+            problem=Path(args.problem) if args.problem else None,
+            control_version=1 if args.legacy else 2,
+        )
         print(f"created {args.project} with {len(r['workers'])} workers: "
               f"{', '.join(r['workers'])}\n  {r['project_dir']}")
     elif args.cmd == "assign":
-        r = do_assign(args.target, _task_from_args(args))
+        r = do_assign(
+            args.target, _task_from_args(args), obligation=args.obligation,
+            route=args.route, max_slices=args.max_slices, slice_timeout=args.slice_timeout,
+        )
         print(f"assigned {r['worker']} -> {r['task_file']}")
+    elif args.cmd == "target":
+        print(json.dumps(do_target(
+            args.project, args.target_action, file=getattr(args, "file", None),
+            version=getattr(args, "version", None), against=getattr(args, "against", None),
+        ), ensure_ascii=False, indent=2))
+    elif args.cmd == "obligation":
+        print(json.dumps(do_obligation(
+            args.project, args.obligation_action, file=getattr(args, "file", None),
+        ), ensure_ascii=False, indent=2))
+    elif args.cmd == "route":
+        print(json.dumps(do_route(
+            args.project, args.route_action, file=getattr(args, "file", None),
+        ), ensure_ascii=False, indent=2))
+    elif args.cmd == "control":
+        print(json.dumps(do_control_rebuild(args.project), ensure_ascii=False, indent=2))
     elif args.cmd == "finalize":
         r = do_finalize(args.project, args.fact_ids, paper_id=args.paper)
         paper_note = f" (paper {args.paper})" if args.paper else ""

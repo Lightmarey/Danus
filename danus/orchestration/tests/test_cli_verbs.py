@@ -534,7 +534,7 @@ def test_finalize_suggestion_mode_writes_nothing(tmp: Path):
 
 def test_main_finalize_write_and_suggest(tmp: Path):
     with _project_env(tmp), _patch_spawn():
-        _run_main(["new", "P", "--roles", "high:1"])
+        _run_main(["new", "P", "--roles", "high:1", "--legacy"])
         fid = _add_fact("P")
         rc, out = _run_main(["finalize", "P", fid])
         assert rc == 0 and "finalized target for P" in out and fid in out
@@ -668,7 +668,7 @@ def _run_main(argv):
 
 def test_main_new_then_list_text_and_json(tmp: Path):
     with _project_env(tmp), _patch_spawn():
-        rc, out = _run_main(["new", "P", "--roles", "high:2", "--model", "gpt-5.5"])
+        rc, out = _run_main(["new", "P", "--roles", "high:2", "--model", "gpt-5.5", "--legacy"])
         assert rc == 0 and "created P with 2 workers" in out and "high" in out
         rc, out = _run_main(["list"])
         assert rc == 0 and "PROJECT" in out and "P" in out
@@ -679,7 +679,7 @@ def test_main_new_then_list_text_and_json(tmp: Path):
 
 def test_main_assign(tmp: Path):
     with _project_env(tmp), _patch_spawn():
-        _run_main(["new", "P", "--roles", "high:1"])
+        _run_main(["new", "P", "--roles", "high:1", "--legacy"])
         rc, out = _run_main(["assign", "P/high", "--task", "prove lemma 4"])
         assert rc == 0 and "assigned P/high" in out
         assert _wl("P", "high").task.read_text() == "prove lemma 4\n"
@@ -687,7 +687,7 @@ def test_main_assign(tmp: Path):
 
 def test_main_start_status_stop(tmp: Path):
     with _project_env(tmp), _patch_spawn() as fake:
-        _run_main(["new", "P", "--roles", "high:1"])
+        _run_main(["new", "P", "--roles", "high:1", "--legacy"])
         rc, out = _run_main(["start", "P/high"])
         assert rc == 0 and "high: started" in out and len(fake.calls) == 1
         # status text branch (worker is "alive" = our pid)
@@ -704,7 +704,7 @@ def test_main_start_status_stop(tmp: Path):
 
 def test_main_stop_force_not_running(tmp: Path):
     with _project_env(tmp), _patch_spawn():
-        _run_main(["new", "P", "--roles", "high:1"])
+        _run_main(["new", "P", "--roles", "high:1", "--legacy"])
         rc, out = _run_main(["stop", "P/high", "--force"])
         assert rc == 0 and "not-running" in out
 
