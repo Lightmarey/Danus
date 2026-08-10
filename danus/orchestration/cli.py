@@ -31,7 +31,7 @@ from typing import Dict, List, Optional
 from danus.execution import layout as L
 from danus.execution.scaffold import atomic_write, do_new, spawn_loop
 from danus import runtime
-from danus.control import ControlError, ControlStore, is_v2_project
+from danus.control import ControlError, ControlStore
 
 __all__ = [
     "do_new", "do_assign", "do_start", "do_status", "worker_status",

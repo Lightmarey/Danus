@@ -222,7 +222,6 @@ def fact_submit(
     gm = _gm()
     problem_id = os.environ.get("DANUS_PROBLEM_ID", Path(_project()).name)
     control = ControlStore(project_dir)
-    assignment = None
     if control.enabled:
         required = {
             "target_version": target_version, "obligation_id": obligation_id,
@@ -237,7 +236,7 @@ def fact_submit(
             return {"accepted": False, "verdict": "control_error",
                     "error": f"invalid claim_role: {claim_role}"}
         try:
-            assignment = control.validate_submission(
+            control.validate_submission(
                 _author(), target_version=target_version or "",
                 obligation_id=obligation_id or "", route_id=route_id or "",
                 assignment_epoch=assignment_epoch or "",

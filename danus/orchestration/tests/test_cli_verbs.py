@@ -18,7 +18,6 @@ import io
 import json
 import os
 import runpy
-import signal
 import subprocess
 import sys
 import tempfile
