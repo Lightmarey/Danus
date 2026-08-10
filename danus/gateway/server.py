@@ -38,8 +38,10 @@ from typing import Any, Dict, List, Optional
 
 from danus._mcp import FastMCP
 from danus.core import FactGraph, GlobalMemory
+from danus.core.schema import compute_fact_id
 from danus.control import ControlError, ControlStore
 from danus.integrations import search as _arxiv_search
+from danus.research import ResearchQuery
 
 from .roles import tools_for
 
@@ -133,7 +135,17 @@ def gm_add(
 
     Main agent: pass ``project`` to target one of several projects by name;
     workers omit it (pinned to their own project)."""
-    entry_id = _gm(project).append(
+    project_dir = _project(project)
+    control = ControlStore(project_dir)
+    if control.enabled and kind == "master_guidance":
+        links = links or {}
+        missing = [key for key in ("target_version", "route_id", "obligation_id") if not links.get(key)]
+        if missing:
+            raise ControlError(f"v2 master_guidance missing scope links: {', '.join(missing)}")
+        route = control.route(str(links["route_id"]))
+        if (links["target_version"], links["obligation_id"]) != (route["target_version"], route["obligation_id"]):
+            raise ControlError("master_guidance scope does not match its route")
+    entry_id = GlobalMemory(project_dir).append(
         kind, claim=claim, evidence=evidence, author=_author(),
         verifiable=verifiable, glossary=glossary, links=links,
     )
@@ -186,6 +198,7 @@ def _close_v2_obligation(
 def fact_submit(
     statement: str,
     proof: str,
+    display_title: str = "",
     predecessors: Optional[List[str]] = None,
     glossary_introduces: Optional[Dict[str, str]] = None,
     intuition: str = "",
@@ -244,6 +257,10 @@ def fact_submit(
             )
         except ControlError as exc:
             return {"accepted": False, "verdict": "control_error", "error": str(exc)}
+        clean_title = " ".join(display_title.split())
+        if "\n" in display_title or "\r" in display_title or not 4 <= len(clean_title) <= 80:
+            return {"accepted": False, "verdict": "control_error",
+                    "error": "Danus v2 display_title must be one line and 4-80 characters"}
         tainted_predecessors = [fid for fid in (predecessors or []) if control.fact_tainted(fid)]
         if tainted_predecessors:
             return {"accepted": False, "verdict": "control_error",
@@ -260,12 +277,13 @@ def fact_submit(
 
     reused_fact_id = control.reusable_fact(statement, assumptions_used or []) if control.enabled else None
     if reused_fact_id:
-        control.append_event(
-            "fact_linked", fact_id=reused_fact_id, reused=True, worker=_author(),
-            assignment_epoch=assignment_epoch, target_version=target_version,
-            obligation_id=obligation_id, route_id=route_id, claim_role=claim_role,
-            assumptions_used=assumptions_used or [],
-        )
+        control.prepare_fact(reused_fact_id, {"reused": True, "scope": {
+            "worker": _author(), "assignment_epoch": assignment_epoch,
+            "target_version": target_version, "obligation_id": obligation_id,
+            "route_id": route_id, "claim_role": claim_role,
+            "assumptions_used": assumptions_used or [],
+        }})
+        control.finalize_fact(reused_fact_id)
         closure = _close_v2_obligation(
             control, statement=statement, fact_id=reused_fact_id,
             obligation_id=obligation_id or "", assignment_epoch=assignment_epoch or "",
@@ -316,11 +334,26 @@ def fact_submit(
     write_error = None
     if accepted:
         try:
+            if control.enabled:
+                pending_id = compute_fact_id(
+                    problem_id=problem_id, predecessors=predecessors or [],
+                    glossary_introduces=glossary_introduces or {},
+                    statement=statement, proof=proof,
+                )
+                control.prepare_fact(pending_id, {"reused": False, "scope": {
+                    "worker": _author(), "assignment_epoch": assignment_epoch,
+                    "target_version": target_version, "obligation_id": obligation_id,
+                    "route_id": route_id, "claim_role": claim_role,
+                    "assumptions_used": assumptions_used or [],
+                }})
             fact_id = fg.add(
                 problem_id=problem_id, author=_author(), statement=statement, proof=proof,
+                display_title=display_title,
                 predecessors=predecessors, glossary_introduces=glossary_introduces,
                 intuition=intuition, external_refs=external_refs,
             )
+            if control.enabled:
+                control.finalize_fact(fact_id)
         except Exception as e:
             write_error = str(e)
 
@@ -348,12 +381,6 @@ def fact_submit(
             cost_usd=result.get("cost_usd"),
         )
         if accepted and fact_id:
-            control.append_event(
-                "fact_linked", fact_id=fact_id, reused=False, worker=_author(),
-                assignment_epoch=assignment_epoch, target_version=target_version,
-                obligation_id=obligation_id, route_id=route_id, claim_role=claim_role,
-                assumptions_used=assumptions_used or [],
-            )
             closure = _close_v2_obligation(
                 control, statement=statement, fact_id=fact_id,
                 obligation_id=obligation_id or "", assignment_epoch=assignment_epoch or "",
@@ -385,13 +412,49 @@ def fact_search(query: str, limit: int = 10, project: Optional[str] = None) -> D
     your subgoal so you can cite their ``fact_id``. Returns ranked ``{fact_id,
     score, statement}``. Main agent: pass ``project`` to search a specific
     project's graph; workers omit it."""
-    return {"query": query, "results": _fg(project).search(query, limit=limit)}
+    project_dir = _project(project)
+    results = ResearchQuery(project_dir).fact_search(query, limit=limit) if ControlStore(project_dir).enabled else _fg(project).search(query, limit=limit)
+    return {"query": query, "results": results}
+
+
+def research_map(target_version: Optional[str] = None, project: Optional[str] = None) -> Dict[str, Any]:
+    """Return the shared target/method/route/obligation research map."""
+    return ResearchQuery(_project(project)).research_map(target_version)
+
+
+def route_context(route_id: str, snapshot: Optional[int] = None, project: Optional[str] = None) -> Dict[str, Any]:
+    """Return one route's deterministic fact group, progress, and obstacles."""
+    return ResearchQuery(_project(project)).route_context(route_id, snapshot=snapshot)
+
+
+def obligation_context(obligation_id: str, snapshot: Optional[int] = None, project: Optional[str] = None) -> Dict[str, Any]:
+    """Return an obligation, dependencies, routes, and proof-support group."""
+    return ResearchQuery(_project(project)).obligation_context(obligation_id, snapshot=snapshot)
+
+
+def fact_get(fact_id: str, include_proof: bool = False, project: Optional[str] = None) -> Dict[str, Any]:
+    """Read an indexed fact; proof text is opt-in."""
+    return ResearchQuery(_project(project)).fact_get(fact_id, include_proof=include_proof)
+
+
+def fact_neighborhood(fact_id: str, direction: str = "both", depth: int = 1, limit: int = 300, project: Optional[str] = None) -> Dict[str, Any]:
+    """Read a bounded local fact DAG (never more than 300 nodes)."""
+    return ResearchQuery(_project(project)).fact_neighborhood(fact_id, direction=direction, depth=depth, limit=limit)
+
+
+def target_proof_manifest(target_version: Optional[str] = None, project: Optional[str] = None) -> Dict[str, Any]:
+    """Return the root closing facts and their full topological predecessor closure."""
+    return ResearchQuery(_project(project)).target_proof_manifest(target_version)
 
 
 def fact_revoke(fact_id: str, reason: str, project: Optional[str] = None) -> Dict[str, Any]:
     """Cascade-revoke a wrong fact and everything that depends on it. Destructive;
     operator / main-agent only. Main agent: pass ``project`` to target the project
     that owns the fact."""
+    project_dir = _project(project)
+    control = ControlStore(project_dir)
+    if control.enabled:
+        return {"tainted_pending_review": control.taint_fact(fact_id, reason), "revoked": []}
     revoked = _fg(project).revoke(fact_id, reason=reason)
     return {"revoked": revoked}
 
@@ -421,6 +484,12 @@ _TOOLS = {
     "fact_submit": fact_submit,
     "fact_search": fact_search,
     "fact_revoke": fact_revoke,
+    "research_map": research_map,
+    "route_context": route_context,
+    "obligation_context": obligation_context,
+    "fact_get": fact_get,
+    "fact_neighborhood": fact_neighborhood,
+    "target_proof_manifest": target_proof_manifest,
     "search_arxiv_theorems": search_arxiv_theorems,
 }
 

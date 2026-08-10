@@ -84,7 +84,7 @@ def test_v2_fact_links_closes_and_records_verifier_cost(tmp_path: Path):
     try:
         with _env(DANUS_PROJECT_DIR=tmp_path, DANUS_AUTHOR="high", DANUS_VERIFY_URL="mock"):
             result = server.fact_submit(
-                statement="The target conclusion holds.", proof="A complete proof.",
+                statement="The target conclusion holds.", proof="A complete proof.", display_title="Target conclusion",
                 closes_obligation=True, **_args(assignment),
             )
     finally:
@@ -108,10 +108,10 @@ def test_exact_v2_claim_reuses_verified_fact_without_second_verifier_call(tmp_pa
     try:
         with _env(DANUS_PROJECT_DIR=tmp_path, DANUS_AUTHOR="high", DANUS_VERIFY_URL="mock"):
             first = server.fact_submit(
-                statement="The target conclusion holds.", proof="First proof.", **_args(assignment),
+                statement="The target conclusion holds.", proof="First proof.", display_title="Target conclusion", **_args(assignment),
             )
             second = server.fact_submit(
-                statement="The target conclusion holds.", proof="Different proof.", **_args(assignment),
+                statement="The target conclusion holds.", proof="Different proof.", display_title="Target conclusion", **_args(assignment),
             )
     finally:
         server._verify = original
@@ -130,7 +130,7 @@ def test_conditional_fact_cannot_close_unconditional_obligation(tmp_path: Path):
     try:
         with _env(DANUS_PROJECT_DIR=tmp_path, DANUS_AUTHOR="high", DANUS_VERIFY_URL="mock"):
             result = server.fact_submit(
-                statement="The target conclusion holds.", proof="Conditional proof.",
+                statement="The target conclusion holds.", proof="Conditional proof.", display_title="Conditional target claim",
                 closes_obligation=True, **(_args(assignment) | {"claim_role": "conditional"}),
             )
     finally:

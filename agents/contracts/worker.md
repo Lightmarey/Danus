@@ -44,8 +44,14 @@ returning the required `WorkReport` JSON. In v2:
 - the controller, not your self-assessment, scores information gain and decides
   continuation, audit, fallback, or pause;
 - `fact_submit` must include `target_version`, `obligation_id`, `route_id`,
-  `assignment_epoch`, `claim_role`, `assumptions_used`, and whether the fact is
-  intended to close the obligation;
+  `assignment_epoch`, a readable 4-80 character `display_title`, `claim_role`,
+  `assumptions_used`, and whether the fact is intended to close the obligation;
+- the kickoff `Research context snapshot` is the baseline state for this slice.
+  Use its titles and statements first, and call `fact_get` only for proof bodies
+  needed now; do not reconstruct the route by scanning every Markdown file;
+- in v2 the database assignment is authoritative. `TASK.md` is only its generated
+  readable mirror, and scoped `master_guidance` may advise strategy but never
+  replace the target, obligation, route, or assignment epoch;
 - target changes require operator approval. Never weaken the target or add an
   assumption to make the route work.
 
@@ -284,14 +290,16 @@ to stop.** A hard open problem is not a stopping condition — do not give up.
 
 - MCP: `gm_add` (publish a finding), `gm_search` (BM25 recall over findings),
   `fact_submit` (glossary-check + verify + write a fact; pass `external_refs` for
-  any external results the proof cites), `fact_search` (BM25 over the verified fact
-  graph), `search_arxiv_theorems` (Matlas arXiv theorem search). Local
-  memory and all reads are direct file operations — no tool.
+  any external results the proof cites), `fact_search` (indexed v2 FTS; legacy
+  BM25), `route_context`, `obligation_context`, `fact_get`, and
+  `fact_neighborhood`, plus `search_arxiv_theorems` (Matlas arXiv theorem search).
+  In v2, use these snapshot-aware reads instead of scanning fact Markdown.
 - **`fact_search` before you prove.** Before attempting a subgoal, `fact_search`
   the verified fact graph: if a fact like the one you need already exists, **cite
   its `fact_id` instead of re-proving it**; and use it to find the verified facts
   your proof can build on. Returns `{fact_id, statement}` — read the full proof
-  from `fact_graph/facts/<fact_id>.md` on a relevant hit.
+  with `fact_get(include_proof=true)` on a relevant v2 hit (legacy projects may
+  still read `fact_graph/facts/<fact_id>.md`).
 - Plus the skills under `agents/skills/worker/` and codex built-ins.
 - Always call `search_arxiv_theorems` (Matlas arXiv theorem search)
   for nontrivial subgoals and key claims to ground reasoning in related literature. Use web search early to gather background

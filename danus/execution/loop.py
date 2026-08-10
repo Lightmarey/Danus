@@ -40,6 +40,7 @@ from danus import codex, runtime
 from danus.control import (
     ControlError, ControlStore, parse_codex_usage, parse_work_report,
 )
+from danus.research import ResearchQuery
 
 _FACT_ID_RE = re.compile(r'"?fact_id"?\s*[:=]\s*"?([0-9a-f]{16})"?')
 
@@ -64,7 +65,7 @@ def kickoff(project: str, worker: str) -> str:
     )
 
 
-def kickoff_v2(project: str, worker: str, assignment: dict, *, audit: bool) -> str:
+def kickoff_v2(project: str, worker: str, assignment: dict, *, audit: bool, context: str = "") -> str:
     mode = (
         "This slice is an independent route audit. Do not repeat the route. Compare its "
         "failed signatures and evidence with the obligation, identify a genuinely new route "
@@ -78,7 +79,9 @@ def kickoff_v2(project: str, worker: str, assignment: dict, *, audit: bool) -> s
         f"{mode}\n"
         f"The control assignment below is authoritative:\n"
         f"{json.dumps(assignment, ensure_ascii=False, indent=2)}\n"
-        "Read AGENTS.md, the verified fact graph, relevant global-memory evidence and dead ends. "
+        f"\n{context}\n"
+        "Read AGENTS.md and use the included research snapshot before requesting additional facts. "
+        "Consult relevant global-memory evidence and dead ends as supporting material. "
         "Work only on this target version, obligation, and route. fact_submit must use the exact "
         "target_version, obligation_id, route_id, and assignment epoch above. Ordinary memory "
         "notes do not count as progress. Finish this one slice by returning the required WorkReport "
@@ -252,13 +255,18 @@ def _run_v2_loop(wl: L.WorkerLayout, role: dict, control: ControlStore, beat: fl
 
         audit = bool(assignment.get("audit_required"))
         slice_no = int(assignment["slice_count"]) + 1
-        prompt = kickoff_v2(wl.project, worker, assignment, audit=audit)
+        manifest = ResearchQuery(wl.project_dir).build_context_manifest(worker)
+        prompt = kickoff_v2(
+            wl.project, worker, assignment, audit=audit,
+            context=ResearchQuery.format_context_manifest(manifest),
+        )
         log_path = wl.logs / f"slice_{slice_no}.jsonl"
         report_path = wl.logs / f"slice_{slice_no}_report.json"
         write_status(
             wl, state="auditing" if audit else "running", round=slice_no,
             round_started_at=time.time(), target_version=assignment["target_version"],
             obligation_id=assignment["obligation_id"], route_id=assignment["route_id"],
+            context_manifest_id=manifest["id"], context_snapshot=manifest["snapshot_generation"],
         )
         started = time.monotonic()
         rc = run_round(
@@ -307,6 +315,9 @@ def _run_v2_loop(wl: L.WorkerLayout, role: dict, control: ControlStore, beat: fl
                 write_status(wl, state="fallback", route_id=fallback["route_id"])
                 continue
             write_status(wl, state="paused", control_reason=result["decision"])
+            return 0
+        if result["decision"] == "completed":
+            write_status(wl, state="waiting", control_reason="assignment completed")
             return 0
         if beat > 0:
             time.sleep(beat)

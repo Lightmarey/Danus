@@ -67,7 +67,8 @@ tools — never by hand:
   `gm_add` (kind `master_guidance` / `elaboration`, see below) with
   `project=<name>`.
 - **fact graph** (shared verified truth, the only correctness source): read facts
-  for oversight (`fact_search project=<name>`); revoke a wrong one with
+  for oversight (`research_map`, scoped route/obligation context, and `fact_get`
+  for v2; `fact_search project=<name>` for targeted lookup); flag a wrong one with
   `fact_revoke` (cascades, `project=<name>`).
 - worker **local memory** is private to each worker — you do not read it.
 
@@ -110,6 +111,10 @@ Below, "the project" means whichever one this beat is for.
   consult GPT-5.5-pro, take its reply as authoritative, **record it as a
   `master_guidance` finding** (`gm_add project=<name>`), and steer from it. (Don't
   author strategy out of thin air; `master_guidance` = what GPT-5.5-pro said.)
+  In v2, build that synthesis from the shared ResearchQuery snapshot and attach
+  `target_version`, `route_id`, and `obligation_id` links to every
+  `master_guidance` entry. Guidance is strategy only and cannot replace an
+  assignment.
   That project's workers read it and follow it. It is strategy, not a correctness
   source.
 - **Dispatch from it — two channels.** `master_guidance` is the **shared**
@@ -197,8 +202,10 @@ State only what you have **verified**. This is a hard rule, not a tone preferenc
 ## Capabilities (command surface)
 
 - **MCP tools (your subset):** `gm_add` (write `master_guidance` / `elaboration`),
-  `gm_search` (read findings), `fact_search` (BM25 over the verified fact graph —
-  for oversight and to ground an elaboration), `fact_revoke` (cascade revoke a
+  `gm_search` (read findings), `research_map`, `route_context`,
+  `obligation_context`, `fact_get`, `fact_neighborhood`, and
+  `target_proof_manifest` (the shared v2 view), `fact_search` (indexed lookup),
+  `fact_revoke` (v2 taint-pending-review; legacy cascade revoke),
   wrong fact), `search_arxiv_theorems` (Matlas arXiv theorem search —
   verbatim statements; sharpen decomposition before a consult, and check whether a
   result already exists). **The first four take a `project=<name>` argument that

@@ -32,6 +32,7 @@ from danus.execution import layout as L
 from danus.execution.scaffold import atomic_write, do_new, spawn_loop
 from danus import runtime
 from danus.control import ControlError, ControlStore
+from danus.control_service import ControlService
 
 __all__ = [
     "do_new", "do_assign", "do_start", "do_status", "worker_status",
@@ -132,7 +133,15 @@ def do_finalize(project: str, fact_ids: List[str],
     fg = FactGraph(pdir)
 
     if not fact_ids:
-        # suggestion mode: never auto-pick — just list candidate terminal facts.
+        control = ControlStore(pdir)
+        if control.enabled:
+            from danus.research import ResearchQuery
+            proof_manifest = ResearchQuery(pdir).target_proof_manifest()
+            return {"project": project, "paper_id": paper_id,
+                    "suggested": proof_manifest["closing_fact_ids"],
+                    "target_version": proof_manifest["target_version"],
+                    "proof_complete": proof_manifest["complete"]}
+        # Legacy suggestion mode remains terminal-fact based.
         return {"project": project, "paper_id": paper_id,
                 "suggested": assemble._terminal_facts(fg)}
 
@@ -350,19 +359,22 @@ def _json_object(path: str) -> Dict:
 
 
 def do_target(project: str, action: str, *, file: Optional[str] = None,
-              version: Optional[str] = None, against: Optional[str] = None) -> Dict:
+              version: Optional[str] = None, against: Optional[str] = None,
+              reason: Optional[str] = None) -> Dict:
     store = _control(project)
+
+    service = ControlService(store.project, lambda kind, payload: (
+            _stop_one(L.WorkerLayout(L.worker_dir(project, payload["worker"])), force=True)
+            if kind == "stop_worker" else None
+        ))
+
     try:
         if action == "propose":
             return {"target": store.propose_target(_json_object(file or ""))}
         if action == "approve":
-            result = store.approve_target(version or "")
-            stopped = []
-            for worker in result["stale_workers"]:
-                stopped.append({"worker": worker, "result": _stop_one(
-                    L.WorkerLayout(L.worker_dir(project, worker)), force=True,
-                )})
-            return {**result, "stopped": stopped}
+            return service.approve_target(version or "")
+        if action == "withdraw":
+            return service.withdraw_target(version or "", reason=reason or "")
         if action == "diff":
             return {"version": version, "against": against, "diff": store.target_diff(version or "", against)}
         if action == "fallback":
@@ -386,11 +398,7 @@ def do_obligation(project: str, action: str, *, file: Optional[str] = None) -> D
     try:
         if action == "add":
             return {"obligation": store.add_obligation(_json_object(file or ""))}
-        rows = []
-        for path in sorted(store.obligations.glob("*.json")):
-            item = json.loads(path.read_text(encoding="utf-8"))
-            rows.append({**item, "state": store.obligation_state(item["id"])})
-        return {"obligations": rows}
+        return {"obligations": store.list_obligations()}
     except ControlError as exc:
         raise SystemExit(f"obligation {action} failed: {exc}") from exc
 
@@ -400,11 +408,7 @@ def do_route(project: str, action: str, *, file: Optional[str] = None) -> Dict:
     try:
         if action == "add":
             return {"route": store.add_route(_json_object(file or ""))}
-        rows = []
-        for path in sorted(store.routes.glob("*.json")):
-            item = json.loads(path.read_text(encoding="utf-8"))
-            rows.append({**item, "state": store.route_state(item["id"])})
-        return {"routes": rows}
+        return {"routes": store.list_routes()}
     except ControlError as exc:
         raise SystemExit(f"route {action} failed: {exc}") from exc
 
@@ -468,13 +472,15 @@ def build_parser() -> argparse.ArgumentParser:
 
     target = sub.add_parser("target", help="versioned v2 target lifecycle")
     target_actions = target.add_subparsers(dest="target_action", required=True)
-    for name in ("propose", "approve", "diff", "status", "fallback"):
+    for name in ("propose", "approve", "withdraw", "diff", "status", "fallback"):
         tp = target_actions.add_parser(name)
         tp.add_argument("project")
         if name == "propose":
             tp.add_argument("--file", required=True)
-        if name in {"approve", "diff"}:
+        if name in {"approve", "withdraw", "diff"}:
             tp.add_argument("version")
+        if name == "withdraw":
+            tp.add_argument("--reason", required=True)
         if name == "diff":
             tp.add_argument("--against", default=None)
 
@@ -558,6 +564,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         print(json.dumps(do_target(
             args.project, args.target_action, file=getattr(args, "file", None),
             version=getattr(args, "version", None), against=getattr(args, "against", None),
+            reason=getattr(args, "reason", None),
         ), ensure_ascii=False, indent=2))
     elif args.cmd == "obligation":
         print(json.dumps(do_obligation(

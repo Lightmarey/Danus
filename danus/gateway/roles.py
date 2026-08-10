@@ -26,12 +26,18 @@ ALL_TOOLS: Tuple[str, ...] = (
     "fact_submit",
     "fact_search",
     "fact_revoke",
+    "research_map",
+    "route_context",
+    "obligation_context",
+    "fact_get",
+    "fact_neighborhood",
+    "target_proof_manifest",
     "search_arxiv_theorems",
 )
 
 ROLE_TOOLS: Dict[str, Tuple[str, ...]] = {
-    "worker": ("gm_add", "gm_search", "fact_submit", "fact_search", "search_arxiv_theorems"),
-    "main": ("gm_add", "gm_search", "fact_search", "fact_revoke", "search_arxiv_theorems"),
+    "worker": ("gm_add", "gm_search", "fact_submit", "fact_search", "route_context", "obligation_context", "fact_get", "fact_neighborhood", "search_arxiv_theorems"),
+    "main": ("gm_add", "gm_search", "fact_search", "fact_revoke", "research_map", "route_context", "obligation_context", "fact_get", "fact_neighborhood", "target_proof_manifest", "search_arxiv_theorems"),
     "verifier": ("search_arxiv_theorems",),
     "all": ALL_TOOLS,
 }
