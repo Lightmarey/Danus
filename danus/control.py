@@ -855,3 +855,17 @@ def parse_codex_usage(log_path: Path) -> Dict[str, int]:
             elif isinstance(item, list):
                 stack.extend(item)
     return best
+
+
+# Keep the old implementation solely as the one-time importer for pre-SQLite v2
+# projects. Runtime callers receive the transactional store.
+FileControlStore = ControlStore
+
+
+class ControlStore:
+    """Lazy public constructor, avoiding a control ↔ control_db import cycle."""
+
+    def __new__(cls, project_dir: Path):
+        from danus.control_db import SQLiteControlStore
+
+        return SQLiteControlStore(project_dir)

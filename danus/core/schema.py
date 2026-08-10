@@ -82,6 +82,7 @@ class Fact:
     fact_id: str
     problem_id: str
     author: str
+    title: str
     predecessors: List[str]                    # bare-hex fact ids (the DAG)
     statement: str
     proof: str

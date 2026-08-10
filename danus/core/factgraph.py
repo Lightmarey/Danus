@@ -51,6 +51,7 @@ def serialize_fact(fact: Fact) -> str:
         f"fact_id: {fact.fact_id}",
         f"problem_id: {fact.problem_id}",
         f"author: {fact.author}",
+        f"title: {fact.title}",
         f"predecessors: [{', '.join(fact.predecessors)}]",
     ]
     if fact.glossary_introduces:
@@ -104,7 +105,12 @@ def parse_frontmatter(text: str) -> Dict[str, object]:
                 gloss[gm.group(1).strip()] = gm.group(2).strip()
             else:
                 in_gloss = False
-    return {"predecessors": preds, "glossary_introduces": gloss, "external_refs": refs}
+    title = ""
+    for line in lines:
+        if line.startswith("title:"):
+            title = line.split(":", 1)[1].strip()
+            break
+    return {"title": title, "predecessors": preds, "glossary_introduces": gloss, "external_refs": refs}
 
 
 class FactGraph:
@@ -128,6 +134,7 @@ class FactGraph:
         author: str,
         statement: str,
         proof: str,
+        display_title: str = "",
         predecessors: Optional[List[str]] = None,
         glossary_introduces: Optional[Dict[str, str]] = None,
         intuition: str = "",
@@ -154,14 +161,19 @@ class FactGraph:
             statement=statement,
             proof=proof,
         )
+        title = " ".join((display_title or statement).split())[:80]
         fact = Fact(
             fact_id=fact_id, problem_id=problem_id, author=author,
+            title=title,
             predecessors=predecessors, statement=statement, proof=proof,
             glossary_introduces=glossary_introduces, intuition=intuition,
             external_refs=external_refs,
         )
         self.facts_dir.mkdir(parents=True, exist_ok=True)
-        self._path(fact_id).write_text(serialize_fact(fact), encoding="utf-8")
+        # Presentation metadata is not hashed. Preserve the first accepted title
+        # when identical mathematical content is submitted again.
+        if not self._path(fact_id).exists():
+            self._path(fact_id).write_text(serialize_fact(fact), encoding="utf-8")
         self._merge_glossary(glossary_introduces)
         return fact_id
 
