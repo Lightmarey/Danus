@@ -5,8 +5,13 @@ const $ = (s) => document.querySelector(s);
 const el = (tag, cls, txt) => { const e = document.createElement(tag); if (cls) e.className = cls; if (txt != null) e.textContent = txt; return e; };
 const esc = (s) => (s == null ? '' : String(s));
 
-async function api(path) {
-  const r = await fetch(path);
+let controlToken = '';
+if (location.hash.startsWith('#control-token=')) {
+  controlToken = decodeURIComponent(location.hash.slice('#control-token='.length));
+  history.replaceState(null, '', location.pathname + location.search);
+}
+async function api(path, options = {}) {
+  const r = await fetch(path, options);
   if (!r.ok) throw new Error(path + ' ' + r.status);
   return r.json();
 }
@@ -224,37 +229,133 @@ async function loadChannel(kind) {
 }
 
 // ---- Danus v2 research control ----------------------------------------- //
-function controlRows(container, rows, describe) {
-  container.innerHTML = '';
-  if (!rows.length) { container.appendChild(el('div', 'empty', 'none')); return; }
-  rows.forEach((row) => {
-    const card = el('div', 'entry');
-    const head = el('div', 'entry-head');
-    head.appendChild(el('span', 'entry-author', row.id || row.version || row.worker || '?'));
-    if (row.state || row.status) head.appendChild(el('span', 'tag', row.state || row.status));
-    card.appendChild(head);
-    card.appendChild(el('div', 'entry-claim', describe(row)));
-    container.appendChild(card);
-  });
+const viewPins = new Set(); // deliberately ephemeral and never sent to the server
+let routeChart = null;
+let controlGeneration = 0;
+
+async function controlPost(path, body) {
+  if (!controlToken) throw new Error('This page has no control capability token. Reopen the launch URL.');
+  return api(path, { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Danus-Control-Token': controlToken }, body: JSON.stringify(body) });
 }
-async function loadControl() {
+
+function governanceCard(target) {
+  const card = el('div', 'entry');
+  const head = el('div', 'entry-head');
+  head.appendChild(el('span', 'entry-author', target.version));
+  head.appendChild(el('span', 'tag', target.state));
+  card.appendChild(head);
+  card.appendChild(el('div', 'entry-claim', target.statement || ''));
+  if (target.diff) { const diff = el('pre', 'entry-evidence clamp', target.diff); card.appendChild(diff); }
+  const actions = el('div', 'control-actions');
+  if (target.state === 'draft') {
+    const approve = el('button', '', 'Approve');
+    approve.onclick = async () => {
+      if (prompt(`Type ${target.version} to approve this target`) !== target.version) return;
+      try { await controlPost(`/api/control/targets/${target.version}/approve`, { request_id: crypto.randomUUID(), expected_generation: controlGeneration }); await loadControl(); }
+      catch (e) { alert(e.message); }
+    };
+    actions.appendChild(approve);
+  }
+  if (target.state === 'approved') {
+    const withdraw = el('button', '', 'Withdraw');
+    withdraw.onclick = async () => {
+      const reason = prompt('Withdrawal reason (required)'); if (!reason) return;
+      try { await controlPost(`/api/control/targets/${target.version}/withdraw`, { request_id: crypto.randomUUID(), expected_generation: controlGeneration, reason }); await loadControl(); }
+      catch (e) { alert(e.message); }
+    };
+    actions.appendChild(withdraw);
+  }
+  if (actions.childNodes.length) card.appendChild(actions);
+  return card;
+}
+
+function renderFactGraph(group) {
+  const facts = group.facts || [];
+  const nodeById = Object.fromEntries(facts.map((fact) => [fact.fact_id, fact]));
+  if (!routeChart) routeChart = echarts.init($('#route-graph'));
+  routeChart.setOption({
+    tooltip: { formatter: (p) => p.dataType === 'node' ? `${esc(p.data.title)}<br>${p.data.role}${p.data.shared ? ' · shared' : ''}` : '' },
+    series: [{ type:'graph', layout:'force', roam:true, force:{repulsion:170,edgeLength:75,gravity:.05},
+      label:{show:true,position:'right',formatter:(p)=>p.data.title.slice(0,32)},
+      data:facts.map((fact) => ({ id:fact.fact_id, name:fact.fact_id, title:fact.title, role:fact.role, shared:fact.shared,
+        symbolSize:fact.role === 'closing' ? 19 : fact.role === 'direct' ? 15 : 11,
+        itemStyle:{color:viewPins.has(fact.fact_id) ? '#ef7f1a' : fact.role === 'closing' ? '#16a34a' : fact.role === 'support' ? '#94a3b8' : '#6366f1'} })),
+      links:(group.edges || []).filter((edge) => nodeById[edge.source] && nodeById[edge.target]),
+      lineStyle:{color:'#cbd5e1'}, emphasis:{focus:'adjacency'} }]
+  }, true);
+  routeChart.off('click');
+  routeChart.on('click', (p) => { if (p.dataType === 'node') showResearchFact(p.data.id); });
+  $('#route-stat').textContent = `${facts.length} nodes · ${group.unexpanded_count || 0} unexpanded`;
+}
+
+async function showResearchFact(factId) {
+  const detail = $('#research-detail'); detail.innerHTML = '<div class="empty">loading…</div>';
   try {
-    const d = await api('/api/control'); connError(false);
-    const summary = $('#control-summary'); summary.innerHTML = '';
-    if (!d.enabled) { summary.appendChild(el('div', 'empty', 'Legacy project — v2 control is not enabled.')); return; }
-    const cards = [
-      ['Current target', d.current_target || 'draft', `${d.targets.length} version(s)`],
-      ['Obligations', d.obligations.length, `${d.obligations.filter((x) => x.state === 'closed').length} closed`],
-      ['Routes', d.routes.length, `${d.routes.filter((x) => x.state === 'stalled').length} stalled`],
-      ['Control cost', '$' + Number(d.cost.cost_usd || 0).toFixed(4), `${Math.round(d.cost.wall_seconds || 0)}s · ${d.cost.events} events`],
-    ];
-    cards.forEach(([k, v, sub]) => { const c = el('div', 'card'); c.appendChild(el('div', 'k', k)); c.appendChild(el('div', 'v', String(v))); c.appendChild(el('div', 'sub', sub)); summary.appendChild(c); });
-    controlRows($('#control-targets'), d.targets, (x) => x.statement || '');
-    controlRows($('#control-obligations'), d.obligations, (x) => `${x.target_version} · ${x.statement || ''}`);
-    const assignments = Object.fromEntries(d.assignments.map((x) => [x.route_id, x]));
-    controlRows($('#control-routes'), d.routes, (x) => { const a = assignments[x.id]; return `${x.obligation_id} · ${x.method_family}${a ? ` · ${a.worker}: ${a.status} (${a.slice_count}/${a.max_slices})` : ''}`; });
+    const fact = await api(`/api/research/facts/${factId}?include_proof=true`); detail.innerHTML = '';
+    const card = el('div', 'entry' + (viewPins.has(factId) ? ' pinned' : ''));
+    card.appendChild(el('div', 'entry-author', fact.title));
+    card.appendChild(el('div', 'tag fid', fact.fact_id));
+    const statement = el('div', 'entry-claim'); mdmath(statement, fact.statement); card.appendChild(statement);
+    const proof = el('div', 'entry-evidence'); mdmath(proof, fact.proof); card.appendChild(proof);
+    const pin = el('button', '', viewPins.has(factId) ? 'Unpin from view' : 'Pin in view');
+    pin.onclick = () => { viewPins.has(factId) ? viewPins.delete(factId) : viewPins.add(factId); showResearchFact(factId); };
+    card.appendChild(pin); detail.appendChild(card);
+  } catch (e) { detail.innerHTML = `<div class="empty">${esc(e.message)}</div>`; }
+}
+
+async function selectRoute(routeId) {
+  try {
+    const d = await api(`/api/research/routes/${routeId}?snapshot=${controlGeneration}`);
+    renderFactGraph(d.fact_group);
+    const detail = $('#research-detail'); detail.innerHTML = '';
+    const route = el('div', 'entry'); route.appendChild(el('div', 'entry-author', d.route.method_title));
+    route.appendChild(el('div', 'entry-claim', d.route.expected_result || ''));
+    route.appendChild(el('div', 'gain-seq', `state ${d.route.state} · gains ${d.checkpoints.map((x)=>x.gain).reverse().join(' → ') || 'none'}`));
+    d.obstacles.forEach((x) => route.appendChild(el('div', 'entry-evidence', `Obstacle: ${x.title} (${x.occurrences})`)));
+    const recent = d.checkpoints[0] && d.checkpoints[0].report;
+    if (recent && recent.unresolved_interfaces) route.appendChild(el('div', 'entry-evidence', `Unresolved: ${recent.unresolved_interfaces.join(', ')}`));
+    if (recent && recent.recommended_next_action) route.appendChild(el('div', 'entry-evidence', `Next: ${recent.recommended_next_action}`));
+    detail.appendChild(route);
   } catch (e) { connError(true); }
 }
+
+async function loadManifests() {
+  const box = $('#context-manifests'); box.innerHTML = '';
+  try {
+    const d = await api('/api/research/context-manifests?limit=10');
+    if (!d.manifests.length) { box.appendChild(el('div','empty','No slice snapshots yet.')); return; }
+    d.manifests.forEach((m) => {
+      const card = el('div','entry clickable');
+      card.appendChild(el('div','entry-author',`${m.worker} · snapshot ${m.snapshot_generation}`));
+      card.appendChild(el('div','entry-claim',`${m.facts.length} facts · ${m.compression.title_only_count} title-only · ${m.compression.unexpanded_count} unexpanded`));
+      card.onclick = () => { const detail=$('#research-detail'); detail.innerHTML=''; m.facts.forEach((f)=>{ const row=el('div','entry clickable'); row.appendChild(el('div','entry-author',f.title)); row.appendChild(el('div','muted',`${f.mode} · ${f.reasons.join(', ')}`)); row.onclick=()=>showResearchFact(f.fact_id); detail.appendChild(row); }); };
+      box.appendChild(card);
+    });
+  } catch (e) { box.appendChild(el('div','empty','Failed to load snapshots.')); }
+}
+
+async function loadControl() {
+  try {
+    const state = await api('/api/control');
+    if (!state.enabled) { $('#control-summary').innerHTML='<div class="empty">Legacy project — v2 research control is not enabled.</div>'; return; }
+    const d = await api('/api/research/map'); connError(false);
+    const summary = $('#control-summary'); summary.innerHTML = '';
+    controlGeneration = d.generation;
+    const cards = [
+      ['Current target', d.active_target ? d.active_target.version : 'none', `${d.targets.length} version(s)`],
+      ['Obligation closure', `${d.obligations.filter((x)=>x.state==='closed').length}/${d.obligations.length}`, 'coverage, not a proof percentage'],
+      ['Routes', d.methods.reduce((n,m)=>n+m.routes.length,0), `${d.methods.length} method(s)`],
+      ['Budget', d.budget.stage, `${Math.round(d.budget.ratio * 100)}% of configured hard bound`],
+    ];
+    cards.forEach(([k, v, sub]) => { const c = el('div', 'card'); c.appendChild(el('div', 'k', k)); c.appendChild(el('div', 'v', String(v))); c.appendChild(el('div', 'sub', sub)); summary.appendChild(c); });
+    const targets=$('#control-targets'); targets.innerHTML=''; d.targets.forEach((t)=>targets.appendChild(governanceCard(t)));
+    const methods=$('#control-methods'); methods.innerHTML='';
+    d.methods.forEach((method)=>{ const group=el('div','entry'); group.appendChild(el('div','entry-author',method.method_title)); method.routes.forEach((r)=>{ const row=el('div','entry-evidence clickable',`${r.id} · ${r.state} · ${r.obligation_id}`); row.onclick=()=>selectRoute(r.id); group.appendChild(row); }); methods.appendChild(group); });
+    const obligations=$('#control-obligations'); obligations.innerHTML=''; d.obligations.forEach((o)=>{ const row=el('div','entry clickable'); row.appendChild(el('div','entry-author',o.id)); row.appendChild(el('span','tag',o.state)); row.appendChild(el('div','entry-claim',o.statement)); row.onclick=async()=>{ const x=await api(`/api/research/obligations/${o.id}?snapshot=${controlGeneration}`); renderFactGraph(x.fact_group); }; obligations.appendChild(row); });
+    await loadManifests();
+  } catch (e) { connError(true); }
+}
+$('#clear-pins').onclick = () => { viewPins.clear(); $('#research-detail').innerHTML='<div class="empty">View pins cleared.</div>'; };
 
 // ---- init + polling ------------------------------------------------------ //
 loadOverview();

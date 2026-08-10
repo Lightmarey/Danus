@@ -31,7 +31,7 @@ danus target approve my-project v0001
 }
 ```
 
-Proposing writes an immutable draft. Only `target approve` activates it. Creating
+Proposing writes an immutable draft into `control/control.sqlite3`. Only `target approve` activates it. Creating
 a fallback pauses stale assignments and creates another draft; it never approves
 the weaker target.
 
@@ -48,7 +48,7 @@ danus assign my-project/high --obligation v0001-main --route moving-spheres \
 danus start my-project/high
 ```
 
-A route records `method_family`, `expected_result`, assumptions, input fact IDs,
+A route records a stable `method_key`, readable `method_title`, `expected_result`, assumptions, input fact IDs,
 and optional `novelty_basis` / `fallback_route_ids`. An exact duplicate route is
 rejected unless it cites concrete novelty.
 
@@ -62,13 +62,15 @@ ceiling is 12 slices. Reusing the same evidence does not renew the lease twice.
 
 For v2 projects a worker's `fact_submit` must include the current
 `target_version`, `obligation_id`, `route_id`, `assignment_epoch`, `claim_role`,
-`assumptions_used`, and `closes_obligation`. Stale assignments, forbidden or
+`assumptions_used`, `closes_obligation`, and a one-line 4-80 character
+`display_title`. The title is stored in Markdown but is not part of `fact_id`;
+the first accepted title wins for duplicate mathematical content. Stale assignments, forbidden or
 undeclared assumptions, and tainted predecessors are rejected before verification.
 
 Use `danus control taint <project> <fact_id> --reason "..."` to append a
 non-destructive review marker and stop routes that explicitly depend on the fact.
-Only the existing operator-approved `fact_revoke` path removes the fact and its
-descendants from the active graph.
+For v2, the gateway's legacy-named `fact_revoke` action also taints rather than
+deleting. Formal removal remains a separate operator review action.
 
 ## Read model and budget
 
@@ -77,10 +79,31 @@ danus control rebuild my-project
 danus services up dashboard my-project
 ```
 
-The rebuild creates `control/read_model.sqlite3` with FTS5 when the local SQLite
-build supports it. It is derived entirely from immutable definitions, the event
-log, and fact files and can be deleted/rebuilt. The dashboard's **Research
-Control** tab shows target versions, obligations, routes, assignments, and costs.
+`control/control.sqlite3` is the transactional authority for targets,
+obligations, routes, assignments, events, and the outbox. Verified Markdown in
+`fact_graph/facts/` remains the mathematical authority. Fact indexes, scopes,
+checkpoints, obstacles, and FTS5 live in the same database but are rebuildable.
+Existing file-backed v2 control state is imported once and retained only as a
+migration source; v1 projects are not migrated.
+
+Gateway tools, worker kickoff, write-paper, and the dashboard all use
+`ResearchQuery`. A worker slice receives a persisted `ContextManifest` containing
+stable route facts, dependency closures, open obstacles, recent checkpoints, and
+a bounded set of search candidates. Proof bodies are opt-in through `fact_get`.
+The dashboard reproduces the same snapshot and groups facts as Target → Method →
+Route → Obligation → Fact with closing/direct/input/support/shared roles.
+
+Dashboard Pin, filter, expansion, and comparison state exists only in the
+browser's in-memory `Set` and disappears on refresh. The only mutations are
+target Approve/Withdraw, protected by an ephemeral launch-URL capability,
+Origin checking, request-id idempotency, and generation compare-and-swap.
+
+```console
+danus target withdraw my-project v0001 --reason "incorrect target contract"
+```
+
+Withdrawal invalidates assignments and leaves no active target; it never revives
+an older target automatically.
 
 Target budgets warn at 70%, force an audit at 85%, and block new slices at 100%.
 Worker, verifier, consult, paper, and human-summary calls write scoped `CostEvent`

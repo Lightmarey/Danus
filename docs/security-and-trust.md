@@ -39,8 +39,8 @@ The role table (`danus/gateway/roles.py`):
 
 | role | tools it can see |
 |---|---|
-| **worker** | `gm_add`, `gm_search`, `fact_submit`, `fact_search`, `search_arxiv_theorems` |
-| **main** (the orchestrator) | `gm_add`, `gm_search`, `fact_search`, `fact_revoke`, `search_arxiv_theorems` — **no `fact_submit`** |
+| **worker** | memory/write tools plus scoped route/obligation/fact reads and arXiv search |
+| **main** (the orchestrator) | memory tools plus the shared research map/context/proof reads, `fact_revoke`, and arXiv search — **no `fact_submit`** |
 | **verifier** | `search_arxiv_theorems` **only** (read-only) |
 
 Load-bearing separations:

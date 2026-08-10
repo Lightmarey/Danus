@@ -123,11 +123,12 @@ Danus/
 
 | contract | pinned shape | ends |
 |---|---|---|
-| MCP tool set + role gating | 6 tools; `roles.py` `ROLE_TOOLS` (main has NO `fact_submit`; verifier read-only) | `danus.gateway` ↔ worker/main/verifier agents |
+| MCP tool set + role gating | `roles.py` `ROLE_TOOLS` (main has NO `fact_submit`; verifier read-only; worker/main share scoped research reads) | `danus.gateway` ↔ worker/main/verifier agents |
 | MCP launch | current Python/uv + `DANUS_ROLE` env | verifier launcher · worker `.codex/config.toml` · main `.codex/config.toml` → gateway |
 | verify HTTP | `POST /verify {statement,proof}` → `{verification_report,verdict,repair_hints}`; verdict ⟺ no critical_errors & no gaps | `danus.gateway.fact_submit` ↔ `danus.verify` |
-| v2 control | immutable target/obligation/route JSON + assignment projection + append-only `control/events.jsonl`; SQLite is derived | orchestration · execution · gateway · observability |
-| v2 fact binding | legacy arguments plus current `target_version, obligation_id, route_id, assignment_epoch, claim_role, assumptions_used, closes_obligation` | worker ↔ gateway ↔ v2 control |
+| v2 control | transactional `control/control.sqlite3` authority (targets, obligations, routes, assignments, events, outbox); verified fact Markdown remains mathematical truth | orchestration · execution · gateway · observability |
+| v2 research reads | one `ResearchQuery` snapshot → bounded `ContextManifest` for agents and layered indexed views for humans | execution · gateway · authoring · observability |
+| v2 fact binding | legacy arguments plus current `display_title, target_version, obligation_id, route_id, assignment_epoch, claim_role, assumptions_used, closes_obligation` | worker ↔ gateway ↔ v2 control |
 | fact id inputs | `problem_id + sorted(predecessors) + sorted(glossary) + normalized(statement,proof)`; **external_refs EXCLUDED** | `danus.core` ↔ everyone (write-paper reads `external_refs`) |
 | global-memory kinds | the 11 `GLOBAL_KINDS` (incl. `master_guidance`/`elaboration`/`verification`) | `danus.core` ↔ agents · strategy · consult |
 | consult JSON envelope | `{transport,reply,usage,cost_usd,…}` | `danus.strategy` CLI ↔ consult skill |

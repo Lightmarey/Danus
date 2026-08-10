@@ -25,7 +25,7 @@ project; there is no default project.
 |---|---|---|
 | `list` | `danus list [--json]` | all projects + live worker counts + model |
 | `new` | `danus new <project> [--problem PROBLEM.md] [--roles high:3,xhigh:4] [--model M]` | scaffold a v2 project; an empty v2 project waits for a target; use `--legacy` only for explicit v1 |
-| `target` | `danus target propose\|diff\|approve\|status\|fallback ...` | versioned target lifecycle; fallback is always a draft |
+| `target` | `danus target propose\|diff\|approve\|withdraw\|status\|fallback ...` | versioned target lifecycle; fallback is always a draft and withdrawal leaves no active target |
 | `obligation` / `route` | `danus obligation add\|status ...`; `danus route add\|status ...` | create and inspect v2 proof obligations and routes |
 | `assign` | `danus assign <project>/<worker> ... --obligation O --route R` | bind a v2 worker to a finite route lease; legacy projects still replace `TASK.md` only |
 | `control` | `danus control rebuild ...`; `danus control taint ...` | rebuild SQLite/FTS5 or mark a suspect fact pending review |
@@ -51,14 +51,17 @@ Notes:
 The gateway is **role-gated**: what a caller can see depends on `DANUS_ROLE`. The
 main agent runs as `role=main`.
 
-**The six tools** (a trailing `?` marks an optional argument):
+**Gateway tools** (a trailing `?` marks an optional argument):
 
 | tool | args | what it does |
 |---|---|---|
 | `gm_add` | `kind, claim, evidence, verifiable?, glossary?, links?, project?` | publish a finding to shared global memory |
 | `gm_search` | `query, kinds?, limit_per_kind?, project?` | search global-memory findings |
-| `fact_submit` | legacy arguments; v2 additionally requires target/obligation/route/epoch/role/assumptions binding | **the write-gate** — validate control scope, verify, then write/link the fact iff `correct` |
-| `fact_search` | `query, limit?, project?` | search the verified fact graph |
+| `fact_submit` | legacy arguments; v2 additionally requires readable title plus target/obligation/route/epoch/role/assumptions binding | **the write-gate** — validate control scope, verify, then recoverably write/link the fact iff `correct` |
+| `fact_search` | `query, limit?, project?` | indexed FTS5 search for v2; legacy projects keep file-derived BM25 |
+| `research_map`, `route_context`, `obligation_context` | scoped IDs plus optional snapshot | shared target/method/route/obligation read model |
+| `fact_get`, `fact_neighborhood` | fact ID, optional proof/direction/depth/limit | opt-in fact body and bounded local DAG |
+| `target_proof_manifest` | optional target version | root closing facts and full topological proof closure (main only) |
 | `fact_revoke` | `fact_id, reason, project?` | cascade-revoke a fact + its dependents |
 | `search_arxiv_theorems` | `query, num_results?` | semantic search over arXiv theorem statements |
 
@@ -66,8 +69,8 @@ main agent runs as `role=main`.
 
 | role | tools |
 |---|---|
-| **worker** | `gm_add`, `gm_search`, `fact_submit`, `fact_search`, `search_arxiv_theorems` |
-| **main** | `gm_add`, `gm_search`, `fact_search`, `fact_revoke`, `search_arxiv_theorems` (**no `fact_submit`**) |
+| **worker** | memory/write tools plus fact search, route/obligation context, fact detail/neighborhood, and arXiv search |
+| **main** | memory tools plus all research reads and proof manifest, `fact_revoke`, and arXiv search (**no `fact_submit`**) |
 | **verifier** (the fact-checking verifier behind `fact_submit`) | `search_arxiv_theorems` only (read-only) |
 
 The main agent thus **cannot write a fact** and **cannot** even see `fact_submit`;

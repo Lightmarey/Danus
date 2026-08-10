@@ -14,7 +14,7 @@
   <div id="conn-banner" class="conn-banner" hidden>⚠ Cannot reach server — is <code>python -m danus.observability</code> running?</div>
   <header class="header">
     <h1>Danus</h1>
-    <span class="badge badge-version">fact graph + global memory</span>
+    <span class="badge badge-version">research read model</span>
     <span id="project-badge" class="badge badge-project"></span>
     <nav class="header-nav">
       <a class="nav-link active" data-tab="overview">Overview</a>
@@ -62,10 +62,19 @@
     <!-- Danus v2 research control -->
     <section id="tab-control" class="tab">
       <div id="control-summary" class="cards"></div>
-      <div class="ov-grid">
-        <div class="panel"><div class="panel-h">Target versions</div><div id="control-targets" class="mem-list"></div></div>
+      <div class="research-grid">
+        <div class="panel"><div class="panel-h">Target governance</div><div id="control-targets" class="mem-list"></div></div>
+        <div class="panel"><div class="panel-h">Methods → routes</div><div id="control-methods" class="mem-list"></div></div>
         <div class="panel"><div class="panel-h">Obligations</div><div id="control-obligations" class="mem-list"></div></div>
-        <div class="panel"><div class="panel-h">Routes and assignments</div><div id="control-routes" class="mem-list"></div></div>
+      </div>
+      <div class="research-lower">
+        <div class="panel">
+          <div class="panel-h">Selected route fact group <span id="route-stat" class="muted"></span></div>
+          <div class="graph-toolbar"><button id="clear-pins" type="button">Clear view pins</button><span class="muted">Pins and filters live only in this page memory.</span></div>
+          <div id="route-graph" class="route-graph"></div>
+        </div>
+        <aside class="panel"><div class="panel-h">Fact / progress detail</div><div id="research-detail" class="mem-list"><div class="empty">Select a route or obligation.</div></div></aside>
+        <aside class="panel"><div class="panel-h">LLM Context snapshots</div><div id="context-manifests" class="mem-list"></div></aside>
       </div>
     </section>
   </main>

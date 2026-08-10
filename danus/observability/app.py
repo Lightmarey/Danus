@@ -1,9 +1,8 @@
-"""Danus observability — a strictly read-only monitoring dashboard for one
-project's fact graph and global memory.
+"""Danus observability — a local research console for one project.
 
 A single self-contained FastAPI app serving a one-page client (echarts + KaTeX +
-markdown-it via CDN — no build step). It re-parses the on-disk stores under a
-project dir and NEVER writes:
+markdown-it via CDN — no build step). v2 research reads use the shared indexed
+ResearchQuery. The only writes are capability-protected target governance:
 
   <project>/fact_graph/facts/*.md         the verified-fact DAG
   <project>/global_memory/<kind>.jsonl    categorized findings (the 11 kinds)
@@ -28,17 +27,23 @@ import argparse
 import json
 import os
 import re
+import secrets
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
+from danus.control import ControlError, ControlStore
+from danus.control_service import ControlService
+from danus.research import ResearchQuery
+
 HERE = Path(__file__).resolve().parent
 STATIC = HERE / "static"
+CONTROL_TOKEN = os.environ.get("DANUS_CONTROL_TOKEN") or secrets.token_urlsafe(32)
 
 # ------------------------------------------------------------------------- #
 # channels — global-memory kinds in display order, each with a semantic role  #
@@ -251,7 +256,16 @@ class ChannelResp(BaseModel):
 
 def build_overview(project: Optional[Path] = None) -> Dict[str, Any]:
     project = project or _project_dir()
-    facts = _load_facts(project)
+    control = ControlStore(project)
+    indexed = control.enabled
+    if indexed:
+        control.scaffold()
+        with control._connect() as db:
+            facts = [dict(row) for row in db.execute("SELECT author FROM facts")]
+            linked = int(db.execute("SELECT COUNT(DISTINCT fact_id) FROM fact_edges").fetchone()[0])
+    else:
+        facts = _load_facts(project)
+        linked = sum(1 for fact in facts if fact["predecessors"])
     counts = {k: len(_load_channel(project, k)) for k, _ in CHANNELS}
     verdicts: Dict[str, int] = {}
     for e in _load_channel(project, "verification"):
@@ -262,11 +276,10 @@ def build_overview(project: Optional[Path] = None) -> Dict[str, Any]:
     by_author: Dict[str, int] = {}
     for f in facts:
         by_author[f["author"]] = by_author.get(f["author"], 0) + 1
-    leaves = sum(1 for f in facts if not f["predecessors"])
     return {
         "project": project.name,
         "facts": len(facts),
-        "facts_with_predecessors": len(facts) - leaves,
+        "facts_with_predecessors": linked,
         "facts_by_author": by_author,
         "channel_counts": counts,
         "verdicts": verdicts,
@@ -278,6 +291,8 @@ def build_overview(project: Optional[Path] = None) -> Dict[str, Any]:
 
 def build_factgraph(project: Optional[Path] = None) -> Dict[str, Any]:
     project = project or _project_dir()
+    if ControlStore(project).enabled:
+        raise ValueError("v2 fact graphs require a bounded route, obligation, or neighborhood query")
     facts = _load_facts(project)
     ids = {f["fact_id"] for f in facts}
     deps = {f["fact_id"]: [p for p in f["predecessors"] if p in ids] for f in facts}
@@ -308,7 +323,7 @@ def build_channel(kind: str, project: Optional[Path] = None) -> Dict[str, Any]:
 
 
 def build_control(project: Optional[Path] = None) -> Dict[str, Any]:
-    """Read-only fold of the v2 control files and append-only events."""
+    """Compatibility summary backed by the same v2 ResearchQuery as agents."""
     project = project or _project_dir()
     try:
         meta = json.loads((project / "project.json").read_text(encoding="utf-8"))
@@ -316,56 +331,48 @@ def build_control(project: Optional[Path] = None) -> Dict[str, Any]:
         meta = {}
     if meta.get("control_version") != 2:
         return {"enabled": False}
-    root = project / "control"
-    events = _load_jsonl(root / "events.jsonl")
+    query = ResearchQuery(project)
+    research = query.research_map()
+    store = query.store
+    assignments = [item for worker in [row["worker"] for row in _assignment_rows(store)] if (item := store.assignment(worker))]
+    costs = store.events("cost")
+    routes = [route for method in research["methods"] for route in method["routes"]]
+    return {"enabled": True, "generation": research["generation"],
+            "current_target": (research["active_target"] or {}).get("version"),
+            "targets": research["targets"], "obligations": research.get("obligations", []),
+            "routes": routes, "methods": research["methods"], "assignments": assignments,
+            "budget": research["budget"], "outbox": research["outbox"],
+            "cost": {"events": len(costs), "wall_seconds": sum(float(item.get("wall_seconds") or 0) for item in costs),
+                     "cost_usd": sum(float(item.get("cost_usd") or 0) for item in costs if item.get("cost_usd") is not None)}}
 
-    def objects(directory: str) -> List[Dict[str, Any]]:
-        out = []
-        for path in sorted((root / directory).glob("*.json")):
-            try:
-                value = json.loads(path.read_text(encoding="utf-8"))
-                if isinstance(value, dict):
-                    out.append(value)
-            except (OSError, json.JSONDecodeError):
-                pass
-        return out
 
-    target_state: Dict[str, str] = {}
-    obligation_state: Dict[str, str] = {}
-    route_state: Dict[str, str] = {}
-    current = None
-    for event in events:
-        kind = event.get("event")
-        version = event.get("target_version")
-        if kind == "target_proposed" and version:
-            target_state[version] = "draft"
-        elif kind == "target_approved" and version:
-            target_state[version] = "approved"
-            current = version
-        elif kind == "target_superseded" and version:
-            target_state[version] = "superseded"
-            if current == version:
-                current = None
-        elif kind == "obligation_state" and event.get("obligation_id"):
-            obligation_state[event["obligation_id"]] = event.get("state", "open")
-        elif kind == "route_state" and event.get("route_id"):
-            route_state[event["route_id"]] = event.get("state", "proposed")
-    targets = [{**item, "state": target_state.get(item.get("version"), "draft")} for item in objects("targets")]
-    obligations = [{**item, "state": obligation_state.get(item.get("id"), "open")} for item in objects("obligations")]
-    routes = [{**item, "state": route_state.get(item.get("id"), "proposed")} for item in objects("routes")]
-    assignments = objects("assignments")
-    costs = [event for event in events if event.get("event") == "cost"]
-    return {
-        "enabled": True, "current_target": current, "targets": targets,
-        "obligations": obligations, "routes": routes, "assignments": assignments,
-        "cost": {
-            "events": len(costs),
-            "wall_seconds": sum(float(item.get("wall_seconds") or 0) for item in costs),
-            "cost_usd": sum(float(item.get("cost_usd") or 0) for item in costs if item.get("cost_usd") is not None),
-            "threshold": next((item for item in reversed(events) if item.get("event") == "budget_threshold"), None),
-        },
-        "recent_events": events[-50:],
-    }
+def _assignment_rows(store: ControlStore) -> List[Dict[str, Any]]:
+    with store._connect() as db:
+        return [dict(row) for row in db.execute("SELECT worker FROM assignments ORDER BY worker")]
+
+
+class TargetCommand(BaseModel):
+    request_id: str
+    expected_generation: int
+    reason: str = ""
+
+
+def _authorize_control(request: Request) -> None:
+    if request.headers.get("X-Danus-Control-Token") != CONTROL_TOKEN:
+        raise HTTPException(401, "invalid control capability")
+    origin = request.headers.get("Origin")
+    expected = f"{request.url.scheme}://{request.url.netloc}"
+    if not origin or origin.rstrip("/") != expected:
+        raise HTTPException(403, "invalid Origin")
+
+
+def _control_service(project: Path) -> ControlService:
+    from danus.execution import layout as layout
+    from danus.orchestration.cli import _stop_one
+    return ControlService(project, lambda kind, payload: (
+        _stop_one(layout.WorkerLayout(project / "workers" / payload["worker"]), force=True)
+        if kind == "stop_worker" else None
+    ))
 
 
 # ------------------------------------------------------------------------- #
@@ -382,7 +389,10 @@ def overview() -> JSONResponse:
 
 @app.get("/api/factgraph", response_model=FactGraphResp)
 def factgraph() -> JSONResponse:
-    return JSONResponse(build_factgraph())
+    try:
+        return JSONResponse(build_factgraph())
+    except ValueError as exc:
+        raise HTTPException(410, str(exc)) from exc
 
 
 @app.get("/api/channels", response_model=ChannelsResp)
@@ -393,6 +403,68 @@ def channels() -> JSONResponse:
 @app.get("/api/control")
 def control() -> JSONResponse:
     return JSONResponse(build_control())
+
+
+@app.get("/api/research/map")
+def research_map(target_version: Optional[str] = None) -> JSONResponse:
+    return JSONResponse(ResearchQuery(_project_dir()).research_map(target_version))
+
+
+@app.get("/api/research/routes/{route_id}")
+def research_route(route_id: str, snapshot: Optional[int] = None) -> JSONResponse:
+    try:
+        return JSONResponse(ResearchQuery(_project_dir()).route_context(route_id, snapshot=snapshot))
+    except (ControlError, ValueError) as exc:
+        raise HTTPException(404, str(exc)) from exc
+
+
+@app.get("/api/research/obligations/{obligation_id}")
+def research_obligation(obligation_id: str, snapshot: Optional[int] = None) -> JSONResponse:
+    try:
+        return JSONResponse(ResearchQuery(_project_dir()).obligation_context(obligation_id, snapshot=snapshot))
+    except (ControlError, ValueError) as exc:
+        raise HTTPException(404, str(exc)) from exc
+
+
+@app.get("/api/research/facts/{fact_id}")
+def research_fact(fact_id: str, include_proof: bool = False) -> JSONResponse:
+    try:
+        return JSONResponse(ResearchQuery(_project_dir()).fact_get(fact_id, include_proof=include_proof))
+    except KeyError as exc:
+        raise HTTPException(404, str(exc)) from exc
+
+
+@app.get("/api/research/facts/{fact_id}/neighborhood")
+def research_neighborhood(fact_id: str, direction: str = "both", depth: int = 1, limit: int = 300) -> JSONResponse:
+    try:
+        return JSONResponse(ResearchQuery(_project_dir()).fact_neighborhood(fact_id, direction=direction, depth=depth, limit=limit))
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
+@app.get("/api/research/context-manifests")
+def context_manifests(worker: Optional[str] = None, limit: int = 20) -> JSONResponse:
+    return JSONResponse({"manifests": ResearchQuery(_project_dir()).list_context_manifests(worker=worker, limit=limit)})
+
+
+@app.post("/api/control/targets/{version}/approve")
+def approve_target(version: str, command: TargetCommand, request: Request) -> JSONResponse:
+    _authorize_control(request)
+    try:
+        result = _control_service(_project_dir()).approve_target(version, request_id=command.request_id, expected_generation=command.expected_generation)
+        return JSONResponse(result)
+    except ControlError as exc:
+        raise HTTPException(409, str(exc)) from exc
+
+
+@app.post("/api/control/targets/{version}/withdraw")
+def withdraw_target(version: str, command: TargetCommand, request: Request) -> JSONResponse:
+    _authorize_control(request)
+    try:
+        result = _control_service(_project_dir()).withdraw_target(version, reason=command.reason, request_id=command.request_id, expected_generation=command.expected_generation)
+        return JSONResponse(result)
+    except ControlError as exc:
+        raise HTTPException(409, str(exc)) from exc
 
 
 @app.get("/api/channel/{kind}", response_model=ChannelResp)
@@ -436,7 +508,7 @@ def main() -> None:
     if not project.is_dir():
         raise SystemExit(f"project dir not found: {project}")
     import uvicorn
-    print(f"danus dashboard: http://{args.host}:{args.port}/  (project: {project})")
+    print(f"danus dashboard: http://{args.host}:{args.port}/#control-token={CONTROL_TOKEN}  (project: {project})")
     uvicorn.run(app, host=args.host, port=args.port, log_level="warning")
 
 
