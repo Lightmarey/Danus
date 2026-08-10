@@ -66,13 +66,12 @@ def test_v2_cli_lifecycle_requires_approved_bound_work(tmp_path: Path):
         assert cli.do_status("P/high")[0]["control"]["route_id"] == "r1"
 
 
-def test_public_new_command_requires_problem_or_explicit_legacy(tmp_path: Path):
+def test_public_new_command_defaults_to_empty_v2_or_explicit_legacy(tmp_path: Path):
     with _env(tmp_path):
-        try:
-            cli.main(["new", "P", "--roles", "high:1"])
-            assert False, "new without a problem should fail"
-        except SystemExit as exc:
-            assert "require --problem" in str(exc)
+        assert cli.main(["new", "P", "--roles", "high:1"]) == 0
+        meta = json.loads((tmp_path / "projects" / "P" / "project.json").read_text())
+        assert meta["control_version"] == 2
+        assert cli.do_start("P/high")[0]["result"] == "waiting"
         assert cli.main(["new", "legacy", "--roles", "high:1", "--legacy"]) == 0
         meta = json.loads((tmp_path / "projects" / "legacy" / "project.json").read_text())
         assert "control_version" not in meta

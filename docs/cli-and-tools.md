@@ -24,7 +24,7 @@ project; there is no default project.
 | verb | form | what it does |
 |---|---|---|
 | `list` | `danus list [--json]` | all projects + live worker counts + model |
-| `new` | `danus new <project> --problem PROBLEM.md [--roles high:3,xhigh:4] [--model M]` | scaffold a v2 project; use `--legacy` only for an explicit v1 project |
+| `new` | `danus new <project> [--problem PROBLEM.md] [--roles high:3,xhigh:4] [--model M]` | scaffold a v2 project; an empty v2 project waits for a target; use `--legacy` only for explicit v1 |
 | `target` | `danus target propose\|diff\|approve\|status\|fallback ...` | versioned target lifecycle; fallback is always a draft |
 | `obligation` / `route` | `danus obligation add\|status ...`; `danus route add\|status ...` | create and inspect v2 proof obligations and routes |
 | `assign` | `danus assign <project>/<worker> ... --obligation O --route R` | bind a v2 worker to a finite route lease; legacy projects still replace `TASK.md` only |

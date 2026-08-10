@@ -36,7 +36,8 @@ Tell the main agent the problem. It will:
 1. **Ask the worker roster** — how many `high` + `xhigh` workers (default
    `high:3,xhigh:4` = 3 + 4).
 2. **Write `PROBLEM.md`** — your goal verbatim, then scaffold with
-   `danus new <p> --problem PROBLEM.md --roles high:N,xhigh:M`.
+   `danus new <p> --problem PROBLEM.md --roles high:N,xhigh:M`. `--problem` is optional;
+   without it, the v2 project is created empty and cannot start until a target is approved.
 3. **Approve the target** — propose and diff a versioned `TargetContract`, then
    explicitly `danus target approve <p> <version>` before assigning routes.
 

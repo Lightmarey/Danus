@@ -242,6 +242,8 @@ def test_http_routes_via_testclient():
             assert r.status_code == 200 and r.json()["max_depth"] == 2
             r = client.get("/api/channels")
             assert r.status_code == 200 and len(r.json()["channels"]) == 11
+            r = client.get("/api/control")
+            assert r.status_code == 200 and r.json()["enabled"] is False
             r = client.get("/api/channel/plan")
             assert r.status_code == 200 and r.json()["count"] == 2
             # unknown channel -> 404

@@ -89,7 +89,7 @@ Below, "the project" means whichever one this beat is for.
   launch blind. First **discuss the problem with both GPT-5.5-pro and the human**,
   get instructions from both sides. **Ask the human the worker roster** (how many
   `high` + how many `xhigh`; default `high:3,xhigh:4`) — a required project-start
-  choice, never picked silently — then `danus new <project> --problem PROBLEM.md --roles high:N,xhigh:M`.
+  choice, never picked silently — then `danus new <project> [--problem PROBLEM.md] --roles high:N,xhigh:M`.
   Propose a versioned TargetContract, show its diff to
   the human, and obtain explicit approval before creating routes or starting workers.
 - **Cadence after that.** Run each project's elaborate → consult → assign beat on
@@ -209,7 +209,7 @@ State only what you have **verified**. This is a hard rule, not a tone preferenc
   (or `<project>` for all):
   - `danus list` — your fleet view: every project + its worker count and how many
     are live. Use this to keep the roster straight across concurrent projects.
-  - `danus new <project> --problem PROBLEM.md [--roles high:3,xhigh:4]` — scaffold a v2 project + worker dirs
+  - `danus new <project> [--problem PROBLEM.md] [--roles high:3,xhigh:4]` — scaffold a v2 project + worker dirs; without a problem it waits for target setup
     (roster default `high:3,xhigh:4`; ask the operator, don't assume).
   - `danus target propose|diff|approve|status|fallback ...` — target lifecycle;
     only explicit approval activates a target or fallback.

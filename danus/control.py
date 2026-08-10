@@ -763,6 +763,10 @@ class ControlStore:
                 # ponytail: FTS5 may be absent in a minimal Python build; the canonical
                 # files remain usable and a plain table keeps rebuild deterministic.
                 db.execute("CREATE TABLE research_fts(kind TEXT, object_id TEXT, text TEXT)")
+                db.execute("INSERT INTO research_fts SELECT 'target', version, statement FROM targets")
+                db.execute("INSERT INTO research_fts SELECT 'obligation', id, statement FROM obligations")
+                db.execute("INSERT INTO research_fts SELECT 'route', id, method_family || ' ' || payload FROM routes")
+                db.execute("INSERT INTO research_fts SELECT 'fact', fact_id, statement || ' ' || proof FROM facts")
             db.commit()
         finally:
             db.close()

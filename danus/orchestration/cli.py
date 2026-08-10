@@ -35,7 +35,8 @@ from danus.control import ControlError, ControlStore, is_v2_project
 
 __all__ = [
     "do_new", "do_assign", "do_start", "do_status", "worker_status",
-    "do_list", "do_stop", "do_finalize", "build_parser", "main",
+    "do_list", "do_stop", "do_finalize", "do_target", "do_obligation",
+    "do_route", "do_control_rebuild", "do_control_taint", "build_parser", "main",
 ]
 
 
@@ -452,7 +453,7 @@ def build_parser() -> argparse.ArgumentParser:
     n.add_argument("project")
     n.add_argument("--roles", default="high:3,xhigh:4", help="e.g. high:3,xhigh:4 (default)")
     n.add_argument("--model", default=None)
-    n.add_argument("--problem", default=None, help="PROBLEM.md source; required for v2 projects")
+    n.add_argument("--problem", default=None, help="optional PROBLEM.md source for the v2 project")
     n.add_argument("--legacy", action="store_true", help="explicitly create a legacy v1 project")
 
     a = sub.add_parser("assign", help="write a worker's per-round TASK.md")
@@ -540,8 +541,6 @@ def main(argv: Optional[List[str]] = None) -> int:
     elif args.cmd == "new":
         if args.legacy and args.problem:
             raise SystemExit("new accepts either --problem (v2) or --legacy, not both")
-        if not args.legacy and not args.problem:
-            raise SystemExit("new projects default to v2 and require --problem; use --legacy explicitly for v1")
         r = do_new(
             args.project, roles=args.roles, model=args.model,
             problem=Path(args.problem) if args.problem else None,

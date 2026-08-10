@@ -122,9 +122,9 @@ def do_new(project: str, roles: str = "high:3,xhigh:4",
         control_version = 2 if problem is not None else 1
     if control_version not in {1, 2}:
         raise SystemExit(f"unsupported control version: {control_version}")
-    if control_version == 2:
-        if problem is None or not Path(problem).is_file():
-            raise SystemExit("Danus v2 requires --problem <file>")
+    if control_version == 2 and problem is not None:
+        if not Path(problem).is_file():
+            raise SystemExit(f"problem file does not exist: {problem}")
         problem = Path(problem).resolve()
     role_pairs = L.parse_roles(roles)
     model = model or _default_model()
@@ -156,7 +156,8 @@ def do_new(project: str, roles: str = "high:3,xhigh:4",
     meta = {"name": project, "model": model, "roles": roles, "workers": created}
     if control_version == 2:
         meta["control_version"] = 2
-        shutil.copyfile(problem, pdir / "PROBLEM.md")  # type: ignore[arg-type]
+        if problem is not None:
+            shutil.copyfile(problem, pdir / "PROBLEM.md")
         from danus.control import ControlStore
         ControlStore(pdir).scaffold()
     atomic_write(pdir / "project.json", json.dumps(meta, ensure_ascii=False, indent=2))
