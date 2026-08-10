@@ -16,7 +16,6 @@ import re
 import sqlite3
 import time
 import uuid
-from dataclasses import asdict
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
 
@@ -251,7 +250,8 @@ class ControlStore:
             from_target=current["version"],
             requires_human_approval=True,
         )
-        return proposed
+        stale_workers = self.invalidate_assignments(reason=f"target fallback draft {proposed['version']} requires approval")
+        return {"target": proposed, "stale_workers": stale_workers}
 
     # ------------------------------------------------------------- obligations
     def add_obligation(self, value: Dict[str, Any], *, actor: str = "main") -> Dict[str, Any]:
@@ -300,13 +300,15 @@ class ControlStore:
                 state = str(row.get("state") or state)
         return state
 
-    def set_obligation_state(self, oid: str, state: str, *, actor: str, fact_id: Optional[str] = None) -> None:
+    def set_obligation_state(self, oid: str, state: str, *, actor: str,
+                             fact_id: Optional[str] = None,
+                             assignment_epoch: Optional[str] = None) -> None:
         if state not in {"open", "active", "closed", "blocked", "refuted", "superseded"}:
             raise ControlError(f"invalid obligation state: {state}")
         obligation = self.obligation(oid)
         self.append_event(
             "obligation_state", obligation_id=oid, target_version=obligation["target_version"],
-            state=state, actor=actor, fact_id=fact_id,
+            state=state, actor=actor, fact_id=fact_id, assignment_epoch=assignment_epoch,
         )
 
     def dependencies_closed(self, oid: str) -> bool:
@@ -503,6 +505,52 @@ class ControlStore:
                 return True
         return False
 
+    def reusable_fact(self, statement: str, assumptions_used: Iterable[str]) -> Optional[str]:
+        """Return an already-verified v2 fact for the exact same claim contract."""
+        from danus.core import FactGraph
+        from danus.core.factgraph import statement_of
+
+        normalized = " ".join(statement.split())
+        assumptions = sorted(str(item) for item in assumptions_used)
+        graph = FactGraph(self.project)
+        for row in reversed(self.events("fact_linked")):
+            fact_id = row.get("fact_id")
+            if not fact_id or not graph.exists(fact_id):
+                continue
+            if self.fact_tainted(str(fact_id)):
+                continue
+            if sorted(row.get("assumptions_used") or []) != assumptions:
+                continue
+            if " ".join(statement_of(graph.get_raw(fact_id) or "").split()) == normalized:
+                return str(fact_id)
+        return None
+
+    def fact_tainted(self, fact_id: str) -> bool:
+        return any(row.get("fact_id") == fact_id for row in self.events("fact_tainted"))
+
+    def taint_fact(self, fact_id: str, reason: str, *, actor: str = "main") -> Dict[str, Any]:
+        from danus.core import FactGraph
+
+        graph = FactGraph(self.project)
+        if not graph.exists(fact_id):
+            raise ControlError(f"unknown fact: {fact_id}")
+        affected = {fact_id, *graph.descendants(fact_id)}
+        event = self.append_event(
+            "fact_tainted", fact_id=fact_id, reason=str(reason).strip(), actor=actor,
+            affected_fact_ids=sorted(affected), review_required=True,
+        )
+        stale_workers = []
+        for path in self.assignments.glob("*.json"):
+            assignment = _read_json(path)
+            route = self.route(assignment["route_id"])
+            if affected.intersection(route.get("input_fact_ids") or []):
+                assignment["status"] = "tainted"
+                assignment["stale_reason"] = f"route depends on tainted fact {fact_id}"
+                self.save_assignment(assignment)
+                stale_workers.append(assignment["worker"])
+                self.set_route_state(route["id"], "stalled", actor="controller", reason=assignment["stale_reason"])
+        return {"event": event, "stale_workers": stale_workers}
+
     def evaluate_work_report(
         self, worker: str, report: Dict[str, Any], *, wall_seconds: float,
         usage: Optional[Dict[str, Any]] = None,
@@ -661,8 +709,12 @@ class ControlStore:
                     item.get("worker"), json.dumps(item, ensure_ascii=False),
                 ))
             from danus.core import FactGraph
-            for fact in FactGraph(self.project).list():
-                db.execute("INSERT INTO facts VALUES (?,?,?,?)", (fact.fact_id, fact.statement, fact.proof, json.dumps(asdict(fact), ensure_ascii=False)))
+            from danus.core.factgraph import statement_of
+            graph = FactGraph(self.project)
+            for fact_id in graph.list():
+                raw = graph.get_raw(fact_id) or ""
+                statement = statement_of(raw)
+                db.execute("INSERT INTO facts VALUES (?,?,?,?)", (fact_id, statement, raw, json.dumps({"fact_id": fact_id, "raw": raw}, ensure_ascii=False)))
             try:
                 db.execute("CREATE VIRTUAL TABLE research_fts USING fts5(kind, object_id, text)")
                 db.execute("INSERT INTO research_fts SELECT 'target', version, statement FROM targets")

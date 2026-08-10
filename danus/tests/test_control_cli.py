@@ -94,9 +94,10 @@ def test_target_change_stales_assignment_and_fallback_remains_draft(tmp_path: Pa
             "method_family": "direct", "expected_result": "T",
         })
         store.assign("high", obligation_id="v0001-root-1", route_id="r1", task="T")
-        fallback = cli.do_target("P", "fallback")["target"]
+        fallback_result = cli.do_target("P", "fallback")
+        fallback = fallback_result["target"]
         assert store.target_state(fallback["version"]) == "draft"
-        assert store.assignment("high")["status"] == "assigned"
+        assert store.assignment("high")["status"] == "stale"
         approved = cli.do_target("P", "approve", version=fallback["version"])
-        assert approved["stale_workers"] == ["high"]
+        assert approved["stale_workers"] == []
         assert store.assignment("high")["status"] == "stale"

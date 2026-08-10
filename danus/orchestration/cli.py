@@ -365,7 +365,13 @@ def do_target(project: str, action: str, *, file: Optional[str] = None,
         if action == "diff":
             return {"version": version, "against": against, "diff": store.target_diff(version or "", against)}
         if action == "fallback":
-            return {"target": store.propose_fallback(), "approved": False}
+            result = store.propose_fallback()
+            stopped = []
+            for worker in result["stale_workers"]:
+                stopped.append({"worker": worker, "result": _stop_one(
+                    L.WorkerLayout(L.worker_dir(project, worker)), force=True,
+                )})
+            return {**result, "approved": False, "stopped": stopped}
         if action == "status":
             versions = [{"version": item, "state": store.target_state(item)} for item in store.target_versions()]
             return {"current": store.current_target_version(), "versions": versions}
@@ -407,6 +413,17 @@ def do_control_rebuild(project: str) -> Dict:
         return _control(project).rebuild_read_model()
     except ControlError as exc:
         raise SystemExit(f"control rebuild failed: {exc}") from exc
+
+
+def do_control_taint(project: str, fact_id: str, reason: str) -> Dict:
+    try:
+        result = _control(project).taint_fact(fact_id, reason)
+    except ControlError as exc:
+        raise SystemExit(f"control taint failed: {exc}") from exc
+    result["stopped"] = [{"worker": worker, "result": _stop_one(
+        L.WorkerLayout(L.worker_dir(project, worker)), force=True,
+    )} for worker in result["stale_workers"]]
+    return result
 
 
 # --------------------------------------------------------------------------- #
@@ -480,6 +497,10 @@ def build_parser() -> argparse.ArgumentParser:
     control_actions = control.add_subparsers(dest="control_action", required=True)
     rebuild = control_actions.add_parser("rebuild")
     rebuild.add_argument("project")
+    taint = control_actions.add_parser("taint", help="mark a suspect fact and pause dependent routes")
+    taint.add_argument("project")
+    taint.add_argument("fact_id")
+    taint.add_argument("--reason", required=True)
 
     f = sub.add_parser("finalize", help="record the finalized target fact_id(s) in "
                                         "a paper's TARGET.md (write-paper reads this)")
@@ -548,7 +569,9 @@ def main(argv: Optional[List[str]] = None) -> int:
             args.project, args.route_action, file=getattr(args, "file", None),
         ), ensure_ascii=False, indent=2))
     elif args.cmd == "control":
-        print(json.dumps(do_control_rebuild(args.project), ensure_ascii=False, indent=2))
+        result = (do_control_rebuild(args.project) if args.control_action == "rebuild"
+                  else do_control_taint(args.project, args.fact_id, args.reason))
+        print(json.dumps(result, ensure_ascii=False, indent=2))
     elif args.cmd == "finalize":
         r = do_finalize(args.project, args.fact_ids, paper_id=args.paper)
         paper_note = f" (paper {args.paper})" if args.paper else ""

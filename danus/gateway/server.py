@@ -32,11 +32,13 @@ import json
 import os
 import re
 import urllib.request
+import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from danus._mcp import FastMCP
 from danus.core import FactGraph, GlobalMemory
+from danus.control import ControlError, ControlStore
 from danus.integrations import search as _arxiv_search
 
 from .roles import tools_for
@@ -150,6 +152,37 @@ def gm_search(query: str, kinds: Optional[List[str]] = None, limit_per_kind: int
 # fact graph                                                                  #
 # --------------------------------------------------------------------------- #
 
+def _close_v2_obligation(
+    control: ControlStore, *, statement: str, fact_id: str, obligation_id: str,
+    assignment_epoch: str, claim_role: str, undefined: List[str], requested: bool,
+) -> Dict[str, Any]:
+    if not requested:
+        return {"requested": False, "closed": False}
+    obligation = control.obligation(obligation_id)
+    reasons = []
+    if claim_role != "unconditional":
+        reasons.append("only an unconditional claim can close an obligation")
+    if " ".join(statement.split()) != " ".join(obligation["statement"].split()):
+        reasons.append("fact statement does not exactly match the obligation")
+    if undefined:
+        reasons.append(f"unbound symbols remain: {', '.join(undefined)}")
+    if control.fact_tainted(fact_id):
+        reasons.append("fact is tainted pending review")
+    if not control.dependencies_closed(obligation_id):
+        reasons.append("predecessor obligations are not closed")
+    if reasons:
+        control.append_event(
+            "obligation_closure_rejected", obligation_id=obligation_id,
+            target_version=obligation["target_version"], fact_id=fact_id,
+            assignment_epoch=assignment_epoch, reasons=reasons,
+        )
+        return {"requested": True, "closed": False, "reasons": reasons}
+    control.set_obligation_state(
+        obligation_id, "closed", actor="fact_submit", fact_id=fact_id,
+        assignment_epoch=assignment_epoch,
+    )
+    return {"requested": True, "closed": True, "fact_id": fact_id}
+
 def fact_submit(
     statement: str,
     proof: str,
@@ -158,6 +191,13 @@ def fact_submit(
     intuition: str = "",
     source_id: Optional[str] = None,
     external_refs: Optional[List[Dict[str, Any]]] = None,
+    target_version: Optional[str] = None,
+    obligation_id: Optional[str] = None,
+    route_id: Optional[str] = None,
+    assignment_epoch: Optional[str] = None,
+    claim_role: Optional[str] = None,
+    assumptions_used: Optional[List[str]] = None,
+    closes_obligation: bool = False,
 ) -> Dict[str, Any]:
     """The only way to write a fact. Runs the glossary-coverage check, calls the
     verifier, and writes the node IFF accepted. On reject, returns repair hints
@@ -176,9 +216,39 @@ def fact_submit(
     with ``search_arxiv_theorems``). This is captured on the fact so the paper
     pipeline can cite it without re-deriving; it is mutable metadata and does not
     affect the ``fact_id``."""
+    started = time.monotonic()
+    project_dir = _project()
     fg = _fg()
     gm = _gm()
     problem_id = os.environ.get("DANUS_PROBLEM_ID", Path(_project()).name)
+    control = ControlStore(project_dir)
+    assignment = None
+    if control.enabled:
+        required = {
+            "target_version": target_version, "obligation_id": obligation_id,
+            "route_id": route_id, "assignment_epoch": assignment_epoch,
+            "claim_role": claim_role,
+        }
+        missing = [key for key, value in required.items() if not value]
+        if missing:
+            return {"accepted": False, "verdict": "control_error",
+                    "error": f"Danus v2 fact_submit missing: {', '.join(missing)}"}
+        if claim_role not in {"unconditional", "conditional", "counterexample", "literature_import"}:
+            return {"accepted": False, "verdict": "control_error",
+                    "error": f"invalid claim_role: {claim_role}"}
+        try:
+            assignment = control.validate_submission(
+                _author(), target_version=target_version or "",
+                obligation_id=obligation_id or "", route_id=route_id or "",
+                assignment_epoch=assignment_epoch or "",
+                assumptions_used=assumptions_used or [],
+            )
+        except ControlError as exc:
+            return {"accepted": False, "verdict": "control_error", "error": str(exc)}
+        tainted_predecessors = [fid for fid in (predecessors or []) if control.fact_tainted(fid)]
+        if tainted_predecessors:
+            return {"accepted": False, "verdict": "control_error",
+                    "error": f"submission depends on tainted facts: {', '.join(tainted_predecessors)}"}
 
     # glossary coverage is advisory — never let a heuristic bug block submission
     try:
@@ -189,17 +259,52 @@ def fact_submit(
     except Exception:
         undefined = []
 
+    reused_fact_id = control.reusable_fact(statement, assumptions_used or []) if control.enabled else None
+    if reused_fact_id:
+        control.append_event(
+            "fact_linked", fact_id=reused_fact_id, reused=True, worker=_author(),
+            assignment_epoch=assignment_epoch, target_version=target_version,
+            obligation_id=obligation_id, route_id=route_id, claim_role=claim_role,
+            assumptions_used=assumptions_used or [],
+        )
+        closure = _close_v2_obligation(
+            control, statement=statement, fact_id=reused_fact_id,
+            obligation_id=obligation_id or "", assignment_epoch=assignment_epoch or "",
+            claim_role=claim_role or "", undefined=undefined,
+            requested=closes_obligation,
+        )
+        control.record_cost(
+            component="verification", wall_seconds=time.monotonic() - started,
+            worker=_author(), target_version=target_version, obligation_id=obligation_id,
+            route_id=route_id, assignment_epoch=assignment_epoch,
+            usage={}, cost_usd=0.0,
+        )
+        return {"accepted": True, "fact_id": reused_fact_id, "reused": True,
+                "closure": closure, "undefined_symbols": undefined}
+
     # 1) Verify. If the verify service errors, no verdict exists yet: return a
     #    clean error so the worker retries. Nothing is lost.
     try:
         result = _verify(statement, proof)
     except Exception as e:
+        if control.enabled:
+            control.record_cost(
+                component="verification", wall_seconds=time.monotonic() - started,
+                worker=_author(), target_version=target_version, obligation_id=obligation_id,
+                route_id=route_id, assignment_epoch=assignment_epoch,
+            )
         return {"accepted": False, "verdict": "error", "error": str(e),
                 "undefined_symbols": undefined}
     # A successful call that returned a non-dict body (e.g. a bare list) would make
     # the .get() below throw uncaught; treat it as a verify error (clean retry
     # envelope, no verdict to store) rather than leaking a stack trace to the worker.
     if not isinstance(result, dict):
+        if control.enabled:
+            control.record_cost(
+                component="verification", wall_seconds=time.monotonic() - started,
+                worker=_author(), target_version=target_version, obligation_id=obligation_id,
+                route_id=route_id, assignment_epoch=assignment_epoch,
+            )
         return {"accepted": False, "verdict": "error",
                 "error": f"verify service returned a non-dict body ({type(result).__name__})",
                 "undefined_symbols": undefined}
@@ -234,6 +339,29 @@ def fact_submit(
         verification_report=result.get("verification_report"),
     )
 
+    closure = None
+    if control.enabled:
+        control.record_cost(
+            component="verification", wall_seconds=time.monotonic() - started,
+            worker=_author(), target_version=target_version, obligation_id=obligation_id,
+            route_id=route_id, assignment_epoch=assignment_epoch,
+            usage=(result.get("usage") if isinstance(result.get("usage"), dict) else {}),
+            cost_usd=result.get("cost_usd"),
+        )
+        if accepted and fact_id:
+            control.append_event(
+                "fact_linked", fact_id=fact_id, reused=False, worker=_author(),
+                assignment_epoch=assignment_epoch, target_version=target_version,
+                obligation_id=obligation_id, route_id=route_id, claim_role=claim_role,
+                assumptions_used=assumptions_used or [],
+            )
+            closure = _close_v2_obligation(
+                control, statement=statement, fact_id=fact_id,
+                obligation_id=obligation_id or "", assignment_epoch=assignment_epoch or "",
+                claim_role=claim_role or "", undefined=undefined,
+                requested=closes_obligation,
+            )
+
     # 4) Return.
     if not accepted:
         return {
@@ -246,7 +374,8 @@ def fact_submit(
     if write_error:
         return {"accepted": True, "fact_id": None, "write_error": write_error,
                 "undefined_symbols": undefined}
-    return {"accepted": True, "fact_id": fact_id, "undefined_symbols": undefined}
+    return {"accepted": True, "fact_id": fact_id, "closure": closure,
+            "undefined_symbols": undefined}
 
 
 def fact_search(query: str, limit: int = 10, project: Optional[str] = None) -> Dict[str, Any]:

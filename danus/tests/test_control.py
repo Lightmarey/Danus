@@ -60,7 +60,7 @@ def test_target_approval_creates_root_obligation_and_never_auto_approves_fallbac
     store.approve_target(draft["version"])
     assert store.current_target_version() == "v0001"
     assert store.obligation_state("v0001-T") == "open"
-    fallback = store.propose_fallback()
+    fallback = store.propose_fallback()["target"]
     assert fallback["version"] == "v0002"
     assert store.target_state("v0002") == "draft"
     assert store.current_target_version() == "v0001"
@@ -171,6 +171,25 @@ def test_parse_codex_usage_is_version_tolerant(tmp_path: Path):
         encoding="utf-8",
     )
     assert parse_codex_usage(log) == {"input_tokens": 12, "output_tokens": 4, "reasoning_tokens": 3}
+
+
+def test_taint_is_append_only_and_pauses_routes_that_depend_on_the_fact(tmp_path: Path):
+    store = _store(tmp_path)
+    target = store.propose_target(_target())
+    store.approve_target(target["version"])
+    fact_id = FactGraph(store.project).add(
+        problem_id="P", author="high", statement="Lemma", proof="Proof",
+    )
+    store.add_route({
+        "id": "uses-lemma", "obligation_id": "v0001-T", "method_family": "reduction",
+        "expected_result": "T", "input_fact_ids": [fact_id],
+    })
+    store.assign("high", obligation_id="v0001-T", route_id="uses-lemma", task="use lemma")
+    result = store.taint_fact(fact_id, "later contradiction")
+    assert result["stale_workers"] == ["high"]
+    assert store.assignment("high")["status"] == "tainted"
+    assert store.fact_tainted(fact_id) is True
+    assert FactGraph(store.project).exists(fact_id) is True  # review marker, not destructive revoke
 
 
 def test_only_explicit_v2_metadata_enables_control(tmp_path: Path):

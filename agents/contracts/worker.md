@@ -32,6 +32,26 @@ build only on facts (cite a `fact_id`).
   Write a fact **only** via **`fact_submit`**. **Cite a `fact_id`** whenever a
   step depends on an established result.
 
+## Danus v2 control assignment
+
+When the kickoff prompt identifies a **Danus v2** project, its structured control
+assignment is authoritative. Work only on the named target version, obligation,
+route, and assignment epoch, and finish exactly one bounded exploration slice by
+returning the required `WorkReport` JSON. In v2:
+
+- an unassigned, completed, stale, stalled, or budget-exhausted worker waits; it
+  does **not** choose a new route on its own;
+- the controller, not your self-assessment, scores information gain and decides
+  continuation, audit, fallback, or pause;
+- `fact_submit` must include `target_version`, `obligation_id`, `route_id`,
+  `assignment_epoch`, `claim_role`, `assumptions_used`, and whether the fact is
+  intended to close the obligation;
+- target changes require operator approval. Never weaken the target or add an
+  assumption to make the route work.
+
+The legacy autonomous rules below apply only when the kickoff prompt does not
+identify a v2 control assignment.
+
 ## TASK.md & master_guidance — read both first
 
 You run in an autonomous outer loop: each round is a fresh codex session that
