@@ -431,6 +431,7 @@ class ControlStore:
             "audit_required": False,
             "wall_seconds": 0.0,
             "last_unresolved_interfaces": None,
+            "credited_evidence_refs": [],
             "event_cursor": len(self.events()),
             "assigned_at_utc": utc_now(),
         }
@@ -525,7 +526,11 @@ class ControlStore:
         assignment["event_cursor"] = len(all_events)
         gain = "high" if linked or closed else "low"
         refs = report.get("new_evidence_refs") or []
-        valid_refs = [ref for ref in refs if isinstance(ref, str) and self.evidence_exists(ref)]
+        credited = set(assignment.get("credited_evidence_refs") or [])
+        valid_refs = [
+            ref for ref in refs
+            if isinstance(ref, str) and ref not in credited and self.evidence_exists(ref)
+        ]
         interfaces = report.get("unresolved_interfaces") or []
         previous_interfaces = assignment.get("last_unresolved_interfaces")
         reduced_interfaces = isinstance(previous_interfaces, int) and len(interfaces) < previous_interfaces
@@ -534,6 +539,7 @@ class ControlStore:
         }
         if gain == "low" and valid_refs and (state_changing or reduced_interfaces or report.get("novelty_basis")):
             gain = "medium"
+            assignment["credited_evidence_refs"] = sorted(credited | set(valid_refs))
         assignment["last_unresolved_interfaces"] = len(interfaces)
         audit_was_required = bool(assignment.get("audit_required"))
         if gain in {"high", "medium"}:

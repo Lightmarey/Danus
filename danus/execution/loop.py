@@ -37,6 +37,9 @@ from typing import Optional
 from . import layout as L
 from . import scaffold
 from danus import codex, runtime
+from danus.control import (
+    ControlError, ControlStore, parse_codex_usage, parse_work_report,
+)
 
 _FACT_ID_RE = re.compile(r'"?fact_id"?\s*[:=]\s*"?([0-9a-f]{16})"?')
 
@@ -58,6 +61,28 @@ def kickoff(project: str, worker: str) -> str:
         f"An open problem is not a reason to stop. Do NOT finalize prematurely.\n"
         f"5. Persist as you go: rough progress to local memory; shareable findings via "
         f"gm_add; any verified result via fact_submit."
+    )
+
+
+def kickoff_v2(project: str, worker: str, assignment: dict, *, audit: bool) -> str:
+    mode = (
+        "This slice is an independent route audit. Do not repeat the route. Compare its "
+        "failed signatures and evidence with the obligation, identify a genuinely new route "
+        "or report no progress honestly."
+        if audit else
+        "Explore the assigned route deeply for this bounded slice. Preserve useful partial "
+        "progress, but do not change the approved target or silently adopt extra assumptions."
+    )
+    return (
+        f"You are worker '{worker}' on Danus v2 project '{project}'.\n"
+        f"{mode}\n"
+        f"The control assignment below is authoritative:\n"
+        f"{json.dumps(assignment, ensure_ascii=False, indent=2)}\n"
+        "Read AGENTS.md, the verified fact graph, relevant global-memory evidence and dead ends. "
+        "Work only on this target version, obligation, and route. fact_submit must use the exact "
+        "target_version, obligation_id, route_id, and assignment epoch above. Ordinary memory "
+        "notes do not count as progress. Finish this one slice by returning the required WorkReport "
+        "JSON; do not continue into an unassigned route."
     )
 
 
@@ -139,12 +164,19 @@ class _Child:
 
 
 def run_round(wl: L.WorkerLayout, role: dict, prompt: str, log_path: Path,
-              hard_timeout: int) -> int:
+              hard_timeout: int, *, report_path: Optional[Path] = None,
+              output_schema: Optional[Path] = None) -> int:
     """Exec one ``codex exec`` continuation session. Returns codex's rc, 124 on
     hard-timeout (terminate → wait 10s → kill), or 127 if the codex binary is
     missing."""
     wdir = wl.dir
     codex_bin = codex.resolve_bin()
+    structured = []
+    if report_path is not None and output_schema is not None:
+        report_path.parent.mkdir(parents=True, exist_ok=True)
+        report_path.unlink(missing_ok=True)
+        structured = ["--json", "--output-schema", str(output_schema),
+                      "--output-last-message", str(report_path)]
     cmd = codex.exec_cmd(
         codex_bin, role["MODEL"], role["REASONING_EFFORT"],
         "-C", str(wdir),
@@ -152,6 +184,7 @@ def run_round(wl: L.WorkerLayout, role: dict, prompt: str, log_path: Path,
         # trusted-directory check refuses to run the worker round
         "--skip-git-repo-check",
         "--dangerously-bypass-approvals-and-sandbox",
+        *structured,
         prompt,
     )
     timed_out = False
@@ -199,6 +232,86 @@ def refresh_worker_assets(wl: L.WorkerLayout) -> None:
     )
 
 
+def _run_v2_loop(wl: L.WorkerLayout, role: dict, control: ControlStore, beat: float) -> int:
+    """Run finite, controller-scored exploration slices for one v2 assignment."""
+    worker = wl.name
+    infra_failures = 0
+    while True:
+        if wl.stop.exists():
+            wl.stop.unlink(missing_ok=True)
+            write_status(wl, state="stopped")
+            return 0
+        if _deadline_passed(wl.project_dir):
+            write_status(wl, state="deadline")
+            return 0
+        try:
+            assignment = control.validate_assignment(worker)
+        except ControlError as exc:
+            write_status(wl, state="waiting", control_reason=str(exc))
+            return 0
+
+        audit = bool(assignment.get("audit_required"))
+        slice_no = int(assignment["slice_count"]) + 1
+        prompt = kickoff_v2(wl.project, worker, assignment, audit=audit)
+        log_path = wl.logs / f"slice_{slice_no}.jsonl"
+        report_path = wl.logs / f"slice_{slice_no}_report.json"
+        write_status(
+            wl, state="auditing" if audit else "running", round=slice_no,
+            round_started_at=time.time(), target_version=assignment["target_version"],
+            obligation_id=assignment["obligation_id"], route_id=assignment["route_id"],
+        )
+        started = time.monotonic()
+        rc = run_round(
+            wl, role, prompt, log_path, int(assignment["slice_timeout"]),
+            report_path=report_path, output_schema=control.work_report_schema,
+        )
+        wall = time.monotonic() - started
+        if rc == 127:
+            write_status(wl, state="error", error="codex binary not found")
+            return 127
+        if rc not in (0, 124):
+            infra_failures += 1
+            control.append_event(
+                "slice_infra_error", worker=worker, assignment_epoch=assignment["epoch"],
+                target_version=assignment["target_version"], obligation_id=assignment["obligation_id"],
+                route_id=assignment["route_id"], return_code=rc,
+            )
+            control.record_cost(
+                component="worker_slice", worker=worker, assignment_epoch=assignment["epoch"],
+                target_version=assignment["target_version"], obligation_id=assignment["obligation_id"],
+                route_id=assignment["route_id"], wall_seconds=wall,
+                usage=parse_codex_usage(log_path),
+            )
+            if infra_failures >= 2:
+                assignment["status"] = "infra_blocked"
+                control.save_assignment(assignment)
+                write_status(wl, state="infra_blocked", error=f"{infra_failures} consecutive infrastructure failures")
+                return 1
+            if beat > 0:
+                time.sleep(beat)
+            continue
+        infra_failures = 0
+        result = control.evaluate_work_report(
+            worker, parse_work_report(report_path), wall_seconds=wall,
+            usage=parse_codex_usage(log_path),
+        )
+        current = result["assignment"]
+        write_status(
+            wl, state=current["status"], round=current["slice_count"],
+            last_round_at=time.time(), last_rc=rc, gain=result["gain"],
+            decision=result["decision"], last_fact_id=_parse_last_fact_id(log_path),
+        )
+        if result["decision"] in {"stalled", "budget_exhausted"}:
+            fallback = control.activate_fallback(worker)
+            if fallback:
+                write_status(wl, state="fallback", route_id=fallback["route_id"])
+                continue
+            write_status(wl, state="paused", control_reason=result["decision"])
+            return 0
+        if beat > 0:
+            time.sleep(beat)
+
+
 def main(worker_dir: str) -> int:
     wdir = Path(worker_dir).resolve()
     if not wdir.is_dir():
@@ -210,6 +323,7 @@ def main(worker_dir: str) -> int:
     project = wl.project
     worker = wl.name
     role = _read_role(wl)
+    control = ControlStore(project_dir)
 
     # Refresh the worker gateway command from the shared runtime resolver on every
     # start, so a moved/rebuilt or explicitly configured interpreter is picked up.
@@ -236,6 +350,8 @@ def main(worker_dir: str) -> int:
     rnd = 0
     consec_fail = 0
     try:
+        if control.enabled:
+            return _run_v2_loop(wl, role, control, beat)
         while True:
             if wl.stop.exists():
                 wl.stop.unlink(missing_ok=True)
