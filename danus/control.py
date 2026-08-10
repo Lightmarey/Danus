@@ -470,6 +470,15 @@ class ControlStore:
         self.route(assignment["route_id"])
         if int(assignment["slice_count"]) >= int(assignment["max_slices"]):
             raise ControlError("route slice budget exhausted")
+        budget = self.budget_state()
+        if budget["stage"] == "exhausted":
+            assignment["status"] = "budget_exhausted"
+            self.save_assignment(assignment)
+            raise ControlError("project budget exhausted")
+        if budget["stage"] == "audit" and not assignment.get("audit_required"):
+            assignment["audit_required"] = True
+            assignment["status"] = "auditing"
+            self.save_assignment(assignment)
         return assignment
 
     def validate_submission(
@@ -666,10 +675,39 @@ class ControlStore:
                 ) / 1_000_000
             except ValueError:
                 cost_usd = None
-        return self.append_event(
+        event = self.append_event(
             "cost", component=component, wall_seconds=round(max(0.0, wall_seconds), 3),
             usage=usage, cost_usd=cost_usd, **scope,
         )
+        self._record_budget_threshold()
+        return event
+
+    def budget_state(self) -> Dict[str, Any]:
+        target = self.current_target() or {}
+        budget = target.get("budget") or {}
+        costs = self.events("cost")
+        spent_wall = sum(float(row.get("wall_seconds") or 0) for row in costs)
+        spent_cost = sum(float(row.get("cost_usd") or 0) for row in costs if row.get("cost_usd") is not None)
+        ratios = []
+        for spent, key in ((spent_wall, "max_wall_seconds"), (spent_cost, "max_cost_usd")):
+            try:
+                limit = float(budget.get(key))
+                if limit > 0:
+                    ratios.append(spent / limit)
+            except (TypeError, ValueError):
+                pass
+        ratio = max(ratios, default=0.0)
+        stage = "exhausted" if ratio >= 1 else "audit" if ratio >= .85 else "warn" if ratio >= .70 else "normal"
+        return {"stage": stage, "ratio": ratio, "wall_seconds": spent_wall,
+                "cost_usd": spent_cost, "budget": budget}
+
+    def _record_budget_threshold(self) -> None:
+        state = self.budget_state()
+        prior = [row.get("stage") for row in self.events("budget_threshold")]
+        if state["stage"] != "normal" and (not prior or prior[-1] != state["stage"]):
+            self.append_event(
+                "budget_threshold", target_version=self.current_target_version(), **state,
+            )
 
     # -------------------------------------------------------------- read model
     def rebuild_read_model(self) -> Dict[str, Any]:

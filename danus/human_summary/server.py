@@ -33,6 +33,7 @@ import os
 import json
 import subprocess
 import uuid
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -97,6 +98,22 @@ def _drive(prompt: str) -> Dict[str, Any]:
     result = classify_outcome(cp, artifact_noun="report")
     result["stderr_full"] = str(getattr(cp, "stderr", "") or "")
     result["cmd"] = getattr(cp, "args", None) or getattr(cp, "cmd", None)
+    return result
+
+
+def _drive_scoped(prompt: str, project_dir: Path) -> Dict[str, Any]:
+    started = time.monotonic()
+    result = _drive(prompt)
+    try:
+        from danus.control import ControlStore
+        control = ControlStore(project_dir)
+        if control.enabled:
+            control.record_cost(
+                component="human_summary", wall_seconds=time.monotonic() - started,
+                target_version=control.current_target_version(),
+            )
+    except (OSError, ValueError):
+        pass
     return result
 
 
@@ -183,7 +200,7 @@ def summary_write(project: Optional[str] = None, language: Optional[str] = None)
     lang = language or _operator_language() or "English"
     report_path = pdir / "report" / "report.md"
     prompt = assemble.build_prompt(pdir, language=lang)
-    res = _drive(prompt)
+    res = _drive_scoped(prompt, pdir)
     out: Dict[str, Any] = {
         "report_md_path": str(report_path),
         "language": lang,

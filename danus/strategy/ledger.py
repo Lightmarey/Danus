@@ -39,6 +39,24 @@ def log_spend(project: str, envelope: Dict[str, Any]) -> str:
     }
     with ledger.open("a", encoding="utf-8") as f:
         f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+    try:
+        from danus.control import ControlStore
+        control = ControlStore(Path(project))
+        if control.enabled:
+            control.record_cost(
+                component="strategy_consult", wall_seconds=float(envelope.get("seconds") or 0),
+                usage={
+                    "input_tokens": usage.get("input", 0),
+                    "output_tokens": usage.get("output", 0),
+                    "reasoning_tokens": usage.get("reasoning"),
+                },
+                cost_usd=float(envelope.get("cost_usd") or 0),
+                target_version=control.current_target_version(),
+            )
+    except (OSError, ValueError):
+        # The existing spend ledger is authoritative for consult billing; a
+        # derived v2 control event must never make billing persistence fail.
+        pass
     return f"{_sum_ledger(ledger):.4f}"
 
 

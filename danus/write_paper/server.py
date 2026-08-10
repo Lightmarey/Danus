@@ -34,6 +34,7 @@ import re
 import shutil
 import subprocess
 import tempfile
+import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -104,6 +105,21 @@ def _attach_raw(res: Dict[str, Any], cp: Any) -> Dict[str, Any]:
     return res
 
 
+def _record_control_cost(project_dir: Optional[Path], component: str, started: float) -> None:
+    if project_dir is None:
+        return
+    try:
+        from danus.control import ControlStore
+        control = ControlStore(project_dir)
+        if control.enabled:
+            control.record_cost(
+                component=component, wall_seconds=time.monotonic() - started,
+                target_version=control.current_target_version(),
+            )
+    except (OSError, ValueError):
+        pass
+
+
 def _drive(prompt: str, effort: Optional[str] = None) -> Dict[str, Any]:
     """Run the codex driver once and classify the outcome honestly (see
     ``authoring.common.classify_outcome``: ``ok`` needs a zero exit AND non-empty
@@ -118,6 +134,14 @@ def _drive(prompt: str, effort: Optional[str] = None) -> Dict[str, Any]:
     except (subprocess.TimeoutExpired, FileNotFoundError) as e:
         cp = e
     return _attach_raw(classify_outcome(cp, artifact_noun="artifact"), cp)
+
+
+def _drive_scoped(prompt: str, project_dir: Path,
+                  effort: Optional[str] = None) -> Dict[str, Any]:
+    started = time.monotonic()
+    result = _drive(prompt, effort=effort)
+    _record_control_cost(project_dir, "authoring", started)
+    return result
 
 
 def _drive_networked(prompt: str) -> Dict[str, Any]:
@@ -135,6 +159,13 @@ def _drive_networked(prompt: str) -> Dict[str, Any]:
     except (subprocess.TimeoutExpired, FileNotFoundError) as e:
         cp = e
     return _attach_raw(classify_outcome(cp, artifact_noun="verdicts"), cp)
+
+
+def _drive_networked_scoped(prompt: str, project_dir: Path) -> Dict[str, Any]:
+    started = time.monotonic()
+    result = _drive_networked(prompt)
+    _record_control_cost(project_dir, "authoring_reference_verify", started)
+    return result
 
 
 # --------------------------------------------------------------------------- #
@@ -744,7 +775,7 @@ def paper_write(project: Optional[str] = None,
                                     fact_id_warnings=fact_id_warnings)
     prompt = assemble.build_prompt("writer", pdir, headline=resolved, paper_id=paper_id,
                                    fact_ids=fact_ids, instructions=instructions)
-    res = _drive(prompt)
+    res = _drive_scoped(prompt, pdir)
     out: Dict[str, Any] = {
         "tex_path": str(tex_path),
         "status": res["status"],
@@ -865,7 +896,7 @@ def reference_audit(project: Optional[str] = None,
     pdir = resolve_project(project)
     ledger_path = assemble.paper_workspace(pdir, paper_id) / "REFERENCE_LEDGER.md"
     prompt = assemble.build_prompt("auditor", pdir, paper_id=paper_id)
-    res = _drive(prompt)
+    res = _drive_scoped(prompt, pdir)
     out: Dict[str, Any] = {
         "findings": res["stdout"] if res["status"] == "ok" else "",
         "ledger_path": str(ledger_path),
@@ -1151,7 +1182,7 @@ def reference_verify(project: Optional[str] = None,
     pdir = resolve_project(project)
     ledger_path = assemble.paper_workspace(pdir, paper_id) / "REFERENCE_LEDGER.md"
     prompt = assemble.build_prompt("verifier", pdir, findings=findings, paper_id=paper_id)
-    res = _drive_networked(prompt)
+    res = _drive_networked_scoped(prompt, pdir)
     out: Dict[str, Any] = {
         "verdicts": [],
         "ledger_path": str(ledger_path),
@@ -1371,13 +1402,13 @@ def paper_revise(project: Optional[str] = None, compile_log: Optional[str] = Non
                                            notes=notes, citation_fixes=citation_fixes,
                                            gap_fill=gap_fill_text,
                                            paper_id=paper_id)
-            res = _drive(prompt)
+            res = _drive_scoped(prompt, pdir)
         else:
             # compile-retry: a LIGHTWEIGHT, LOW-EFFORT, targeted fix of the LAST
             # attempt's broken tex — fix ONLY the compile error, do not re-run the full
             # (high-effort) gap-fill or re-reason the paper. Mechanical.
             prompt = _compile_fix_prompt(last_tex or "", cur_compile_log or "")
-            res = _drive(prompt, effort=_compile_fix_effort())
+            res = _drive_scoped(prompt, pdir, effort=_compile_fix_effort())
         out["status"] = res["status"]
         out["returncode"] = res["returncode"]
         out["stderr_tail"] = res["stderr_tail"]
@@ -1690,7 +1721,7 @@ def paper_verify_math(project: Optional[str] = None,
     verify_error: Optional[str] = None
     verdict: Optional[str] = None
     hints = ""
-    res = _drive(prompt)
+    res = _drive_scoped(prompt, pdir)
     if res["status"] != "ok":
         verify_error = res.get("error") or "paper-math verifier codex returned non-ok"
         hints = verify_error
@@ -1808,7 +1839,7 @@ def style_distill(
         "\n\n".join(evidence),
         f"===== OPERATOR NOTES =====\n{operator_notes or '_(none)_'}",
     ))
-    result = _drive(prompt)
+    result = _drive_scoped(prompt, pdir)
     out = {
         "status": result["status"],
         "proposal": result["stdout"] if result["status"] == "ok" else "",

@@ -197,3 +197,61 @@ def test_only_explicit_v2_metadata_enables_control(tmp_path: Path):
     project.mkdir()
     (project / "project.json").write_text('{"name":"legacy"}', encoding="utf-8")
     assert is_v2_project(project) is False
+
+
+def test_project_budget_warns_audits_then_blocks_expensive_work(tmp_path: Path):
+    store = _store(tmp_path)
+    contract = _target() | {"budget": {"max_wall_seconds": 100}}
+    target = store.propose_target(contract)
+    store.approve_target(target["version"])
+    store.add_route({
+        "id": "r1", "obligation_id": "v0001-T", "method_family": "direct",
+        "expected_result": "T",
+    })
+    store.assign("high", obligation_id="v0001-T", route_id="r1", task="T")
+    store.record_cost(component="worker_slice", wall_seconds=70)
+    assert store.budget_state()["stage"] == "warn"
+    store.record_cost(component="verification", wall_seconds=15)
+    assert store.validate_assignment("high")["audit_required"] is True
+    store.record_cost(component="worker_slice", wall_seconds=15)
+    try:
+        store.validate_assignment("high")
+        assert False, "100% project budget must block another slice"
+    except ControlError as exc:
+        assert "project budget exhausted" in str(exc)
+
+
+def test_consult_ledger_also_attributes_v2_control_cost(tmp_path: Path):
+    from danus.strategy.ledger import log_spend
+
+    store = _store(tmp_path)
+    target = store.propose_target(_target())
+    store.approve_target(target["version"])
+    total = log_spend(str(store.project), {
+        "model": "m", "effort": "high", "status": "completed",
+        "usage": {"input": 10, "output": 4, "reasoning": 2},
+        "cost_usd": 0.25, "seconds": 3,
+    })
+    assert total == "0.2500"
+    event = store.events("cost")[-1]
+    assert event["component"] == "strategy_consult"
+    assert event["usage"]["output_tokens"] == 4
+
+
+def test_authoring_call_records_v2_wall_time_without_inventing_token_cost(tmp_path: Path):
+    import subprocess
+    from danus.human_summary import server as summary_server
+
+    store = _store(tmp_path)
+    original = summary_server.driver.run_codex
+    summary_server.driver.run_codex = lambda *args, **kwargs: subprocess.CompletedProcess(
+        ["codex"], 0, stdout="report", stderr="",
+    )
+    try:
+        result = summary_server._drive_scoped("prompt", store.project)
+    finally:
+        summary_server.driver.run_codex = original
+    assert result["status"] == "ok"
+    event = store.events("cost")[-1]
+    assert event["component"] == "human_summary"
+    assert event["cost_usd"] is None
