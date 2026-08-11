@@ -103,7 +103,12 @@ migration source; v1 projects are not migrated.
 Gateway tools, worker kickoff, write-paper, and the dashboard all use
 `ResearchQuery`. A worker slice receives a persisted `ContextManifest` containing
 stable route facts, dependency closures, open obstacles, recent checkpoints, and
-a bounded set of search candidates. Proof bodies are opt-in through `fact_get`.
+a bounded set of search candidates. The default manifest budget is 16,000
+characters, at most 20 facts include their statement, and at most three FTS
+candidates are included title-only. If an already-scoped fact exactly matches the
+obligation, the redundant FTS expansion is skipped. `fact_search` returns a
+bounded snippet and v2 `gm_search` omits evidence unless explicitly requested;
+proof bodies are opt-in through `fact_get`.
 The dashboard reproduces the same snapshot and groups facts as Target → Method →
 Route → Theorem Group → Fact. A theorem group is a read-only DAG projection rooted
 at one direct predecessor of the route's closing fact; clicking it expands only
@@ -142,6 +147,15 @@ their reservation into one `CostEvent`; reservations left by a crashed process
 expire during recovery. With `strict_cost_reservations` enabled, a call whose
 maximum USD cost cannot be estimated is rejected. If actual usage remains
 unknown, the reserved ceiling is recorded as `estimated_ceiling`, never as zero.
+
+A verifier call made inside a worker slice is a child reservation: its wall time
+is recorded as `nested_wall_seconds` and is not counted a second time against the
+project wall budget, while its token and monetary cost remain separate. A real
+wall/cost reservation rejection is a typed control event, forces `gain=none`, and
+cannot be reframed as medium progress using old evidence. An operator stop
+interrupts an active v2 child promptly, settles the reservation, records partial
+usage when the provider emitted it (otherwise `usage_status=unavailable`), and
+does not consume a research slice.
 
 Transport and provider failures do not consume route slices or low-gain counts.
 They do consume their real wall time and known or reserved cost. Bounded retries

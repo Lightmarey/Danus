@@ -74,6 +74,10 @@ on a `correct` verdict; every verdict is traced to global memory either way.
 Two consecutive low-information checkpoints trigger a fresh route audit; only a
 third low-gain audit stalls the route. Validated exploratory evidence can renew a
 lease without already being a theorem. See [research-control-v2.md](research-control-v2.md).
+Search results are summaries, not bulk fact/proof loads: the worker expands a
+selected fact with `fact_get` only when the route needs its proof. `danus stop`
+also interrupts an active v2 slice promptly and records whatever usage was
+available, rather than waiting up to the full slice timeout.
 
 Monitor with:
 

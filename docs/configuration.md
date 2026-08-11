@@ -113,6 +113,9 @@ on each structured assignment (`--slice-timeout`, `--max-slices`). Optional
 `TargetContract.budget` limits total wall time and/or USD cost. When the Codex
 backend exposes token usage, `DANUS_CODEX_PRICE_IN` and
 `DANUS_CODEX_PRICE_OUT` give per-million-token rates for cost attribution.
+Legacy rounds also request Codex JSON event logs so input/cached/output usage can
+be measured for diagnostics, but v1 still has no control database or project
+budget enforcement.
 
 V2 resilience defaults also live in the target's `budget` object, so every
 worker and restart observes the same values:
@@ -137,9 +140,20 @@ in the 70/85/100% thresholds, so concurrent callers cannot all pass a stale
 budget check. Completion atomically replaces the reservation with the real
 `CostEvent`; a crashed process leaves a conservative reservation that expires
 after the hard timeout plus a short cleanup grace period.
+Verifier calls nested inside a worker slice reuse the parent's wall reservation,
+so elapsed wall time is not double-counted; their token and USD cost are still
+attributed separately. A graceful `danus stop` polls active v2 slices, cancels
+the child promptly, and records partial or unavailable usage without decrementing
+the route lease.
 If a strict USD reservation was configured but the provider returns no usage or
 cost receipt, settlement consumes the reserved per-call ceiling with
 `cost_status=estimated_ceiling`; it is never released as an invented zero.
+
+V2 workers receive the Danus MCP definition as an explicit per-process Codex
+override in addition to the generated `.codex/config.toml`. This keeps the
+project, role, verifier URL, and interpreter authoritative even when ambient
+Codex configuration changes. Do not add `--ignore-user-config`: current Codex
+versions also suppress the worker MCP surface under that flag.
 
 ## Rendering & misc
 
