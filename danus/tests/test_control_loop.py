@@ -47,7 +47,7 @@ def test_v2_loop_runs_two_exploration_slices_then_independent_audit(tmp_path: Pa
     prompts = []
     original = loop.run_round
 
-    def fake(_wl, _role, prompt, log_path, _timeout, *, report_path=None, output_schema=None):
+    def fake(_wl, _role, prompt, log_path, _timeout, *, report_path=None, output_schema=None, **_kwargs):
         prompts.append(prompt)
         assert report_path is not None and output_schema == store.work_report_schema
         report_path.write_text(json.dumps(_report()), encoding="utf-8")
@@ -83,6 +83,31 @@ def test_reusing_the_same_evidence_does_not_keep_renewing_a_route(tmp_path: Path
     second = store.evaluate_work_report("high", report, wall_seconds=1)
     assert first["gain"] == "medium"
     assert second["gain"] == "low"
+
+
+def test_budget_rejection_cannot_be_reframed_as_information_gain(tmp_path: Path):
+    from danus.core import GlobalMemory
+
+    _wl, store = _worker(tmp_path)
+    assignment = store.assignment("high")
+    evidence = GlobalMemory(store.project).append(
+        "obstacle", claim="old fact", evidence="checked", author="high",
+        verifiable=False,
+    )
+    store.append_event(
+        "call_reservation_rejected", component="verification",
+        worker="high", assignment_epoch=assignment["epoch"],
+        reason_code="wall_budget", reason="cannot reserve",
+    )
+    report = _report() | {
+        "route_status": "blocked", "new_evidence_refs": [evidence],
+        "novelty_basis": ["old evidence restated"],
+    }
+    result = store.evaluate_work_report("high", report, wall_seconds=1)
+    assert result["gain"] == "none"
+    assert result["decision"] == "budget_exhausted"
+    assert result["project_budget_blocked"] is True
+    assert store.route_state("r1") == "active"
 
 
 def test_timeout_without_report_uses_persisted_infra_budget_not_research_slices(tmp_path: Path):

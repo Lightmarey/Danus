@@ -337,6 +337,34 @@ def test_reservation_settlement_and_crash_expiry_release_budget(tmp_path: Path):
     assert state["reserved_wall_seconds"] == 0 and state["wall_seconds"] == 10
 
 
+def test_nested_verification_uses_parent_wall_reservation_without_double_counting(tmp_path: Path):
+    store = _store(tmp_path)
+    target = store.propose_target(_target() | {"budget": {"max_wall_seconds": 100}})
+    store.approve_target(target["version"])
+    scope = {
+        "worker": "high", "assignment_epoch": "epoch", "target_version": "v0001",
+        "obligation_id": "o1", "route_id": "r1",
+    }
+    parent = store.reserve_call(
+        component="worker_slice", max_wall_seconds=100, **scope,
+    )
+    child = store.reserve_call(
+        component="verification", max_wall_seconds=60,
+        parent_reservation_id=parent["id"], **scope,
+    )
+    assert child["reserved_wall_seconds"] == 0
+    assert store.budget_state()["reserved_wall_seconds"] == 100
+    nested = store.record_cost(
+        component="verification", wall_seconds=6, reservation_id=child["id"], **scope,
+    )
+    assert nested["wall_seconds"] == 0
+    assert nested["nested_wall_seconds"] == 6
+    store.record_cost(
+        component="worker_slice", wall_seconds=8, reservation_id=parent["id"], **scope,
+    )
+    assert store.budget_state()["wall_seconds"] == 8
+
+
 def test_authoring_and_consult_preflight_stop_before_an_over_budget_call(tmp_path: Path):
     from danus.human_summary import server as summary_server
     from danus.strategy import cli as strategy_cli

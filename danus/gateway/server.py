@@ -294,6 +294,7 @@ def fact_submit(
                 obligation_id=obligation_id or "", route_id=route_id or "",
                 assignment_epoch=assignment_epoch or "",
                 assumptions_used=assumptions_used or [],
+                reservation_id=os.environ.get("DANUS_CALL_RESERVATION_ID"),
             )
         except ControlError as exc:
             return {"accepted": False, "verdict": "control_error", "error": str(exc)}
@@ -344,12 +345,31 @@ def fact_submit(
     reservation = None
     if control.enabled:
         try:
-            reservation = control.reserve_call(component="verification", max_wall_seconds=_verify_timeout(), worker=_author(), target_version=target_version, obligation_id=obligation_id, route_id=route_id, assignment_epoch=assignment_epoch)
+            reservation = control.reserve_call(
+                component="verification", max_wall_seconds=_verify_timeout(),
+                parent_reservation_id=os.environ.get("DANUS_CALL_RESERVATION_ID"),
+                worker=_author(), target_version=target_version,
+                obligation_id=obligation_id, route_id=route_id,
+                assignment_epoch=assignment_epoch,
+            )
             gate = control.claim_backend_call("codex")
             if not gate["allowed"]:
                 control.cancel_call_reservation(reservation["id"], reason="provider circuit is open")
                 return {"accepted": False, "verdict": "error", "error": f"Codex provider circuit is {gate['state']}", "undefined_symbols": undefined}
         except ControlError as exc:
+            message = str(exc)
+            reason_code = (
+                "wall_budget" if "wall budget" in message
+                else "cost_budget" if "cost budget" in message
+                else "control"
+            )
+            control.append_event(
+                "call_reservation_rejected", component="verification",
+                worker=_author(), target_version=target_version,
+                obligation_id=obligation_id, route_id=route_id,
+                assignment_epoch=assignment_epoch, reason_code=reason_code,
+                reason=message,
+            )
             return {"accepted": False, "verdict": "control_error", "error": str(exc), "undefined_symbols": undefined}
     try:
         result = _verify(statement, proof)
@@ -393,6 +413,7 @@ def fact_submit(
                 obligation_id=obligation_id or "", route_id=route_id or "",
                 assignment_epoch=assignment_epoch or "",
                 assumptions_used=assumptions_used or [],
+                reservation_id=os.environ.get("DANUS_CALL_RESERVATION_ID"),
             )
         except ControlError as exc:
             binding_error = f"control state changed during verification: {exc}"

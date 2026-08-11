@@ -149,6 +149,40 @@ def test_v2_fact_links_closes_and_records_verifier_cost(tmp_path: Path):
     assert costs[-1]["usage"]["input_tokens"] == 10
 
 
+def test_verifier_inside_worker_slice_does_not_need_a_second_wall_budget(tmp_path: Path):
+    store, assignment = _project(tmp_path)
+    target = store.current_target()
+    target["budget"] = {"max_wall_seconds": 10}
+    with store._tx() as db:
+        db.execute(
+            "UPDATE targets SET payload=? WHERE version=?",
+            (json.dumps(target), target["version"]),
+        )
+    parent = store.reserve_call(
+        component="worker_slice", max_wall_seconds=10, worker="high",
+        assignment_epoch=assignment["epoch"], target_version=assignment["target_version"],
+        obligation_id=assignment["obligation_id"], route_id=assignment["route_id"],
+    )
+    original = server._verify
+    server._verify = lambda _s, _p: {"verdict": "correct"}
+    try:
+        with _env(
+            DANUS_PROJECT_DIR=tmp_path, DANUS_AUTHOR="high", DANUS_VERIFY_URL="mock",
+            DANUS_CALL_RESERVATION_ID=parent["id"],
+        ):
+            result = server.fact_submit(
+                statement="A nested verified lemma.", proof="Proof.",
+                display_title="A nested verified lemma", **_args(assignment),
+            )
+    finally:
+        server._verify = original
+        store.cancel_call_reservation(parent["id"], reason="test complete")
+    assert result["accepted"] is True, result
+    verification_cost = store.events("cost")[-1]
+    assert verification_cost["wall_seconds"] == 0
+    assert verification_cost["nested_wall_seconds"] >= 0
+
+
 def test_exact_v2_claim_reuses_verified_fact_without_second_verifier_call(tmp_path: Path):
     store, assignment = _project(tmp_path)
     calls = []

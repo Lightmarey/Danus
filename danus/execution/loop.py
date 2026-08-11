@@ -174,7 +174,8 @@ class _Child:
 
 def run_round(wl: L.WorkerLayout, role: dict, prompt: str, log_path: Path,
               hard_timeout: int, *, report_path: Optional[Path] = None,
-              output_schema: Optional[Path] = None) -> int:
+              output_schema: Optional[Path] = None,
+              reservation_id: Optional[str] = None) -> int:
     """Exec one ``codex exec`` continuation session. Returns codex's rc, 124 on
     hard-timeout (terminate → wait 10s → kill), or 127 if the codex binary is
     missing."""
@@ -199,10 +200,13 @@ def run_round(wl: L.WorkerLayout, role: dict, prompt: str, log_path: Path,
     timed_out = False
     with open(log_path, "w", encoding="utf-8") as logf:
         try:
+            child_env = codex.subprocess_env(codex_bin)
+            if reservation_id:
+                child_env["DANUS_CALL_RESERVATION_ID"] = reservation_id
             _Child.proc = runtime.spawn_process(
                 cmd, stdout=logf, stderr=subprocess.STDOUT,
                 stdin=subprocess.DEVNULL, cwd=str(wdir),
-                env=codex.subprocess_env(codex_bin),
+                env=child_env,
                 new_process_group=True,
             )
         except FileNotFoundError:
@@ -310,6 +314,7 @@ def _run_v2_loop(wl: L.WorkerLayout, role: dict, control: ControlStore, beat: fl
         rc = run_round(
             wl, role, prompt, log_path, int(assignment["slice_timeout"]),
             report_path=report_path, output_schema=control.work_report_schema,
+            reservation_id=reservation["id"],
         )
         wall = time.monotonic() - started
         report = parse_work_report(report_path)
@@ -342,7 +347,7 @@ def _run_v2_loop(wl: L.WorkerLayout, role: dict, control: ControlStore, beat: fl
             decision=result["decision"], last_fact_id=_parse_last_fact_id(log_path),
         )
         if result["decision"] in {"stalled", "budget_exhausted"}:
-            fallback = control.activate_fallback(worker)
+            fallback = None if result.get("project_budget_blocked") else control.activate_fallback(worker)
             if fallback:
                 write_status(wl, state="fallback", route_id=fallback["route_id"])
                 continue

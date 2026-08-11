@@ -103,9 +103,10 @@ def test_run_round_success_rc0(tmp: Path):
 def test_v2_run_round_ignores_user_config(tmp: Path):
     wl = _mk_worker(tmp)
     argv = wl.dir / "argv.json"
+    reservation = wl.dir / "reservation.txt"
     fake = _write_fake_codex(
         tmp,
-        f"import json, sys\nfrom pathlib import Path\nPath({str(argv)!r}).write_text(json.dumps(sys.argv[1:]), encoding='utf-8')\nsys.exit(0)\n",
+        f"import json, os, sys\nfrom pathlib import Path\nPath({str(argv)!r}).write_text(json.dumps(sys.argv[1:]), encoding='utf-8')\nPath({str(reservation)!r}).write_text(os.environ.get('DANUS_CALL_RESERVATION_ID', ''), encoding='utf-8')\nsys.exit(0)\n",
     )
     schema = wl.dir / "report.schema.json"
     schema.write_text("{}", encoding="utf-8")
@@ -118,9 +119,11 @@ def test_v2_run_round_ignores_user_config(tmp: Path):
             hard_timeout=30,
             report_path=wl.dir / "report.json",
             output_schema=schema,
+            reservation_id="reservation-1",
         )
     assert rc == 0
     assert "--ignore-user-config" in json.loads(argv.read_text(encoding="utf-8"))
+    assert reservation.read_text(encoding="utf-8") == "reservation-1"
 
 
 # --- run_round: hard timeout → terminate → 124 ----------------------------- #

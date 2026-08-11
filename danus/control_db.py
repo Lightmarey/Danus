@@ -692,7 +692,7 @@ class SQLiteControlStore:
             self._bump(db)
             return workers
 
-    def validate_assignment(self, worker: str) -> dict[str, Any]:
+    def validate_assignment(self, worker: str, *, reservation_id: Optional[str] = None) -> dict[str, Any]:
         assignment = self.assignment(worker)
         if not assignment:
             raise ControlError(f"worker {worker} has no v2 assignment")
@@ -702,7 +702,19 @@ class SQLiteControlStore:
             raise ControlError("assignment target is stale")
         if int(assignment["slice_count"]) >= int(assignment["max_slices"]):
             raise ControlError("route slice budget exhausted")
-        budget = self.budget_state()
+        if reservation_id:
+            with self._connect() as db:
+                row = db.execute(
+                    "SELECT scope FROM call_reservations WHERE id=? AND component='worker_slice' AND status='active' AND expires_at_epoch>?",
+                    (reservation_id, time.time()),
+                ).fetchone()
+            reservation_scope = _load(row[0], {}) if row else {}
+            if (
+                reservation_scope.get("worker") != worker
+                or reservation_scope.get("assignment_epoch") != assignment["epoch"]
+            ):
+                raise ControlError("worker-slice reservation does not match the assignment")
+        budget = self.budget_state(exclude_reservation_id=reservation_id)
         if budget["stage"] == "exhausted":
             assignment["status"] = "budget_exhausted"
             self.save_assignment(assignment)
@@ -881,8 +893,8 @@ class SQLiteControlStore:
             self._bump(db)
         return {"event": event, "provider_key": provider_key, "resumed_workers": resumed}
 
-    def validate_submission(self, worker: str, *, target_version: str, obligation_id: str, route_id: str, assignment_epoch: str, assumptions_used: Iterable[str]) -> dict[str, Any]:
-        assignment = self.validate_assignment(worker)
+    def validate_submission(self, worker: str, *, target_version: str, obligation_id: str, route_id: str, assignment_epoch: str, assumptions_used: Iterable[str], reservation_id: Optional[str] = None) -> dict[str, Any]:
+        assignment = self.validate_assignment(worker, reservation_id=reservation_id)
         if (target_version, obligation_id, route_id, assignment_epoch) != (assignment["target_version"], assignment["obligation_id"], assignment["route_id"], assignment["epoch"]):
             raise ControlError("fact submission is not bound to the current assignment")
         target = self.target(target_version)
@@ -988,20 +1000,29 @@ class SQLiteControlStore:
         recent = self.events()[int(assignment.get("event_cursor", 0)):]
         linked = [row for row in recent if row.get("event") == "fact_linked" and row.get("assignment_epoch") == assignment["epoch"]]
         closed = [row for row in recent if row.get("event") == "obligation_state" and row.get("assignment_epoch") == assignment["epoch"] and row.get("state") in {"closed", "refuted"}]
+        budget_blocks = [
+            row for row in recent
+            if row.get("event") == "call_reservation_rejected"
+            and row.get("assignment_epoch") == assignment["epoch"]
+            and row.get("reason_code") in {"wall_budget", "cost_budget"}
+        ]
         assignment["event_cursor"] = len(self.events())
-        gain = "high" if linked or closed else "low"
+        gain = "none" if budget_blocks else "high" if linked or closed else "low"
         refs = report.get("new_evidence_refs") or []
         credited = set(assignment.get("credited_evidence_refs") or [])
         valid_refs = [ref for ref in refs if isinstance(ref, str) and ref not in credited and self.evidence_exists(ref)]
         interfaces = report.get("unresolved_interfaces") or []
         reduced = isinstance(assignment.get("last_unresolved_interfaces"), int) and len(interfaces) < assignment["last_unresolved_interfaces"]
         state_change = bool(report.get("new_or_changed_obligations")) or report.get("route_status") in {"blocked", "refuted", "new_route", "applicability_changed"}
-        if gain == "low" and valid_refs and (state_change or reduced or report.get("novelty_basis")):
+        if not budget_blocks and gain == "low" and valid_refs and (state_change or reduced or report.get("novelty_basis")):
             gain = "medium"
             assignment["credited_evidence_refs"] = sorted(credited | set(valid_refs))
         assignment["last_unresolved_interfaces"] = len(interfaces)
         audit_was_required = bool(assignment.get("audit_required"))
-        if gain in {"high", "medium"}:
+        if budget_blocks:
+            assignment.update(status="budget_exhausted", audit_required=False)
+            decision = "budget_exhausted"
+        elif gain in {"high", "medium"}:
             assignment.update(consecutive_low=0, audit_required=False)
             assignment["lease_remaining"] = min(int(assignment["max_slices"]) - int(assignment["slice_count"]), int(assignment["lease_remaining"]) + RENEWAL_SLICES)
             decision = "continue"
@@ -1023,18 +1044,18 @@ class SQLiteControlStore:
                 assignment["status"], decision = "budget_exhausted", "budget_exhausted"
         with self._tx() as db:
             db.execute("UPDATE assignments SET status=?,payload=? WHERE worker=?", (assignment["status"], _dump(assignment), worker))
-            if decision in {"stalled", "budget_exhausted"}:
+            if decision == "stalled" or (decision == "budget_exhausted" and not budget_blocks):
                 self._set_route_state(db, assignment["route_id"], "stalled", actor="controller", reason=decision)
             elif decision == "completed":
                 self._set_route_state(db, assignment["route_id"], "succeeded", actor="controller", reason="obligation closed")
-            event = self._event(db, "work_checkpoint", worker=worker, assignment_epoch=assignment["epoch"], target_version=assignment["target_version"], obligation_id=assignment["obligation_id"], route_id=assignment["route_id"], slice_count=assignment["slice_count"], gain=gain, decision=decision, valid_evidence_refs=valid_refs, report=report)
+            event = self._event(db, "work_checkpoint", worker=worker, assignment_epoch=assignment["epoch"], target_version=assignment["target_version"], obligation_id=assignment["obligation_id"], route_id=assignment["route_id"], slice_count=assignment["slice_count"], gain=gain, decision=decision, valid_evidence_refs=valid_refs, budget_block_event_ids=[row["event_id"] for row in budget_blocks], report=report)
             db.execute("INSERT INTO checkpoints VALUES (?,?,?,?,?,?,?,?,?)", (event["seq"], assignment["target_version"], assignment["obligation_id"], assignment["route_id"], worker, assignment["slice_count"], gain, decision, _dump(report)))
             for signature in report.get("failed_attempt_signatures") or []:
                 db.execute("INSERT INTO obstacles VALUES (?,?,?,?,?,?,?,?) ON CONFLICT(signature,route_id) DO UPDATE SET occurrences=occurrences+1,last_seen_seq=excluded.last_seen_seq,title=excluded.title,status='open'", (signature, assignment["route_id"], assignment["obligation_id"], signature, "open", 1, event["seq"], event["seq"]))
             self._record_cost(db, component="worker_slice", wall_seconds=wall_seconds, usage=usage, reservation_id=reservation_id, worker=worker, target_version=assignment["target_version"], obligation_id=assignment["obligation_id"], route_id=assignment["route_id"], assignment_epoch=assignment["epoch"])
             self._bump(db)
         self._record_budget_threshold()
-        return {"gain": gain, "decision": decision, "assignment": assignment}
+        return {"gain": gain, "decision": decision, "assignment": assignment, "project_budget_blocked": bool(budget_blocks)}
 
     def activate_fallback(self, worker: str) -> Optional[dict[str, Any]]:
         assignment = self.assignment(worker)
@@ -1047,7 +1068,7 @@ class SQLiteControlStore:
                 return self.assign(worker, obligation_id=assignment["obligation_id"], route_id=rid, task=f"Fallback route {rid}: {self.route(rid)['expected_result']}", max_slices=assignment["max_slices"], slice_timeout=assignment["slice_timeout"])
         return None
 
-    def reserve_call(self, *, component: str, max_wall_seconds: float, provider_key: str = "codex", estimated_cost_usd: Optional[float] = None, **scope: Any) -> dict[str, Any]:
+    def reserve_call(self, *, component: str, max_wall_seconds: float, provider_key: str = "codex", estimated_cost_usd: Optional[float] = None, parent_reservation_id: Optional[str] = None, **scope: Any) -> dict[str, Any]:
         """Atomically reserve the worst-case local budget before spawning a paid call."""
         self.scaffold()
         wall = float(max_wall_seconds)
@@ -1056,6 +1077,20 @@ class SQLiteControlStore:
         estimated = None if estimated_cost_usd is None else max(0.0, float(estimated_cost_usd))
         now = time.time()
         with self._tx() as db:
+            reserved_wall = wall
+            if parent_reservation_id:
+                parent = db.execute(
+                    "SELECT component,scope,expires_at_epoch FROM call_reservations WHERE id=? AND status='active' AND expires_at_epoch>?",
+                    (parent_reservation_id, now),
+                ).fetchone()
+                if not parent or parent["component"] != "worker_slice":
+                    raise ControlError("nested call requires an active worker-slice reservation")
+                parent_scope = _load(parent["scope"], {})
+                for key in ("worker", "assignment_epoch", "target_version", "obligation_id", "route_id"):
+                    if scope.get(key) and parent_scope.get(key) != scope[key]:
+                        raise ControlError(f"nested call scope does not match parent reservation: {key}")
+                reserved_wall = 0.0
+                scope["parent_reservation_id"] = parent_reservation_id
             target = db.execute("SELECT payload FROM targets WHERE state='approved' ORDER BY version DESC LIMIT 1").fetchone()
             budget = (_load(target[0], {}).get("budget") if target else {}) or {}
             if estimated is None and budget.get("max_call_cost_usd") is not None:
@@ -1065,7 +1100,7 @@ class SQLiteControlStore:
                 wall_limit = float(budget.get("max_wall_seconds"))
             except (TypeError, ValueError):
                 wall_limit = 0.0
-            if wall_limit > 0 and spent["wall_seconds"] + spent["reserved_wall_seconds"] + wall > wall_limit:
+            if wall_limit > 0 and spent["wall_seconds"] + spent["reserved_wall_seconds"] + reserved_wall > wall_limit:
                 raise ControlError("project wall budget cannot reserve this call")
             try:
                 cost_limit = float(budget.get("max_cost_usd"))
@@ -1077,19 +1112,22 @@ class SQLiteControlStore:
                 raise ControlError("strict project cost budget requires an estimated call cost")
             reservation_id = uuid.uuid4().hex
             expires = now + wall + 60.0
-            db.execute("INSERT INTO call_reservations VALUES (?,?,?,?,?,'active',?,?,?,NULL)", (reservation_id, component, provider_key, wall, estimated, _dump(scope), utc_now(), expires))
-            self._event(db, "call_reserved", reservation_id=reservation_id, component=component, provider_key=provider_key, reserved_wall_seconds=wall, reserved_cost_usd=estimated, **scope)
+            db.execute("INSERT INTO call_reservations VALUES (?,?,?,?,?,'active',?,?,?,NULL)", (reservation_id, component, provider_key, reserved_wall, estimated, _dump(scope), utc_now(), expires))
+            self._event(db, "call_reserved", reservation_id=reservation_id, component=component, provider_key=provider_key, reserved_wall_seconds=reserved_wall, requested_wall_seconds=wall, reserved_cost_usd=estimated, **scope)
             self._bump(db)
-        return {"id": reservation_id, "component": component, "provider_key": provider_key, "reserved_wall_seconds": wall, "reserved_cost_usd": estimated, "expires_at_epoch": expires, "scope": scope}
+        return {"id": reservation_id, "component": component, "provider_key": provider_key, "reserved_wall_seconds": reserved_wall, "requested_wall_seconds": wall, "reserved_cost_usd": estimated, "expires_at_epoch": expires, "scope": scope}
 
-    def _settle_reservation(self, db: sqlite3.Connection, reservation_id: Optional[str]) -> Optional[float]:
+    def _settle_reservation(self, db: sqlite3.Connection, reservation_id: Optional[str]) -> Optional[dict[str, Any]]:
         if not reservation_id:
             return None
-        row = db.execute("SELECT reserved_cost_usd FROM call_reservations WHERE id=? AND status='active'", (reservation_id,)).fetchone()
+        row = db.execute("SELECT reserved_cost_usd,scope FROM call_reservations WHERE id=? AND status='active'", (reservation_id,)).fetchone()
         changed = db.execute("UPDATE call_reservations SET status='settled',settled_at_utc=? WHERE id=? AND status='active'", (utc_now(), reservation_id)).rowcount
         if not changed:
             raise ControlError(f"call reservation is not active: {reservation_id}")
-        return None if row[0] is None else float(row[0])
+        return {
+            "reserved_cost_usd": None if row[0] is None else float(row[0]),
+            "scope": _load(row[1], {}),
+        }
 
     def cancel_call_reservation(self, reservation_id: str, *, reason: str) -> None:
         self.scaffold()
@@ -1114,7 +1152,16 @@ class SQLiteControlStore:
         return [str(row["id"]) for row in rows]
 
     def _record_cost(self, db: sqlite3.Connection, *, component: str, wall_seconds: float, usage: Optional[dict[str, Any]] = None, cost_usd: Optional[float] = None, reservation_id: Optional[str] = None, **scope: Any) -> dict[str, Any]:
-        reserved_cost = self._settle_reservation(db, reservation_id)
+        settlement = self._settle_reservation(db, reservation_id)
+        reserved_cost = settlement.get("reserved_cost_usd") if settlement else None
+        reservation_scope = settlement.get("scope", {}) if settlement else {}
+        if reservation_scope.get("parent_reservation_id"):
+            scope = {
+                **scope,
+                "parent_reservation_id": reservation_scope["parent_reservation_id"],
+                "nested_wall_seconds": round(max(0.0, wall_seconds), 3),
+            }
+            wall_seconds = 0.0
         usage = usage or {}
         if cost_usd is None and any(key in usage for key in ("input_tokens", "output_tokens")):
             try:
@@ -1134,13 +1181,16 @@ class SQLiteControlStore:
         self._record_budget_threshold()
         return event
 
-    def _budget_state_in(self, db: sqlite3.Connection) -> dict[str, Any]:
+    def _budget_state_in(self, db: sqlite3.Connection, *, exclude_reservation_id: Optional[str] = None) -> dict[str, Any]:
         target_row = db.execute("SELECT payload FROM targets WHERE state='approved' ORDER BY version DESC LIMIT 1").fetchone()
         target = _load(target_row[0], {}) if target_row else {}
         costs = [_load(row[0], {}) for row in db.execute("SELECT payload FROM events WHERE event='cost'")]
         wall = sum(float(row.get("wall_seconds") or 0) for row in costs)
         cost = sum(float(row.get("cost_usd") or 0) for row in costs if row.get("cost_usd") is not None)
-        active = db.execute("SELECT reserved_wall_seconds,reserved_cost_usd FROM call_reservations WHERE status='active' AND expires_at_epoch>?", (time.time(),)).fetchall()
+        active = db.execute(
+            "SELECT reserved_wall_seconds,reserved_cost_usd FROM call_reservations WHERE status='active' AND expires_at_epoch>? AND (? IS NULL OR id<>?)",
+            (time.time(), exclude_reservation_id, exclude_reservation_id),
+        ).fetchall()
         reserved_wall = sum(float(row["reserved_wall_seconds"] or 0) for row in active)
         reserved_cost = sum(float(row["reserved_cost_usd"] or 0) for row in active)
         ratios = []
@@ -1158,10 +1208,10 @@ class SQLiteControlStore:
         infra_wall = sum(float(row.get("wall_seconds") or 0) for row in costs if row.get("component") == "worker_infra" or row.get("attempt_status") in infra_statuses)
         return {"stage": stage, "ratio": ratio, "wall_seconds": wall, "cost_usd": cost, "reserved_wall_seconds": reserved_wall, "reserved_cost_usd": reserved_cost, "unknown_cost_events": sum(row.get("cost_usd") is None for row in costs), "infra_wall_seconds": infra_wall, "budget": budget}
 
-    def budget_state(self) -> dict[str, Any]:
+    def budget_state(self, *, exclude_reservation_id: Optional[str] = None) -> dict[str, Any]:
         self.scaffold()
         with self._connect() as db:
-            return self._budget_state_in(db)
+            return self._budget_state_in(db, exclude_reservation_id=exclude_reservation_id)
 
     def _record_budget_threshold(self) -> None:
         state = self.budget_state()
