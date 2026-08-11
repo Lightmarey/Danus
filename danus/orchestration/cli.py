@@ -435,6 +435,13 @@ def do_control_taint(project: str, fact_id: str, reason: str) -> Dict:
     return result
 
 
+def do_control_retry_backend(project: str, provider: str, reason: str) -> Dict:
+    try:
+        return _control(project).retry_backend(provider, reason=reason)
+    except ControlError as exc:
+        raise SystemExit(f"backend retry failed: {exc}") from exc
+
+
 # --------------------------------------------------------------------------- #
 # argparse                                                                      #
 # --------------------------------------------------------------------------- #
@@ -512,6 +519,10 @@ def build_parser() -> argparse.ArgumentParser:
     taint.add_argument("project")
     taint.add_argument("fact_id")
     taint.add_argument("--reason", required=True)
+    retry_backend = control_actions.add_parser("retry-backend", help="allow one probe after external provider state was repaired")
+    retry_backend.add_argument("project")
+    retry_backend.add_argument("--provider", default="codex")
+    retry_backend.add_argument("--reason", required=True)
 
     f = sub.add_parser("finalize", help="record the finalized target fact_id(s) in "
                                         "a paper's TARGET.md (write-paper reads this)")
@@ -579,8 +590,12 @@ def main(argv: Optional[List[str]] = None) -> int:
             args.project, args.route_action, file=getattr(args, "file", None),
         ), ensure_ascii=False, indent=2))
     elif args.cmd == "control":
-        result = (do_control_rebuild(args.project) if args.control_action == "rebuild"
-                  else do_control_taint(args.project, args.fact_id, args.reason))
+        if args.control_action == "rebuild":
+            result = do_control_rebuild(args.project)
+        elif args.control_action == "taint":
+            result = do_control_taint(args.project, args.fact_id, args.reason)
+        else:
+            result = do_control_retry_backend(args.project, args.provider, args.reason)
         print(json.dumps(result, ensure_ascii=False, indent=2))
     elif args.cmd == "finalize":
         r = do_finalize(args.project, args.fact_ids, paper_id=args.paper)

@@ -68,7 +68,7 @@ def classify_failure(return_code: int, log_path: Optional[Path] = None, *, text:
                 failure_class, retryable = category, can_retry
                 break
     retry_after = 0
-    match = re.search(r"retry[- ]after[^0-9]{0,20}(\d+)", text.lower())
+    match = re.search(r"retry[-_ ]after[^0-9]{0,20}(\d+)", text.lower())
     if match:
         retry_after = int(match.group(1))
     signature_input = f"{failure_class}:{return_code}:" + " ".join(text.lower().split())[-2000:]

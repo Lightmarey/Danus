@@ -327,7 +327,7 @@ def fact_submit(
             )
             from danus import codex
             rc = 124 if "timed out" in str(e).lower() or "504" in str(e) else 1
-            control.record_backend_failure(codex.classify_failure(rc, text=str(e)), provider_key="codex", actor="verification")
+            control.record_backend_failure(codex.classify_failure(rc, text=str(e)), provider_key="codex", actor="verification", wall_seconds=time.monotonic() - started)
         return {"accepted": False, "verdict": "error", "error": str(e),
                 "undefined_symbols": undefined}
     # A successful call that returned a non-dict body (e.g. a bare list) would make
@@ -342,7 +342,7 @@ def fact_submit(
                 reservation_id=reservation["id"] if reservation else None,
                 attempt_status="invalid_response",
             )
-            control.record_backend_failure({"failure_class": "invalid_response", "retryable": False, "retry_after_seconds": 0, "error_signature": "invalid-response"}, provider_key="codex", actor="verification")
+            control.record_backend_failure({"failure_class": "invalid_response", "retryable": False, "retry_after_seconds": 0, "error_signature": "invalid-response"}, provider_key="codex", actor="verification", wall_seconds=time.monotonic() - started)
         return {"accepted": False, "verdict": "error",
                 "error": f"verify service returned a non-dict body ({type(result).__name__})",
                 "undefined_symbols": undefined}

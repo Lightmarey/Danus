@@ -109,6 +109,18 @@ danus stop   <project> --force  # kill the process group now
   each assignment's persisted failure count, last failure class, retry deadline,
   and infrastructure wall time.
 
+After fixing an external quota, credential, or provider outage, allow exactly one
+new probe without editing SQLite:
+
+```bash
+danus control retry-backend <project> --provider codex --reason "quota renewed"
+```
+
+Blocked Codex assignments become `waiting_retry`; the shared circuit admits only
+one of them as a half-open probe. A successful call closes the circuit and the
+remaining workers resume normally. This command does not change targets, routes,
+facts, or mathematical state.
+
 ## Unattended operation (examples, not core)
 
 Under `examples/ops/` (parameterized; nothing in the engine depends on them):

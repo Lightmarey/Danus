@@ -124,7 +124,8 @@ def _prepare_control_call(project_dir: Optional[Path], component: str) -> tuple[
 def _record_control_cost(control: Any, reservation: Optional[dict], component: str, started: float, result: Dict[str, Any]) -> None:
     if control is None:
         return
-    control.record_cost(component=component, wall_seconds=time.monotonic() - started, reservation_id=reservation["id"] if reservation else None, target_version=control.current_target_version(), attempt_status=result.get("status"))
+    wall = time.monotonic() - started
+    control.record_cost(component=component, wall_seconds=wall, reservation_id=reservation["id"] if reservation else None, target_version=control.current_target_version(), attempt_status=result.get("status"))
     if result.get("status") == "ok" or result.get("returncode") == 0:
         control.record_backend_success(provider_key="codex", actor=component)
         return
@@ -133,7 +134,7 @@ def _record_control_cost(control: Any, reservation: Optional[dict], component: s
     error = str(result.get("stderr_full") or result.get("error") or "")
     rc = 124 if status == "timeout" else 127 if "binary not found" in error.lower() else int(result.get("returncode") or 1)
     outcome = codex.classify_failure(rc, text=error)
-    control.record_backend_failure(outcome, provider_key="codex", actor=component)
+    control.record_backend_failure(outcome, provider_key="codex", actor=component, wall_seconds=wall)
 
 
 def _drive(prompt: str, effort: Optional[str] = None) -> Dict[str, Any]:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 import threading
 from pathlib import Path
 
@@ -259,14 +260,16 @@ def test_authoring_call_records_v2_wall_time_without_inventing_token_cost(tmp_pa
     assert event["cost_usd"] is None
 
 
-def test_failure_classification_and_unknown_billing_are_explicit(tmp_path: Path):
+def test_failure_classification_and_unknown_billing_are_explicit(tmp_path: Path, monkeypatch):
     log = tmp_path / "codex.jsonl"
-    log.write_text('{"error":"HTTP 429 rate limit","retry-after":17}\n', encoding="utf-8")
+    log.write_text('{"error":"HTTP 429 rate limit","retry_after":17}\n', encoding="utf-8")
     outcome = codex.classify_failure(1, log)
     assert outcome["failure_class"] == "rate_limited"
     assert outcome["retryable"] is True
     assert outcome["retry_after_seconds"] == 17
     store, _ = _assigned(tmp_path)
+    monkeypatch.setenv("DANUS_CODEX_PRICE_IN", "1")
+    monkeypatch.setenv("DANUS_CODEX_PRICE_OUT", "1")
     event = store.record_cost(component="worker_infra", wall_seconds=2)
     assert event["cost_status"] == "unknown"
     assert store.budget_state()["unknown_cost_events"] == 1
@@ -359,3 +362,43 @@ def test_strict_cost_budget_requires_and_reserves_a_per_call_ceiling(tmp_path: P
         assert False, "concurrent reservations must not exceed the strict USD ceiling"
     except ControlError as exc:
         assert "cost budget" in str(exc)
+
+
+def test_infrastructure_wall_limit_is_shared_across_concurrent_workers(tmp_path: Path):
+    store, assignment = _assigned(tmp_path)
+    target = store.current_target()
+    target["budget"] = {"max_infra_wall_seconds": 10, "max_infra_attempts": 5, "infra_retry_seconds": [0]}
+    with store._tx() as db:
+        db.execute("UPDATE targets SET payload=? WHERE version=?", (json.dumps(target), target["version"]))
+    store.assign("medium", obligation_id=assignment["obligation_id"], route_id=assignment["route_id"], task="prove T independently")
+    outcome = {"failure_class": "transient_network", "retryable": True, "retry_after_seconds": 0, "error_signature": "network", "return_code": 1}
+    first = store.record_worker_infra_failure("high", outcome, wall_seconds=6)
+    second = store.record_worker_infra_failure("medium", outcome, wall_seconds=5)
+    assert first["blocked"] is False
+    assert second["blocked"] is True
+    assert store.backend_circuits()[0]["infra_wall_seconds"] == 11
+
+
+def test_blocked_backend_requires_audited_retry_and_only_one_probe(tmp_path: Path):
+    store, _ = _assigned(tmp_path)
+    quota = {"failure_class": "quota_exhausted", "retryable": False, "retry_after_seconds": 0, "error_signature": "quota", "return_code": 1}
+    assert store.record_worker_infra_failure("high", quota, wall_seconds=1)["blocked"] is True
+    result = store.retry_backend("codex", reason="provider quota renewed")
+    assert result["resumed_workers"] == ["high"]
+    assert store.assignment("high")["status"] == "waiting_retry"
+    assert store.claim_backend_call("codex")["allowed"] is True
+    assert store.claim_backend_call("codex")["allowed"] is False
+
+
+def test_existing_v2_database_adds_resilience_columns_in_place(tmp_path: Path):
+    project = tmp_path / "P"
+    (project / "control").mkdir(parents=True)
+    (project / "project.json").write_text('{"name":"P","control_version":2}', encoding="utf-8")
+    (project / "PROBLEM.md").write_text("Prove T", encoding="utf-8")
+    with sqlite3.connect(project / "control" / "control.sqlite3") as db:
+        db.execute("CREATE TABLE backend_circuits(provider_key TEXT PRIMARY KEY,state TEXT NOT NULL,consecutive_failures INTEGER NOT NULL,opened_until REAL,failure_class TEXT,updated_at_utc TEXT NOT NULL)")
+    store = ControlStore(project)
+    store.scaffold()
+    with store._connect() as db:
+        columns = {row[1] for row in db.execute("PRAGMA table_info(backend_circuits)")}
+    assert "infra_wall_seconds" in columns

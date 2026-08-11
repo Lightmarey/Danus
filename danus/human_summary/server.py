@@ -120,7 +120,8 @@ def _drive_scoped(prompt: str, project_dir: Path) -> Dict[str, Any]:
     started = time.monotonic()
     result = _drive(prompt)
     if control is not None:
-        control.record_cost(component="human_summary", wall_seconds=time.monotonic() - started, reservation_id=reservation["id"], target_version=control.current_target_version(), attempt_status=result.get("status"))
+        wall = time.monotonic() - started
+        control.record_cost(component="human_summary", wall_seconds=wall, reservation_id=reservation["id"], target_version=control.current_target_version(), attempt_status=result.get("status"))
         if result.get("status") == "ok" or result.get("returncode") == 0:
             control.record_backend_success(provider_key="codex", actor="human_summary")
         else:
@@ -129,7 +130,7 @@ def _drive_scoped(prompt: str, project_dir: Path) -> Dict[str, Any]:
             error = str(result.get("stderr_full") or result.get("error") or "")
             rc = 124 if status == "timeout" else 127 if "binary not found" in error.lower() else int(result.get("returncode") or 1)
             outcome = codex.classify_failure(rc, text=error)
-            control.record_backend_failure(outcome, provider_key="codex", actor="human_summary")
+            control.record_backend_failure(outcome, provider_key="codex", actor="human_summary", wall_seconds=wall)
     return result
 
 

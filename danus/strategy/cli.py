@@ -86,7 +86,7 @@ def _consult_scoped(project: Optional[str], provider_key: str, max_wall: float, 
         else:
             from danus import codex
             rc = 124 if result.get("status") == "timeout" else 1
-            control.record_backend_failure(codex.classify_failure(rc, text=str(result.get("error") or "")), provider_key=provider_key, actor="strategy_consult")
+            control.record_backend_failure(codex.classify_failure(rc, text=str(result.get("error") or "")), provider_key=provider_key, actor="strategy_consult", wall_seconds=float(result.get("seconds") or time.monotonic() - started))
         result["_control_recorded"] = True
     return result
 

@@ -197,7 +197,8 @@ class SQLiteControlStore:
                 CREATE TABLE IF NOT EXISTS backend_circuits(
                     provider_key TEXT PRIMARY KEY, state TEXT NOT NULL,
                     consecutive_failures INTEGER NOT NULL, opened_until REAL,
-                    failure_class TEXT, updated_at_utc TEXT NOT NULL
+                    failure_class TEXT, infra_wall_seconds REAL NOT NULL DEFAULT 0,
+                    updated_at_utc TEXT NOT NULL
                 );
                 CREATE TABLE IF NOT EXISTS call_reservations(
                     id TEXT PRIMARY KEY, component TEXT NOT NULL, provider_key TEXT NOT NULL,
@@ -209,6 +210,8 @@ class SQLiteControlStore:
                 CREATE INDEX IF NOT EXISTS call_reservations_active ON call_reservations(status, expires_at_epoch);
                 """
                 )
+                if "infra_wall_seconds" not in {row[1] for row in db.execute("PRAGMA table_info(backend_circuits)")}:
+                    db.execute("ALTER TABLE backend_circuits ADD COLUMN infra_wall_seconds REAL NOT NULL DEFAULT 0")
                 # Route signatures are a deterministic duplicate warning, not a
                 # database uniqueness rule: a justified novelty basis may reuse one.
                 db.execute("DROP INDEX IF EXISTS routes_signature")
@@ -667,7 +670,7 @@ class SQLiteControlStore:
             raise ControlError("obligation or route is not bound to the current target")
         if not task.strip():
             raise ControlError("assignment task is required")
-        payload = {"worker": _id(worker, "worker"), "epoch": uuid.uuid4().hex, "target_version": target_version, "obligation_id": obligation_id, "route_id": route_id, "task": task.strip(), "status": "assigned", "slice_count": 0, "lease_remaining": INITIAL_SLICES, "max_slices": max(3, int(max_slices)), "slice_timeout": max(1, int(slice_timeout)), "consecutive_low": 0, "audit_required": False, "wall_seconds": 0.0, "infra_failure_count": 0, "infra_wall_seconds": 0.0, "next_retry_at_epoch": None, "last_failure_class": None, "last_error_signature": None, "last_unresolved_interfaces": None, "credited_evidence_refs": [], "event_cursor": len(self.events()), "context_cursor": self.generation(), "assigned_at_utc": utc_now()}
+        payload = {"worker": _id(worker, "worker"), "epoch": uuid.uuid4().hex, "target_version": target_version, "obligation_id": obligation_id, "route_id": route_id, "task": task.strip(), "status": "assigned", "slice_count": 0, "lease_remaining": INITIAL_SLICES, "max_slices": max(3, int(max_slices)), "slice_timeout": max(1, int(slice_timeout)), "consecutive_low": 0, "audit_required": False, "wall_seconds": 0.0, "infra_failure_count": 0, "infra_wall_seconds": 0.0, "infra_outage_wall_seconds": 0.0, "next_retry_at_epoch": None, "last_failure_class": None, "last_error_signature": None, "last_unresolved_interfaces": None, "credited_evidence_refs": [], "event_cursor": len(self.events()), "context_cursor": self.generation(), "assigned_at_utc": utc_now()}
         with self._tx() as db:
             db.execute("INSERT OR REPLACE INTO assignments VALUES (?,?,?,?,?,?,?)", (payload["worker"], payload["epoch"], payload["status"], target_version, obligation_id, route_id, _dump(payload)))
             self._set_route_state(db, route_id, "active", actor="assignment")
@@ -773,8 +776,11 @@ class SQLiteControlStore:
             attempts_limit, wall_limit, retry_schedule = self._infra_policy(failure_class)
             attempts = int(assignment.get("infra_failure_count") or 0) + 1
             infra_wall = float(assignment.get("infra_wall_seconds") or 0) + max(0.0, wall_seconds)
+            outage_wall = float(assignment.get("infra_outage_wall_seconds") or 0) + max(0.0, wall_seconds)
+            circuit = db.execute("SELECT infra_wall_seconds FROM backend_circuits WHERE provider_key=?", (provider_key,)).fetchone()
+            provider_outage_wall = float(circuit[0] if circuit else 0) + max(0.0, wall_seconds)
             retryable = bool(outcome.get("retryable"))
-            blocked = not retryable or attempts >= attempts_limit or infra_wall >= wall_limit
+            blocked = not retryable or attempts >= attempts_limit or outage_wall >= wall_limit or provider_outage_wall >= wall_limit
             requested_wait = max(0, int(outcome.get("retry_after_seconds") or 0))
             wait = max(requested_wait, retry_schedule[min(attempts - 1, len(retry_schedule) - 1)])
             next_retry = None if blocked else time.time() + wait
@@ -782,6 +788,7 @@ class SQLiteControlStore:
                 status="infra_blocked" if blocked else "waiting_retry",
                 infra_failure_count=attempts,
                 infra_wall_seconds=infra_wall,
+                infra_outage_wall_seconds=outage_wall,
                 next_retry_at_epoch=next_retry,
                 last_failure_class=failure_class,
                 last_error_signature=outcome.get("error_signature"),
@@ -789,8 +796,8 @@ class SQLiteControlStore:
             db.execute("UPDATE assignments SET status=?,payload=? WHERE worker=?", (assignment["status"], _dump(assignment), worker))
             circuit_state = "blocked" if blocked else "open"
             db.execute(
-                "INSERT INTO backend_circuits VALUES (?,?,?,?,?,?) ON CONFLICT(provider_key) DO UPDATE SET state=excluded.state,consecutive_failures=backend_circuits.consecutive_failures+1,opened_until=excluded.opened_until,failure_class=excluded.failure_class,updated_at_utc=excluded.updated_at_utc",
-                (provider_key, circuit_state, 1, next_retry, failure_class, utc_now()),
+                "INSERT INTO backend_circuits(provider_key,state,consecutive_failures,opened_until,failure_class,infra_wall_seconds,updated_at_utc) VALUES (?,?,?,?,?,?,?) ON CONFLICT(provider_key) DO UPDATE SET state=excluded.state,consecutive_failures=backend_circuits.consecutive_failures+1,opened_until=excluded.opened_until,failure_class=excluded.failure_class,infra_wall_seconds=backend_circuits.infra_wall_seconds+excluded.infra_wall_seconds,updated_at_utc=excluded.updated_at_utc",
+                (provider_key, circuit_state, 1, next_retry, failure_class, max(0.0, wall_seconds), utc_now()),
             )
             event = self._event(db, "slice_infra_error", worker=worker, assignment_epoch=assignment["epoch"], target_version=assignment["target_version"], obligation_id=assignment["obligation_id"], route_id=assignment["route_id"], failure_class=failure_class, retryable=retryable, retry_at_epoch=next_retry, error_signature=outcome.get("error_signature"), return_code=outcome.get("return_code"), blocked=blocked)
             self._record_cost(db, component="worker_infra", wall_seconds=wall_seconds, usage=usage, reservation_id=reservation_id, worker=worker, assignment_epoch=assignment["epoch"], target_version=assignment["target_version"], obligation_id=assignment["obligation_id"], route_id=assignment["route_id"], failure_class=failure_class, attempt_status="failed")
@@ -817,28 +824,29 @@ class SQLiteControlStore:
                     return
             if row:
                 assignment = current
-                assignment.update(infra_failure_count=0, next_retry_at_epoch=None, last_failure_class=None, last_error_signature=None)
+                assignment.update(infra_failure_count=0, infra_outage_wall_seconds=0.0, next_retry_at_epoch=None, last_failure_class=None, last_error_signature=None)
                 db.execute("UPDATE assignments SET payload=? WHERE worker=?", (_dump(assignment), worker))
-            db.execute("INSERT INTO backend_circuits VALUES (?, 'closed', 0, NULL, NULL, ?) ON CONFLICT(provider_key) DO UPDATE SET state='closed',consecutive_failures=0,opened_until=NULL,failure_class=NULL,updated_at_utc=excluded.updated_at_utc", (provider_key, utc_now()))
+            db.execute("INSERT INTO backend_circuits(provider_key,state,consecutive_failures,opened_until,failure_class,infra_wall_seconds,updated_at_utc) VALUES (?, 'closed', 0, NULL, NULL, 0, ?) ON CONFLICT(provider_key) DO UPDATE SET state='closed',consecutive_failures=0,opened_until=NULL,failure_class=NULL,infra_wall_seconds=0,updated_at_utc=excluded.updated_at_utc", (provider_key, utc_now()))
             if circuit and circuit["state"] != "closed":
                 self._event(db, "backend_recovered", provider_key=provider_key, worker=worker)
             self._bump(db)
 
-    def record_backend_failure(self, outcome: dict[str, Any], *, provider_key: str, actor: str) -> dict[str, Any]:
+    def record_backend_failure(self, outcome: dict[str, Any], *, provider_key: str, actor: str, wall_seconds: float = 0.0) -> dict[str, Any]:
         """Open the shared circuit for non-worker Codex/provider calls."""
         self.scaffold()
         failure_class = str(outcome.get("failure_class") or "unknown_infra")
-        attempts_limit, _wall_limit, retry_schedule = self._infra_policy(failure_class)
+        attempts_limit, wall_limit, retry_schedule = self._infra_policy(failure_class)
         with self._tx() as db:
-            row = db.execute("SELECT consecutive_failures FROM backend_circuits WHERE provider_key=?", (provider_key,)).fetchone()
+            row = db.execute("SELECT consecutive_failures,infra_wall_seconds FROM backend_circuits WHERE provider_key=?", (provider_key,)).fetchone()
             attempts = int(row[0] if row else 0) + 1
+            outage_wall = float(row[1] if row else 0) + max(0.0, wall_seconds)
             retryable = bool(outcome.get("retryable"))
-            blocked = not retryable or attempts >= attempts_limit
+            blocked = not retryable or attempts >= attempts_limit or outage_wall >= wall_limit
             requested_wait = max(0, int(outcome.get("retry_after_seconds") or 0))
             wait = max(requested_wait, retry_schedule[min(attempts - 1, len(retry_schedule) - 1)])
             opened_until = None if blocked else time.time() + wait
             state = "blocked" if blocked else "open"
-            db.execute("INSERT INTO backend_circuits VALUES (?,?,?,?,?,?) ON CONFLICT(provider_key) DO UPDATE SET state=excluded.state,consecutive_failures=excluded.consecutive_failures,opened_until=excluded.opened_until,failure_class=excluded.failure_class,updated_at_utc=excluded.updated_at_utc", (provider_key, state, attempts, opened_until, failure_class, utc_now()))
+            db.execute("INSERT INTO backend_circuits(provider_key,state,consecutive_failures,opened_until,failure_class,infra_wall_seconds,updated_at_utc) VALUES (?,?,?,?,?,?,?) ON CONFLICT(provider_key) DO UPDATE SET state=excluded.state,consecutive_failures=excluded.consecutive_failures,opened_until=excluded.opened_until,failure_class=excluded.failure_class,infra_wall_seconds=excluded.infra_wall_seconds,updated_at_utc=excluded.updated_at_utc", (provider_key, state, attempts, opened_until, failure_class, outage_wall, utc_now()))
             event = self._event(db, "backend_failure", provider_key=provider_key, actor=actor, failure_class=failure_class, retryable=retryable, retry_at_epoch=opened_until, error_signature=outcome.get("error_signature"), blocked=blocked)
             self._bump(db)
         return {"event": event, "state": state, "wait_seconds": None if blocked else wait}
@@ -849,9 +857,29 @@ class SQLiteControlStore:
             row = db.execute("SELECT state FROM backend_circuits WHERE provider_key=?", (provider_key,)).fetchone()
             if not row or row["state"] == "closed":
                 return
-            db.execute("UPDATE backend_circuits SET state='closed',consecutive_failures=0,opened_until=NULL,failure_class=NULL,updated_at_utc=? WHERE provider_key=?", (utc_now(), provider_key))
+            db.execute("UPDATE backend_circuits SET state='closed',consecutive_failures=0,opened_until=NULL,failure_class=NULL,infra_wall_seconds=0,updated_at_utc=? WHERE provider_key=?", (utc_now(), provider_key))
             self._event(db, "backend_recovered", provider_key=provider_key, actor=actor)
             self._bump(db)
+
+    def retry_backend(self, provider_key: str, *, reason: str) -> dict[str, Any]:
+        """Permit one half-open probe after an operator fixes external provider state."""
+        self.scaffold()
+        reason = reason.strip()
+        if not reason:
+            raise ControlError("backend retry reason is required")
+        resumed: list[str] = []
+        now = time.time()
+        with self._tx() as db:
+            db.execute("INSERT INTO backend_circuits(provider_key,state,consecutive_failures,opened_until,failure_class,infra_wall_seconds,updated_at_utc) VALUES (?,'open',0,?,NULL,0,?) ON CONFLICT(provider_key) DO UPDATE SET state='open',consecutive_failures=0,opened_until=excluded.opened_until,failure_class=NULL,infra_wall_seconds=0,updated_at_utc=excluded.updated_at_utc", (provider_key, now, utc_now()))
+            if provider_key == "codex":
+                for row in db.execute("SELECT worker,payload FROM assignments WHERE status='infra_blocked'"):
+                    assignment = _load(row["payload"], {})
+                    assignment.update(status="waiting_retry", infra_failure_count=0, infra_outage_wall_seconds=0.0, next_retry_at_epoch=now, last_failure_class=None, last_error_signature=None)
+                    db.execute("UPDATE assignments SET status='waiting_retry',payload=? WHERE worker=?", (_dump(assignment), row["worker"]))
+                    resumed.append(str(row["worker"]))
+            event = self._event(db, "backend_retry_requested", provider_key=provider_key, reason=reason, resumed_workers=resumed)
+            self._bump(db)
+        return {"event": event, "provider_key": provider_key, "resumed_workers": resumed}
 
     def validate_submission(self, worker: str, *, target_version: str, obligation_id: str, route_id: str, assignment_epoch: str, assumptions_used: Iterable[str]) -> dict[str, Any]:
         assignment = self.validate_assignment(worker)
@@ -1070,7 +1098,7 @@ class SQLiteControlStore:
     def _record_cost(self, db: sqlite3.Connection, *, component: str, wall_seconds: float, usage: Optional[dict[str, Any]] = None, cost_usd: Optional[float] = None, reservation_id: Optional[str] = None, **scope: Any) -> dict[str, Any]:
         self._settle_reservation(db, reservation_id)
         usage = usage or {}
-        if cost_usd is None:
+        if cost_usd is None and any(key in usage for key in ("input_tokens", "output_tokens")):
             try:
                 cost_usd = (float(usage.get("input_tokens", 0) or 0) * float(os.environ.get("DANUS_CODEX_PRICE_IN", "")) + float(usage.get("output_tokens", 0) or 0) * float(os.environ.get("DANUS_CODEX_PRICE_OUT", ""))) / 1_000_000
             except ValueError:
@@ -1105,7 +1133,9 @@ class SQLiteControlStore:
                 pass
         ratio = max(ratios, default=0.0)
         stage = "exhausted" if ratio >= 1 else "audit" if ratio >= .85 else "warn" if ratio >= .70 else "normal"
-        return {"stage": stage, "ratio": ratio, "wall_seconds": wall, "cost_usd": cost, "reserved_wall_seconds": reserved_wall, "reserved_cost_usd": reserved_cost, "unknown_cost_events": sum(row.get("cost_usd") is None for row in costs), "infra_wall_seconds": sum(float(row.get("wall_seconds") or 0) for row in costs if row.get("component") == "worker_infra"), "budget": budget}
+        infra_statuses = {"failed", "invalid_response", "error", "timeout", "infra_blocked"}
+        infra_wall = sum(float(row.get("wall_seconds") or 0) for row in costs if row.get("component") == "worker_infra" or row.get("attempt_status") in infra_statuses)
+        return {"stage": stage, "ratio": ratio, "wall_seconds": wall, "cost_usd": cost, "reserved_wall_seconds": reserved_wall, "reserved_cost_usd": reserved_cost, "unknown_cost_events": sum(row.get("cost_usd") is None for row in costs), "infra_wall_seconds": infra_wall, "budget": budget}
 
     def budget_state(self) -> dict[str, Any]:
         self.scaffold()
