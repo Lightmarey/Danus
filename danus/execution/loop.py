@@ -1,8 +1,8 @@
-"""The per-worker bounded exploration-slice driver.
+"""The per-worker bounded exploration-round driver.
 
 Launched detached by ``danus start`` (``python -m danus.execution <worker_dir>``).
-Self-contained. Each slice runs one ``codex exec`` session bound to an approved
-target, obligation, route, assignment epoch, and finite lease. The controller
+Self-contained. Each round runs one ``codex exec`` session bound to an approved
+target, obligation, route, assignment epoch, and finite round budget. The controller
 scores its structured WorkReport and decides whether to renew, audit, fall back,
 pause, or complete.
 
@@ -40,16 +40,16 @@ from danus.research import ResearchQuery
 _FACT_ID_RE = re.compile(r'"?fact_id"?\s*[:=]\s*"?([0-9a-f]{16})"?')
 
 
-# --- the slice prompt ------------------------------------------------------ #
+# --- the round prompt ------------------------------------------------------ #
 
 def kickoff(project: str, worker: str, assignment: dict, *, audit: bool,
             context: str = "") -> str:
     mode = (
-        "This slice is an independent route audit. Do not repeat the route. Compare its "
+        "This round is an independent route audit. Do not repeat the route. Compare its "
         "failed signatures and evidence with the obligation, identify a genuinely new route "
         "or report no progress honestly."
         if audit else
-        "Explore the assigned route deeply for this bounded slice. Preserve useful partial "
+        "Explore the assigned route deeply for this bounded round. Preserve useful partial "
         "progress, but do not change the approved target or silently adopt extra assumptions."
     )
     scope = {
@@ -57,7 +57,7 @@ def kickoff(project: str, worker: str, assignment: dict, *, audit: bool,
         "obligation_id": assignment["obligation_id"],
         "route_id": assignment["route_id"],
         "assignment_epoch": assignment["epoch"],
-        "slice_number": int(assignment.get("slice_count", 0)) + 1,
+        "round_number": int(assignment.get("rounds_used", 0)) + 1,
     }
     return (
         f"You are worker '{worker}' on Danus v2 project '{project}'.\n"
@@ -67,7 +67,7 @@ def kickoff(project: str, worker: str, assignment: dict, *, audit: bool,
         f"\n{context}\n"
         "AGENTS.md, the task, and this research snapshot are already loaded. Do not reopen them, "
         "list the workspace, or perform routine memory/fact searches. Use included facts first and "
-        "expand only what the route needs. Work only in the scope above. Finish this slice with the "
+        "expand only what the route needs. Work only in the scope above. Finish this round with the "
         "required WorkReport JSON; after completion or a control/budget/provider block, stop."
     )
 
@@ -174,7 +174,7 @@ def run_round(wl: L.WorkerLayout, role: dict, prompt: str, log_path: Path,
               hard_timeout: int, *, report_path: Path,
               output_schema: Path,
               reservation_id: Optional[str] = None) -> int:
-    """Exec one structured slice; return rc, timeout 124, or missing-bin 127."""
+    """Exec one structured round; return rc, timeout 124, or missing-bin 127."""
     wdir = wl.dir
     codex_bin = codex.resolve_bin()
     report_path.parent.mkdir(parents=True, exist_ok=True)
@@ -218,7 +218,7 @@ def run_round(wl: L.WorkerLayout, role: dict, prompt: str, log_path: Path,
                 except subprocess.TimeoutExpired:
                     if wl.stop.exists():
                         runtime.stop_process(_Child.proc, wait_seconds=1, force=True)
-                        logf.write("\n[worker_loop] slice interrupted by stop request\n")
+                        logf.write("\n[worker_loop] round interrupted by stop request\n")
                         return 130
                     if deadline is not None and time.monotonic() >= deadline:
                         raise
@@ -254,7 +254,7 @@ def refresh_worker_assets(wl: L.WorkerLayout) -> None:
 
 
 def _run_loop(wl: L.WorkerLayout, role: dict, control: ControlStore, beat: float) -> int:
-    """Run finite, controller-scored exploration slices for one assignment."""
+    """Run finite, controller-scored exploration rounds for one assignment."""
     worker = wl.name
     while True:
         if wl.stop.exists():
@@ -291,16 +291,16 @@ def _run_loop(wl: L.WorkerLayout, role: dict, control: ControlStore, beat: float
                 continue
 
         audit = bool(assignment.get("audit_required"))
-        slice_no = int(assignment["slice_count"]) + 1
+        round_no = int(assignment["rounds_used"]) + 1
         manifest = ResearchQuery(wl.project_dir).build_context_manifest(worker)
         prompt = kickoff(
             wl.project, worker, assignment, audit=audit,
             context=ResearchQuery.format_context_manifest(manifest),
         )
-        log_path = wl.logs / f"slice_{slice_no}.jsonl"
-        report_path = wl.logs / f"slice_{slice_no}_report.json"
+        log_path = wl.logs / f"round_{round_no}.jsonl"
+        report_path = wl.logs / f"round_{round_no}_report.json"
         write_status(
-            wl, state="auditing" if audit else "running", round=slice_no,
+            wl, state="auditing" if audit else "running", round=round_no,
             round_started_at=time.time(), target_version=assignment["target_version"],
             obligation_id=assignment["obligation_id"], route_id=assignment["route_id"],
             context_manifest_id=manifest["id"], context_snapshot=manifest["snapshot_generation"],
@@ -308,7 +308,7 @@ def _run_loop(wl: L.WorkerLayout, role: dict, control: ControlStore, beat: float
         )
         try:
             reservation = control.reserve_call(
-                component="worker_slice", max_wall_seconds=float(assignment["slice_timeout"]),
+                component="worker_round", max_wall_seconds=float(assignment["round_timeout_seconds"]),
                 worker=worker, assignment_epoch=assignment["epoch"],
                 target_version=assignment["target_version"], obligation_id=assignment["obligation_id"],
                 route_id=assignment["route_id"],
@@ -320,7 +320,7 @@ def _run_loop(wl: L.WorkerLayout, role: dict, control: ControlStore, beat: float
             return 0
         started = time.monotonic()
         rc = run_round(
-            wl, role, prompt, log_path, int(assignment["slice_timeout"]),
+            wl, role, prompt, log_path, int(assignment["round_timeout_seconds"]),
             report_path=report_path, output_schema=control.work_report_schema,
             reservation_id=reservation["id"],
         )
@@ -337,7 +337,7 @@ def _run_loop(wl: L.WorkerLayout, role: dict, control: ControlStore, beat: float
             write_status(
                 wl, state="stopped", last_rc=rc,
                 usage_status="partial" if usage else "unavailable",
-                control_reason="operator stop interrupted the active slice",
+                control_reason="operator stop interrupted the active round",
             )
             return 0
         if rc != 0 and not (rc == 124 and complete_report):
@@ -363,7 +363,7 @@ def _run_loop(wl: L.WorkerLayout, role: dict, control: ControlStore, beat: float
         )
         current = result["assignment"]
         write_status(
-            wl, state=current["status"], round=current["slice_count"],
+            wl, state=current["status"], round=current["rounds_used"],
             last_round_at=time.time(), last_rc=rc, gain=result["gain"],
             decision=result["decision"], last_fact_id=_parse_last_fact_id(log_path),
         )
@@ -378,7 +378,7 @@ def _run_loop(wl: L.WorkerLayout, role: dict, control: ControlStore, beat: float
             write_status(wl, state="waiting", control_reason="assignment completed")
             return 0
         if result["decision"] == "invalidated":
-            write_status(wl, state="waiting", control_reason="assignment invalidated while the slice was running")
+            write_status(wl, state="waiting", control_reason="assignment invalidated while the round was running")
             return 0
         if beat > 0:
             time.sleep(beat)

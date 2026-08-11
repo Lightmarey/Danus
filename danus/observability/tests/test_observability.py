@@ -101,7 +101,7 @@ def _seed_project(root: Path, *, with_facts: bool = True) -> tuple[ControlStore,
         "input_fact_ids": facts[:1],
     })
     store.assign("high", obligation_id="v0001-root-1", route_id="r1", task="T")
-    store.record_cost(component="worker_slice", wall_seconds=5, cost_usd=1.25)
+    store.record_cost(component="worker_round", wall_seconds=5, cost_usd=1.25)
     return store, facts
 
 

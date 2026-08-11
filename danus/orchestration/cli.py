@@ -23,7 +23,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import time
 from pathlib import Path
 from typing import Dict, List, Optional
@@ -74,8 +73,8 @@ def _read_status(wl: L.WorkerLayout) -> Dict:
 # --------------------------------------------------------------------------- #
 
 def do_assign(target: str, task: str, *, obligation: Optional[str] = None,
-              route: Optional[str] = None, max_slices: int = 12,
-              slice_timeout: int = 5400) -> Dict:
+              route: Optional[str] = None, max_rounds: int = 12,
+              round_timeout_seconds: int = 5400) -> Dict:
     """Overwrite (replace, NOT append) a worker's TASK.md, ensuring a trailing
     newline. Rejects a bare project, a nonexistent worker, and an empty task."""
     project, worker = L.resolve_target(target)
@@ -96,7 +95,7 @@ def do_assign(target: str, task: str, *, obligation: Optional[str] = None,
     try:
         assignment = control.assign(
             worker, obligation_id=obligation, route_id=route, task=task,
-            max_slices=max_slices, slice_timeout=slice_timeout,
+            max_rounds=max_rounds, round_timeout_seconds=round_timeout_seconds,
         )
     except ControlError as exc:
         raise SystemExit(f"cannot assign: {exc}") from exc
@@ -242,33 +241,37 @@ def worker_status(wl: L.WorkerLayout) -> Dict:
     now = time.time()
     last = st.get("last_round_at") or st.get("round_started_at") or st.get("updated_at")
     age = (now - last) if isinstance(last, (int, float)) else None
+    assignment = None
+    if is_v2_project(wl.project_dir):
+        assignment = ControlStore(wl.project_dir).assignment(wl.name)
 
     if alive:
-        # a round legitimately runs for hours; only flag truly stale running rounds
+        # A round may legitimately run for its full assignment timeout. Flag it
+        # only after exceeding that persisted limit by a generous margin.
         rs = st.get("round_started_at")
-        hard = int(os.environ.get("DANUS_ROUND_HARD_TIMEOUT", "14400"))
+        hard = int((assignment or {}).get("round_timeout_seconds", 5400))
         if state == "running" and isinstance(rs, (int, float)) and (now - rs) > hard * 1.5:
             label = "stuck?"
         else:
             label = "working"
     else:
-        label = state if state in ("stopped", "deadline", "max_rounds", "error",
-                                   "terminated", "created") else "dead"
+        label = state if state in (
+            "stopped", "deadline", "error", "terminated", "created", "waiting",
+            "waiting_retry", "infra_blocked", "paused", "budget_exhausted",
+        ) else "dead"
     out = {
         "worker": wl.name, "pid": pid, "alive": alive, "state": state,
         "round": st.get("round", 0), "age_s": round(age, 1) if age is not None else None,
         "last_fact_id": st.get("last_fact_id"), "label": label,
     }
     if is_v2_project(wl.project_dir):
-        control = ControlStore(wl.project_dir)
-        assignment = control.assignment(wl.name)
         out["control"] = ({
             "status": assignment.get("status"),
             "target_version": assignment.get("target_version"),
             "obligation_id": assignment.get("obligation_id"),
             "route_id": assignment.get("route_id"),
-            "slice_count": assignment.get("slice_count"),
-            "max_slices": assignment.get("max_slices"),
+            "rounds_used": assignment.get("rounds_used"),
+            "max_rounds": assignment.get("max_rounds"),
             "consecutive_low": assignment.get("consecutive_low"),
             "audit_required": assignment.get("audit_required"),
             "infra_failure_count": assignment.get("infra_failure_count", 0),
@@ -338,7 +341,7 @@ def _stop_one(wl: L.WorkerLayout, force: bool) -> str:
     if not force:
         if not _alive(pid):
             return "not-running"
-        wl.stop.touch()      # graceful: loop exits at round boundary
+        wl.stop.touch()      # graceful: loop interrupts the active round
         return "stopping (graceful)"
     if not _alive(pid):
         wl.pid.unlink(missing_ok=True)
@@ -497,15 +500,15 @@ def build_parser() -> argparse.ArgumentParser:
     migrate = sub.add_parser("migrate", help="convert a stopped V1 project to V2")
     migrate.add_argument("project")
 
-    a = sub.add_parser("assign", help="write a worker's per-round TASK.md")
+    a = sub.add_parser("assign", help="bind a worker to a route and refresh TASK.md")
     a.add_argument("target", help="<project>/<worker>")
     a.add_argument("--task", default=None)
     a.add_argument("--file", default=None)
     a.add_argument("--stdin", action="store_true")
     a.add_argument("--obligation", default=None, help="required v2 obligation id")
     a.add_argument("--route", default=None, help="required v2 route id")
-    a.add_argument("--max-slices", type=int, default=12)
-    a.add_argument("--slice-timeout", type=int, default=5400, help="seconds; default 90 minutes")
+    a.add_argument("--max-rounds", type=int, default=12)
+    a.add_argument("--round-timeout", type=int, default=5400, help="seconds; default 90 minutes")
 
     target = sub.add_parser("target", help="versioned v2 target lifecycle")
     target_actions = target.add_subparsers(dest="target_action", required=True)
@@ -555,7 +558,7 @@ def build_parser() -> argparse.ArgumentParser:
     f.add_argument("project")
     f.add_argument("--paper", default=None,
                    help="the paper_id (multiple papers per project). Default / 'main' "
-                        "-> legacy <project>/TARGET.md; else "
+                        "-> default <project>/TARGET.md; else "
                         "<project>/papers/<paper_id>/TARGET.md")
     f.add_argument("fact_ids", nargs="*",
                    help="the target fact id(s); omit to print candidate terminal facts")
@@ -569,7 +572,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     sp = sub.add_parser("stop", help="stop worker loop(s)")
     sp.add_argument("target", help="<project> or <project>/<worker>")
-    sp.add_argument("--force", action="store_true", help="kill now (else finish current round)")
+    sp.add_argument("--force", action="store_true", help="kill now (else interrupt and settle the active round)")
     from danus import services
     services.configure_parser(sub)
     from danus import codex_backend
@@ -599,7 +602,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     elif args.cmd == "assign":
         r = do_assign(
             args.target, _task_from_args(args), obligation=args.obligation,
-            route=args.route, max_slices=args.max_slices, slice_timeout=args.slice_timeout,
+            route=args.route, max_rounds=args.max_rounds,
+            round_timeout_seconds=args.round_timeout,
         )
         print(f"assigned {r['worker']} -> {r['task_file']}")
     elif args.cmd == "target":

@@ -93,7 +93,9 @@ def _wl(project: str, worker: str) -> L.WorkerLayout:
     return L.WorkerLayout(L.worker_dir(project, worker))
 
 
-def _prepare_route(project: str, workers: tuple[str, ...] = ()) -> tuple[str, str]:
+def _prepare_route(
+    project: str, workers: tuple[str, ...] = (), *, round_timeout_seconds: int = 5400,
+) -> tuple[str, str]:
     store = ControlStore(L.project_dir(project))
     target = store.propose_target({
         "statement": "Prove T.", "allowed_assumptions": [],
@@ -109,7 +111,10 @@ def _prepare_route(project: str, workers: tuple[str, ...] = ()) -> tuple[str, st
         "input_fact_ids": [],
     })
     for worker in workers:
-        store.assign(worker, obligation_id=obligation, route_id=route, task="Prove T")
+        store.assign(
+            worker, obligation_id=obligation, route_id=route, task="Prove T",
+            round_timeout_seconds=round_timeout_seconds,
+        )
     return obligation, route
 
 
@@ -335,8 +340,9 @@ def test_alive_zombie_is_dead():
 
 def test_worker_status_stuck_label(tmp: Path):
     """alive + state=running + round_started_at far in the past -> 'stuck?'."""
-    with _project_env(tmp, DANUS_ROUND_HARD_TIMEOUT="10"):
+    with _project_env(tmp):
         cli.do_new("P", roles="high:1")
+        _prepare_route("P", ("high",), round_timeout_seconds=10)
         wl = _wl("P", "high")
         wl.pid.write_text(str(os.getpid()))          # our pid => alive
         old = 1.0                                     # epoch ~1970 => hugely stale

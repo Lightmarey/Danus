@@ -1,6 +1,6 @@
 """Offline tests for danus.execution.loop + __main__ (no real codex, no network).
 
-Covers the slice driver end-to-end without ever launching a real codex:
+Covers the round driver end-to-end without ever launching a real codex:
 
   - ``run_round`` against a FIXED fake-codex stub script: a chosen exit code, a
     hard-timeout (terminate → 124), and a missing binary (→ 127). These drive the
@@ -85,7 +85,7 @@ def _write_fake_codex(tmp: Path, body: str) -> Path:
     return write_python_launcher(tmp, "fake_codex", script)
 
 
-def _slice_files(wl: L.WorkerLayout) -> dict:
+def _round_files(wl: L.WorkerLayout) -> dict:
     schema = wl.dir / "report.schema.json"
     schema.write_text("{}", encoding="utf-8")
     return {"report_path": wl.dir / "report.json", "output_schema": schema}
@@ -99,7 +99,7 @@ def test_run_round_returns_codex_rc(tmp: Path):
     log = wl.dir / "round.log"
     with _env(DANUS_CODEX_BIN=str(fake)):
         rc = loop.run_round(wl, {"MODEL": "m", "REASONING_EFFORT": "high"},
-                            "prompt", log, hard_timeout=30, **_slice_files(wl))
+                            "prompt", log, hard_timeout=30, **_round_files(wl))
     assert rc == 3
     assert "hello from codex" in log.read_text()
     assert loop._Child.proc is None            # cleared in finally
@@ -112,7 +112,7 @@ def test_run_round_success_rc0(tmp: Path):
     with _env(DANUS_CODEX_BIN=str(fake)):
         rc = loop.run_round(wl, {"MODEL": "m", "REASONING_EFFORT": "high"},
                             "prompt", log, hard_timeout=0,
-                            **_slice_files(wl))   # 0 => no timeout (wait forever)
+                            **_round_files(wl))   # 0 => no timeout (wait forever)
     assert rc == 0
 
 
@@ -131,7 +131,7 @@ def test_run_round_injects_the_worker_gateway_config(tmp: Path):
             wl,
             {"MODEL": "m", "REASONING_EFFORT": "high"},
             "prompt",
-            wl.dir / "slice.jsonl",
+            wl.dir / "round.jsonl",
             hard_timeout=30,
             report_path=wl.dir / "report.json",
             output_schema=schema,
@@ -156,12 +156,12 @@ def test_run_round_interrupts_an_active_child_on_stop_request(tmp: Path):
         started = time.monotonic()
         rc = loop.run_round(
             wl, {"MODEL": "m", "REASONING_EFFORT": "high"}, "prompt",
-            wl.dir / "slice.jsonl", hard_timeout=30,
+            wl.dir / "round.jsonl", hard_timeout=30,
             report_path=wl.dir / "report.json", output_schema=schema,
         )
     assert rc == 130
     assert time.monotonic() - started < 5
-    assert "interrupted by stop request" in (wl.dir / "slice.jsonl").read_text()
+    assert "interrupted by stop request" in (wl.dir / "round.jsonl").read_text()
 
 
 # --- run_round: hard timeout → terminate → 124 ----------------------------- #
@@ -178,7 +178,7 @@ def test_run_round_hard_timeout_terminates(tmp: Path):
     log = wl.dir / "round.log"
     with _env(DANUS_CODEX_BIN=str(fake)):
         rc = loop.run_round(wl, {"MODEL": "m", "REASONING_EFFORT": "high"},
-                            "prompt", log, hard_timeout=1, **_slice_files(wl))
+                            "prompt", log, hard_timeout=1, **_round_files(wl))
     child_pid = int(pid_file.read_text(encoding="utf-8"))
     assert rc == 124
     assert "hard-timeout after 1s" in log.read_text()
@@ -201,7 +201,7 @@ def test_run_round_missing_binary_returns_127(tmp: Path):
     log = wl.dir / "round.log"
     with _env(DANUS_CODEX_BIN=str(missing)):
         rc = loop.run_round(wl, {"MODEL": "m", "REASONING_EFFORT": "high"},
-                            "prompt", log, hard_timeout=30, **_slice_files(wl))
+                            "prompt", log, hard_timeout=30, **_round_files(wl))
     assert rc == 127
     assert "codex binary not found" in log.read_text()
 
@@ -244,7 +244,7 @@ def test_run_round_timeout_then_kill(tmp: Path):
     try:
         with _env(DANUS_CODEX_BIN=str(tmp / "anything")):
             rc = loop.run_round(wl, {"MODEL": "m", "REASONING_EFFORT": "high"},
-                                "prompt", log, hard_timeout=1, **_slice_files(wl))
+                                "prompt", log, hard_timeout=1, **_round_files(wl))
     finally:
         runtime.spawn_process = orig_spawn
         runtime.stop_process = orig_stop
@@ -380,7 +380,7 @@ def test_kickoff_is_scoped_without_full_assignment_dump():
         "obligation_id": "O",
         "route_id": "R",
         "epoch": "E",
-        "slice_count": 2,
+        "rounds_used": 2,
         "task": "Prove the assigned lemma.",
         "credited_evidence_refs": ["should-not-be-embedded"],
     }

@@ -21,10 +21,10 @@ from typing import Any, Iterable, Iterator, Optional
 from danus.core._util import read_jsonl, utc_now
 
 from .control import (
-    INITIAL_SLICES,
-    MAX_ROUTE_SLICES,
-    RENEWAL_SLICES,
-    SLICE_HARD_TIMEOUT,
+    DEFAULT_ROUND_TIMEOUT_SECONDS,
+    INITIAL_ROUNDS,
+    MAX_ROUTE_ROUNDS,
+    RENEWAL_ROUNDS,
     ControlError,
     _id,
     _json_bytes,
@@ -176,7 +176,7 @@ class SQLiteControlStore:
                 CREATE INDEX IF NOT EXISTS fact_scopes_obligation ON fact_scopes(obligation_id, relation);
                 CREATE TABLE IF NOT EXISTS checkpoints(
                     event_seq INTEGER PRIMARY KEY, target_version TEXT, obligation_id TEXT, route_id TEXT,
-                    worker TEXT, slice_count INTEGER, gain TEXT, decision TEXT, report TEXT NOT NULL
+                    worker TEXT, rounds_used INTEGER, gain TEXT, decision TEXT, report TEXT NOT NULL
                 );
                 CREATE INDEX IF NOT EXISTS checkpoints_route ON checkpoints(route_id, event_seq DESC);
                 CREATE TABLE IF NOT EXISTS obstacles(
@@ -215,7 +215,9 @@ class SQLiteControlStore:
                     db.execute("CREATE VIRTUAL TABLE IF NOT EXISTS facts_fts USING fts5(fact_id UNINDEXED, title, statement, proof)")
                 except sqlite3.OperationalError:
                     db.execute("CREATE TABLE IF NOT EXISTS facts_fts(fact_id TEXT PRIMARY KEY, title TEXT, statement TEXT, proof TEXT)")
-                db.execute("INSERT OR IGNORE INTO meta VALUES ('schema_version','2')")
+                self._migrate_round_vocabulary(db)
+                db.execute("INSERT OR IGNORE INTO meta VALUES ('schema_version','3')")
+                db.execute("UPDATE meta SET value='3' WHERE key='schema_version'")
                 db.execute("INSERT OR IGNORE INTO meta VALUES ('generation','0')")
                 db.commit()
             finally:
@@ -226,6 +228,42 @@ class SQLiteControlStore:
             self.recover_call_reservations()
         finally:
             self._initializing = False
+
+    @staticmethod
+    def _round_payload(value: Any) -> Any:
+        """Translate pre-v3 control payloads without retaining runtime aliases."""
+        keys = {
+            "slice_count": "rounds_used",
+            "lease_remaining": "rounds_remaining",
+            "max_slices": "max_rounds",
+            "slice_timeout": "round_timeout_seconds",
+            "slice_number": "round_number",
+        }
+        if isinstance(value, dict):
+            return {
+                keys.get(key, key): SQLiteControlStore._round_payload(item)
+                for key, item in value.items()
+            }
+        if isinstance(value, list):
+            return [SQLiteControlStore._round_payload(item) for item in value]
+        return "worker_round" if value == "worker_slice" else value
+
+    def _migrate_round_vocabulary(self, db: sqlite3.Connection) -> None:
+        columns = {row[1] for row in db.execute("PRAGMA table_info(checkpoints)")}
+        if "slice_count" in columns and "rounds_used" not in columns:
+            db.execute("ALTER TABLE checkpoints RENAME COLUMN slice_count TO rounds_used")
+        for table, key in (("assignments", "worker"), ("events", "seq"), ("context_manifests", "id")):
+            for row in db.execute(f"SELECT {key},payload FROM {table}").fetchall():
+                payload = self._round_payload(_load(row["payload"], {}))
+                db.execute(f"UPDATE {table} SET payload=? WHERE {key}=?", (_dump(payload), row[key]))
+        event_names = {
+            "slice_infra_error": "round_infra_error",
+            "slice_interrupted": "round_interrupted",
+            "slice_discarded": "round_discarded",
+        }
+        for old, new in event_names.items():
+            db.execute("UPDATE events SET event=? WHERE event=?", (new, old))
+        db.execute("UPDATE call_reservations SET component='worker_round' WHERE component='worker_slice'")
 
     def _migrate_files_once(self) -> None:
         db = self._connect()
@@ -269,13 +307,16 @@ class SQLiteControlStore:
                 for fact_id in value.get("input_fact_ids") or []:
                     db.execute("INSERT OR IGNORE INTO route_inputs VALUES (?,?)", (value["id"], fact_id))
             for path in sorted(self.assignments.glob("*.json")):
-                value = _read_json(path)
+                value = self._round_payload(_read_json(path))
                 db.execute("INSERT OR REPLACE INTO assignments VALUES (?,?,?,?,?,?,?)", (value["worker"], value["epoch"], value["status"], value["target_version"], value["obligation_id"], value["route_id"], _dump(value)))
             for row in events:
                 record = dict(row)
                 event_id = str(record.pop("event_id", uuid.uuid4().hex))
                 timestamp = str(record.pop("timestamp_utc", utc_now()))
                 kind = str(record.pop("event", "legacy_event"))
+                if kind.startswith("slice_"):
+                    kind = f"round_{kind.removeprefix('slice_')}"
+                record = self._round_payload(record)
                 db.execute("INSERT OR IGNORE INTO events(event_id,timestamp_utc,event,payload) VALUES (?,?,?,?)", (event_id, timestamp, kind, _dump(record)))
             db.execute("INSERT OR REPLACE INTO meta VALUES ('files_imported',?)", (utc_now(),))
             self._bump(db)
@@ -654,7 +695,11 @@ class SQLiteControlStore:
             row = db.execute("SELECT payload FROM assignments WHERE worker=?", (_id(worker, "worker"),)).fetchone()
         return _load(row[0], {}) if row else None
 
-    def assign(self, worker: str, *, obligation_id: str, route_id: str, task: str, max_slices: int = MAX_ROUTE_SLICES, slice_timeout: int = SLICE_HARD_TIMEOUT) -> dict[str, Any]:
+    def assign(
+        self, worker: str, *, obligation_id: str, route_id: str, task: str,
+        max_rounds: int = MAX_ROUTE_ROUNDS,
+        round_timeout_seconds: int = DEFAULT_ROUND_TIMEOUT_SECONDS,
+    ) -> dict[str, Any]:
         self.scaffold()
         target_version = self.current_target_version()
         if not target_version:
@@ -665,7 +710,7 @@ class SQLiteControlStore:
             raise ControlError("obligation or route is not bound to the current target")
         if not task.strip():
             raise ControlError("assignment task is required")
-        payload = {"worker": _id(worker, "worker"), "epoch": uuid.uuid4().hex, "target_version": target_version, "obligation_id": obligation_id, "route_id": route_id, "task": task.strip(), "status": "assigned", "slice_count": 0, "lease_remaining": INITIAL_SLICES, "max_slices": max(3, int(max_slices)), "slice_timeout": max(1, int(slice_timeout)), "consecutive_low": 0, "audit_required": False, "wall_seconds": 0.0, "infra_failure_count": 0, "infra_wall_seconds": 0.0, "infra_outage_wall_seconds": 0.0, "next_retry_at_epoch": None, "last_failure_class": None, "last_error_signature": None, "last_unresolved_interfaces": None, "credited_evidence_refs": [], "event_cursor": len(self.events()), "context_cursor": self.generation(), "assigned_at_utc": utc_now()}
+        payload = {"worker": _id(worker, "worker"), "epoch": uuid.uuid4().hex, "target_version": target_version, "obligation_id": obligation_id, "route_id": route_id, "task": task.strip(), "status": "assigned", "rounds_used": 0, "rounds_remaining": INITIAL_ROUNDS, "max_rounds": max(3, int(max_rounds)), "round_timeout_seconds": max(1, int(round_timeout_seconds)), "consecutive_low": 0, "audit_required": False, "wall_seconds": 0.0, "infra_failure_count": 0, "infra_wall_seconds": 0.0, "infra_outage_wall_seconds": 0.0, "next_retry_at_epoch": None, "last_failure_class": None, "last_error_signature": None, "last_unresolved_interfaces": None, "credited_evidence_refs": [], "event_cursor": len(self.events()), "context_cursor": self.generation(), "assigned_at_utc": utc_now()}
         with self._tx() as db:
             db.execute("INSERT OR REPLACE INTO assignments VALUES (?,?,?,?,?,?,?)", (payload["worker"], payload["epoch"], payload["status"], target_version, obligation_id, route_id, _dump(payload)))
             self._set_route_state(db, route_id, "active", actor="assignment")
@@ -695,12 +740,12 @@ class SQLiteControlStore:
             raise ControlError(f"assignment is not runnable: {assignment.get('status')}")
         if assignment["target_version"] != self.current_target_version():
             raise ControlError("assignment target is stale")
-        if int(assignment["slice_count"]) >= int(assignment["max_slices"]):
-            raise ControlError("route slice budget exhausted")
+        if int(assignment["rounds_used"]) >= int(assignment["max_rounds"]):
+            raise ControlError("route round budget exhausted")
         if reservation_id:
             with self._connect() as db:
                 row = db.execute(
-                    "SELECT scope FROM call_reservations WHERE id=? AND component='worker_slice' AND status='active' AND expires_at_epoch>?",
+                    "SELECT scope FROM call_reservations WHERE id=? AND component='worker_round' AND status='active' AND expires_at_epoch>?",
                     (reservation_id, time.time()),
                 ).fetchone()
             reservation_scope = _load(row[0], {}) if row else {}
@@ -708,7 +753,7 @@ class SQLiteControlStore:
                 reservation_scope.get("worker") != worker
                 or reservation_scope.get("assignment_epoch") != assignment["epoch"]
             ):
-                raise ControlError("worker-slice reservation does not match the assignment")
+                raise ControlError("worker-round reservation does not match the assignment")
         budget = self.budget_state(exclude_reservation_id=reservation_id)
         if budget["stage"] == "exhausted":
             assignment["status"] = "budget_exhausted"
@@ -772,7 +817,7 @@ class SQLiteControlStore:
         return attempts, wall_limit, retry
 
     def record_worker_infra_failure(self, worker: str, outcome: dict[str, Any], *, wall_seconds: float, usage: Optional[dict[str, Any]] = None, provider_key: str = "codex", reservation_id: Optional[str] = None) -> dict[str, Any]:
-        """Persist retry/circuit state and actual cost without consuming a research slice."""
+        """Persist retry/circuit state and actual cost without consuming a research round."""
         self.scaffold()
         with self._tx() as db:
             row = db.execute("SELECT payload FROM assignments WHERE worker=?", (_id(worker, "worker"),)).fetchone()
@@ -806,7 +851,7 @@ class SQLiteControlStore:
                 "INSERT INTO backend_circuits(provider_key,state,consecutive_failures,opened_until,failure_class,infra_wall_seconds,updated_at_utc) VALUES (?,?,?,?,?,?,?) ON CONFLICT(provider_key) DO UPDATE SET state=excluded.state,consecutive_failures=backend_circuits.consecutive_failures+1,opened_until=excluded.opened_until,failure_class=excluded.failure_class,infra_wall_seconds=backend_circuits.infra_wall_seconds+excluded.infra_wall_seconds,updated_at_utc=excluded.updated_at_utc",
                 (provider_key, circuit_state, 1, next_retry, failure_class, max(0.0, wall_seconds), utc_now()),
             )
-            event = self._event(db, "slice_infra_error", worker=worker, assignment_epoch=assignment["epoch"], target_version=assignment["target_version"], obligation_id=assignment["obligation_id"], route_id=assignment["route_id"], failure_class=failure_class, retryable=retryable, retry_at_epoch=next_retry, error_signature=outcome.get("error_signature"), return_code=outcome.get("return_code"), blocked=blocked)
+            event = self._event(db, "round_infra_error", worker=worker, assignment_epoch=assignment["epoch"], target_version=assignment["target_version"], obligation_id=assignment["obligation_id"], route_id=assignment["route_id"], failure_class=failure_class, retryable=retryable, retry_at_epoch=next_retry, error_signature=outcome.get("error_signature"), return_code=outcome.get("return_code"), blocked=blocked)
             self._record_cost(db, component="worker_infra", wall_seconds=wall_seconds, usage=usage, reservation_id=reservation_id, worker=worker, assignment_epoch=assignment["epoch"], target_version=assignment["target_version"], obligation_id=assignment["obligation_id"], route_id=assignment["route_id"], failure_class=failure_class, attempt_status="failed")
             self._bump(db)
         self._record_budget_threshold()
@@ -842,7 +887,7 @@ class SQLiteControlStore:
                                    usage: Optional[dict[str, Any]] = None,
                                    reservation_id: Optional[str] = None,
                                    reason: str = "operator_stop") -> dict[str, Any]:
-        """Settle a cancelled slice without charging a research checkpoint."""
+        """Settle a cancelled round without charging a research checkpoint."""
         assignment = self.assignment(worker)
         if not assignment:
             raise ControlError(f"worker {worker} has no v2 assignment")
@@ -855,7 +900,7 @@ class SQLiteControlStore:
                 (assignment["status"], _dump(assignment), worker),
             )
             event = self._event(
-                db, "slice_interrupted", worker=worker,
+                db, "round_interrupted", worker=worker,
                 assignment_epoch=assignment["epoch"],
                 target_version=assignment["target_version"],
                 obligation_id=assignment["obligation_id"],
@@ -863,7 +908,7 @@ class SQLiteControlStore:
                 usage_status="partial" if usage else "unavailable",
             )
             self._record_cost(
-                db, component="worker_slice", wall_seconds=wall_seconds,
+                db, component="worker_round", wall_seconds=wall_seconds,
                 usage=usage, reservation_id=reservation_id, worker=worker,
                 assignment_epoch=assignment["epoch"],
                 target_version=assignment["target_version"],
@@ -1029,16 +1074,16 @@ class SQLiteControlStore:
             invalid_reason = f"assignment is not runnable: {assignment.get('status')}"
         elif assignment["target_version"] != self.current_target_version():
             invalid_reason = "assignment target is stale"
-        elif int(assignment["slice_count"]) >= int(assignment["max_slices"]):
-            invalid_reason = "route slice budget exhausted"
+        elif int(assignment["rounds_used"]) >= int(assignment["max_rounds"]):
+            invalid_reason = "route round budget exhausted"
         if invalid_reason:
             with self._tx() as db:
-                self._record_cost(db, component="worker_slice", wall_seconds=wall_seconds, usage=usage, reservation_id=reservation_id, worker=worker, target_version=assignment.get("target_version"), obligation_id=assignment.get("obligation_id"), route_id=assignment.get("route_id"), assignment_epoch=assignment.get("epoch"), attempt_status="discarded")
-                self._event(db, "slice_discarded", worker=worker, assignment_epoch=assignment.get("epoch"), reason=invalid_reason)
+                self._record_cost(db, component="worker_round", wall_seconds=wall_seconds, usage=usage, reservation_id=reservation_id, worker=worker, target_version=assignment.get("target_version"), obligation_id=assignment.get("obligation_id"), route_id=assignment.get("route_id"), assignment_epoch=assignment.get("epoch"), attempt_status="discarded")
+                self._event(db, "round_discarded", worker=worker, assignment_epoch=assignment.get("epoch"), reason=invalid_reason)
                 self._bump(db)
             self._record_budget_threshold()
             return {"gain": "none", "decision": "invalidated", "assignment": assignment}
-        assignment.update(status="running", slice_count=int(assignment["slice_count"]) + 1, lease_remaining=max(0, int(assignment["lease_remaining"]) - 1), wall_seconds=float(assignment.get("wall_seconds", 0)) + max(0.0, wall_seconds))
+        assignment.update(status="running", rounds_used=int(assignment["rounds_used"]) + 1, rounds_remaining=max(0, int(assignment["rounds_remaining"]) - 1), wall_seconds=float(assignment.get("wall_seconds", 0)) + max(0.0, wall_seconds))
         recent = self.events()[int(assignment.get("event_cursor", 0)):]
         linked = [row for row in recent if row.get("event") == "fact_linked" and row.get("assignment_epoch") == assignment["epoch"]]
         closed = [row for row in recent if row.get("event") == "obligation_state" and row.get("assignment_epoch") == assignment["epoch"] and row.get("state") in {"closed", "refuted"}]
@@ -1066,7 +1111,7 @@ class SQLiteControlStore:
             decision = "budget_exhausted"
         elif gain in {"high", "medium"}:
             assignment.update(consecutive_low=0, audit_required=False)
-            assignment["lease_remaining"] = min(int(assignment["max_slices"]) - int(assignment["slice_count"]), int(assignment["lease_remaining"]) + RENEWAL_SLICES)
+            assignment["rounds_remaining"] = min(int(assignment["max_rounds"]) - int(assignment["rounds_used"]), int(assignment["rounds_remaining"]) + RENEWAL_ROUNDS)
             decision = "continue"
         else:
             assignment["consecutive_low"] += 1
@@ -1081,7 +1126,7 @@ class SQLiteControlStore:
         if self.obligation_state(assignment["obligation_id"]) in {"closed", "refuted"}:
             assignment.update(status="completed", audit_required=False)
             decision = "completed"
-        if assignment["slice_count"] >= assignment["max_slices"]:
+        if assignment["rounds_used"] >= assignment["max_rounds"]:
             if decision != "completed":
                 assignment["status"], decision = "budget_exhausted", "budget_exhausted"
         with self._tx() as db:
@@ -1090,11 +1135,11 @@ class SQLiteControlStore:
                 self._set_route_state(db, assignment["route_id"], "stalled", actor="controller", reason=decision)
             elif decision == "completed":
                 self._set_route_state(db, assignment["route_id"], "succeeded", actor="controller", reason="obligation closed")
-            event = self._event(db, "work_checkpoint", worker=worker, assignment_epoch=assignment["epoch"], target_version=assignment["target_version"], obligation_id=assignment["obligation_id"], route_id=assignment["route_id"], slice_count=assignment["slice_count"], gain=gain, decision=decision, valid_evidence_refs=valid_refs, budget_block_event_ids=[row["event_id"] for row in budget_blocks], report=report)
-            db.execute("INSERT INTO checkpoints VALUES (?,?,?,?,?,?,?,?,?)", (event["seq"], assignment["target_version"], assignment["obligation_id"], assignment["route_id"], worker, assignment["slice_count"], gain, decision, _dump(report)))
+            event = self._event(db, "work_checkpoint", worker=worker, assignment_epoch=assignment["epoch"], target_version=assignment["target_version"], obligation_id=assignment["obligation_id"], route_id=assignment["route_id"], rounds_used=assignment["rounds_used"], gain=gain, decision=decision, valid_evidence_refs=valid_refs, budget_block_event_ids=[row["event_id"] for row in budget_blocks], report=report)
+            db.execute("INSERT INTO checkpoints VALUES (?,?,?,?,?,?,?,?,?)", (event["seq"], assignment["target_version"], assignment["obligation_id"], assignment["route_id"], worker, assignment["rounds_used"], gain, decision, _dump(report)))
             for signature in report.get("failed_attempt_signatures") or []:
                 db.execute("INSERT INTO obstacles VALUES (?,?,?,?,?,?,?,?) ON CONFLICT(signature,route_id) DO UPDATE SET occurrences=occurrences+1,last_seen_seq=excluded.last_seen_seq,title=excluded.title,status='open'", (signature, assignment["route_id"], assignment["obligation_id"], signature, "open", 1, event["seq"], event["seq"]))
-            self._record_cost(db, component="worker_slice", wall_seconds=wall_seconds, usage=usage, reservation_id=reservation_id, worker=worker, target_version=assignment["target_version"], obligation_id=assignment["obligation_id"], route_id=assignment["route_id"], assignment_epoch=assignment["epoch"])
+            self._record_cost(db, component="worker_round", wall_seconds=wall_seconds, usage=usage, reservation_id=reservation_id, worker=worker, target_version=assignment["target_version"], obligation_id=assignment["obligation_id"], route_id=assignment["route_id"], assignment_epoch=assignment["epoch"])
             self._bump(db)
         self._record_budget_threshold()
         return {"gain": gain, "decision": decision, "assignment": assignment, "project_budget_blocked": bool(budget_blocks)}
@@ -1107,7 +1152,7 @@ class SQLiteControlStore:
         for rid in route.get("fallback_route_ids") or []:
             if self.route_state(rid) == "proposed" and self.route(rid)["obligation_id"] == assignment["obligation_id"]:
                 self.set_route_state(route["id"], "superseded", actor="controller", reason=f"fallback to {rid}")
-                return self.assign(worker, obligation_id=assignment["obligation_id"], route_id=rid, task=f"Fallback route {rid}: {self.route(rid)['expected_result']}", max_slices=assignment["max_slices"], slice_timeout=assignment["slice_timeout"])
+                return self.assign(worker, obligation_id=assignment["obligation_id"], route_id=rid, task=f"Fallback route {rid}: {self.route(rid)['expected_result']}", max_rounds=assignment["max_rounds"], round_timeout_seconds=assignment["round_timeout_seconds"])
         return None
 
     def reserve_call(self, *, component: str, max_wall_seconds: float, provider_key: str = "codex", estimated_cost_usd: Optional[float] = None, parent_reservation_id: Optional[str] = None, **scope: Any) -> dict[str, Any]:
@@ -1125,8 +1170,8 @@ class SQLiteControlStore:
                     "SELECT component,scope,expires_at_epoch FROM call_reservations WHERE id=? AND status='active' AND expires_at_epoch>?",
                     (parent_reservation_id, now),
                 ).fetchone()
-                if not parent or parent["component"] != "worker_slice":
-                    raise ControlError("nested call requires an active worker-slice reservation")
+                if not parent or parent["component"] != "worker_round":
+                    raise ControlError("nested call requires an active worker-round reservation")
                 parent_scope = _load(parent["scope"], {})
                 for key in ("worker", "assignment_epoch", "target_version", "obligation_id", "route_id"):
                     if scope.get(key) and parent_scope.get(key) != scope[key]:

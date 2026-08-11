@@ -139,7 +139,7 @@ def rebuild_fact_index(project: Path, store: Any) -> dict[str, Any]:
                 db.execute(
                     "INSERT OR REPLACE INTO checkpoints VALUES (?,?,?,?,?,?,?,?,?)",
                     (seq, payload.get("target_version"), payload.get("obligation_id"), payload.get("route_id"),
-                     payload.get("worker"), payload.get("slice_count"), payload.get("gain"),
+                     payload.get("worker"), payload.get("rounds_used"), payload.get("gain"),
                      payload.get("decision"), _dump(report)),
                 )
                 for signature in report.get("failed_attempt_signatures") or []:

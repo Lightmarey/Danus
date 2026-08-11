@@ -572,7 +572,7 @@ async function loadManifests() {
   const box = $('#context-manifests'); box.innerHTML = '';
   try {
     const d = await api('/api/research/context-manifests?limit=10');
-    if (!d.manifests.length) { box.appendChild(el('div','empty','No slice snapshots yet.')); return; }
+    if (!d.manifests.length) { box.appendChild(el('div','empty','No round context snapshots yet.')); return; }
     d.manifests.forEach((m) => {
       const card = el('div','entry clickable');
       card.appendChild(el('div','entry-author',`${m.worker} · snapshot ${m.snapshot_generation}`));

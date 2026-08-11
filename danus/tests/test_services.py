@@ -13,6 +13,7 @@ from pathlib import Path
 import pytest
 
 from danus import runtime, services
+from danus.control import ControlStore
 from danus.orchestration import cli
 
 
@@ -341,6 +342,10 @@ def test_real_dashboard_lifecycle_offline(tmp_path):
     r = root(tmp_path)
     project = r / "runtime" / "projects" / "alpha"
     project.mkdir(parents=True)
+    (project / "project.json").write_text(
+        json.dumps({"name": "alpha", "control_version": 2}), encoding="utf-8",
+    )
+    ControlStore(project).scaffold()
     with socket.socket() as sock:
         sock.bind(("127.0.0.1", 0))
         port = sock.getsockname()[1]

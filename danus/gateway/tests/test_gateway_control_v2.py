@@ -149,7 +149,7 @@ def test_v2_fact_links_closes_and_records_verifier_cost(tmp_path: Path):
     assert costs[-1]["usage"]["input_tokens"] == 10
 
 
-def test_verifier_inside_worker_slice_does_not_need_a_second_wall_budget(tmp_path: Path):
+def test_verifier_inside_worker_round_does_not_need_a_second_wall_budget(tmp_path: Path):
     store, assignment = _project(tmp_path)
     target = store.current_target()
     target["budget"] = {"max_wall_seconds": 10}
@@ -159,7 +159,7 @@ def test_verifier_inside_worker_slice_does_not_need_a_second_wall_budget(tmp_pat
             (json.dumps(target), target["version"]),
         )
     parent = store.reserve_call(
-        component="worker_slice", max_wall_seconds=10, worker="high",
+        component="worker_round", max_wall_seconds=10, worker="high",
         assignment_epoch=assignment["epoch"], target_version=assignment["target_version"],
         obligation_id=assignment["obligation_id"], route_id=assignment["route_id"],
     )
@@ -243,7 +243,7 @@ def test_verifier_quota_failure_opens_shared_circuit_and_prevents_retry_storm(tm
         server._verify = original
     assert first["verdict"] == second["verdict"] == "error"
     assert calls == 1
-    assert store.assignment("high")["slice_count"] == 0
+    assert store.assignment("high")["rounds_used"] == 0
     assert store.events("backend_failure")[-1]["failure_class"] == "quota_exhausted"
     assert store.budget_state()["reserved_wall_seconds"] == 0
 

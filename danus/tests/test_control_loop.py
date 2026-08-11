@@ -8,7 +8,7 @@ from danus.execution import layout as L
 from danus.execution import loop
 
 
-def _worker(tmp: Path, *, budget: dict | None = None, slice_timeout: int = 5400) -> tuple[L.WorkerLayout, ControlStore]:
+def _worker(tmp: Path, *, budget: dict | None = None, round_timeout_seconds: int = 5400) -> tuple[L.WorkerLayout, ControlStore]:
     project = tmp / "P"
     wl = L.WorkerLayout(project / "workers" / "high")
     wl.logs.mkdir(parents=True)
@@ -28,7 +28,7 @@ def _worker(tmp: Path, *, budget: dict | None = None, slice_timeout: int = 5400)
         "id": "r1", "obligation_id": "v0001-root-1",
         "method_family": "direct", "expected_result": "T",
     })
-    store.assign("high", obligation_id="v0001-root-1", route_id="r1", task="prove T", slice_timeout=slice_timeout)
+    store.assign("high", obligation_id="v0001-root-1", route_id="r1", task="prove T", round_timeout_seconds=round_timeout_seconds)
     return wl, store
 
 
@@ -42,7 +42,7 @@ def _report() -> dict:
     }
 
 
-def test_v2_loop_runs_two_exploration_slices_then_independent_audit(tmp_path: Path):
+def test_v2_loop_runs_two_exploration_rounds_then_independent_audit(tmp_path: Path):
     wl, store = _worker(tmp_path)
     prompts = []
     original = loop.run_round
@@ -110,7 +110,7 @@ def test_budget_rejection_cannot_be_reframed_as_information_gain(tmp_path: Path)
     assert store.route_state("r1") == "active"
 
 
-def test_timeout_without_report_uses_persisted_infra_budget_not_research_slices(tmp_path: Path):
+def test_timeout_without_report_uses_persisted_infra_budget_not_research_rounds(tmp_path: Path):
     wl, store = _worker(tmp_path, budget={"max_infra_attempts": 2, "infra_retry_seconds": [0]})
     original = loop.run_round
 
@@ -126,13 +126,13 @@ def test_timeout_without_report_uses_persisted_infra_budget_not_research_slices(
     assignment = store.assignment("high")
     assert assignment["status"] == "infra_blocked"
     assert assignment["infra_failure_count"] == 2
-    assert assignment["slice_count"] == 0
+    assert assignment["rounds_used"] == 0
     assert assignment["consecutive_low"] == 0
     assert [event["component"] for event in store.events("cost")] == ["worker_infra", "worker_infra"]
     assert store.events("work_checkpoint") == []
 
 
-def test_quota_exhaustion_blocks_without_retry_or_slice_charge(tmp_path: Path):
+def test_quota_exhaustion_blocks_without_retry_or_round_charge(tmp_path: Path):
     wl, store = _worker(tmp_path, budget={"infra_retry_seconds": [0]})
     calls = 0
     original = loop.run_round
@@ -152,11 +152,11 @@ def test_quota_exhaustion_blocks_without_retry_or_slice_charge(tmp_path: Path):
     assert calls == 1
     assert assignment["status"] == "infra_blocked"
     assert assignment["last_failure_class"] == "quota_exhausted"
-    assert assignment["slice_count"] == 0
+    assert assignment["rounds_used"] == 0
 
 
-def test_operator_stop_records_partial_usage_without_consuming_a_slice(tmp_path: Path):
-    wl, store = _worker(tmp_path, budget={"max_wall_seconds": 20}, slice_timeout=10)
+def test_operator_stop_records_partial_usage_without_consuming_a_round(tmp_path: Path):
+    wl, store = _worker(tmp_path, budget={"max_wall_seconds": 20}, round_timeout_seconds=10)
     original = loop.run_round
 
     def interrupted(_wl, _role, _prompt, log_path, _timeout, **_kwargs):
@@ -176,9 +176,9 @@ def test_operator_stop_records_partial_usage_without_consuming_a_slice(tmp_path:
         loop.run_round = original
     assignment = store.assignment("high")
     assert assignment["status"] == "assigned"
-    assert assignment["slice_count"] == 0
+    assert assignment["rounds_used"] == 0
     assert store.events("work_checkpoint") == []
-    assert store.events("slice_interrupted")[-1]["usage_status"] == "partial"
+    assert store.events("round_interrupted")[-1]["usage_status"] == "partial"
     cost = store.events("cost")[-1]
     assert cost["attempt_status"] == "interrupted"
     assert cost["usage"]["input_tokens"] == 12
@@ -186,11 +186,11 @@ def test_operator_stop_records_partial_usage_without_consuming_a_slice(tmp_path:
 
 
 def test_a_call_reservation_at_the_budget_ceiling_does_not_reject_its_own_report(tmp_path: Path):
-    _wl, store = _worker(tmp_path, budget={"max_wall_seconds": 10}, slice_timeout=10)
+    _wl, store = _worker(tmp_path, budget={"max_wall_seconds": 10}, round_timeout_seconds=10)
     assignment = store.assignment("high")
-    reservation = store.reserve_call(component="worker_slice", max_wall_seconds=10, worker="high", assignment_epoch=assignment["epoch"])
+    reservation = store.reserve_call(component="worker_round", max_wall_seconds=10, worker="high", assignment_epoch=assignment["epoch"])
     result = store.evaluate_work_report("high", _report(), wall_seconds=1, reservation_id=reservation["id"])
     assert result["decision"] == "continue"
-    assert store.assignment("high")["slice_count"] == 1
+    assert store.assignment("high")["rounds_used"] == 1
     assert len(store.events("work_checkpoint")) == 1
     assert store.budget_state()["reserved_wall_seconds"] == 0

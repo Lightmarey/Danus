@@ -85,7 +85,7 @@ def test_duplicate_route_requires_novelty_basis(tmp_path: Path):
     assert store.add_route({"id": "r3", **base, "novelty_basis": ["new lemma L"]})["id"] == "r3"
 
 
-def test_low_gain_gets_two_normal_slices_then_an_audit_before_stall(tmp_path: Path):
+def test_low_gain_gets_two_normal_rounds_then_an_audit_before_stall(tmp_path: Path):
     store, _ = _assigned(tmp_path)
     first = store.evaluate_work_report("high", _low_report(), wall_seconds=1)
     second = store.evaluate_work_report("high", _low_report(), wall_seconds=1)
@@ -96,7 +96,7 @@ def test_low_gain_gets_two_normal_slices_then_an_audit_before_stall(tmp_path: Pa
     assert store.route_state("route-1") == "stalled"
 
 
-def test_valid_exploration_evidence_is_medium_gain_and_renews_lease(tmp_path: Path):
+def test_valid_exploration_evidence_is_medium_gain_and_extends_round_budget(tmp_path: Path):
     store, _ = _assigned(tmp_path)
     evidence = GlobalMemory(store.project).append(
         "obstacle", claim="direct route needs compactness", evidence="missing uniform bound",
@@ -109,7 +109,7 @@ def test_valid_exploration_evidence_is_medium_gain_and_renews_lease(tmp_path: Pa
     result = store.evaluate_work_report("high", report, wall_seconds=2)
     assert result["gain"] == "medium"
     assert result["decision"] == "continue"
-    assert result["assignment"]["lease_remaining"] == 4  # 3 - 1 + 2
+    assert result["assignment"]["rounds_remaining"] == 4  # 3 - 1 + 2
 
 
 def test_memory_or_self_report_without_state_change_cannot_fake_progress(tmp_path: Path):
@@ -236,14 +236,14 @@ def test_project_budget_warns_audits_then_blocks_expensive_work(tmp_path: Path):
         "expected_result": "T",
     })
     store.assign("high", obligation_id="v0001-T", route_id="r1", task="T")
-    store.record_cost(component="worker_slice", wall_seconds=70)
+    store.record_cost(component="worker_round", wall_seconds=70)
     assert store.budget_state()["stage"] == "warn"
     store.record_cost(component="verification", wall_seconds=15)
     assert store.validate_assignment("high")["audit_required"] is True
-    store.record_cost(component="worker_slice", wall_seconds=15)
+    store.record_cost(component="worker_round", wall_seconds=15)
     try:
         store.validate_assignment("high")
-        assert False, "100% project budget must block another slice"
+        assert False, "100% project budget must block another round"
     except ControlError as exc:
         assert "project budget exhausted" in str(exc)
 
@@ -325,7 +325,7 @@ def test_call_reservations_atomically_prevent_concurrent_budget_overshoot(tmp_pa
     def reserve() -> None:
         barrier.wait()
         try:
-            store.reserve_call(component="worker_slice", max_wall_seconds=60)
+            store.reserve_call(component="worker_round", max_wall_seconds=60)
             results.append("reserved")
         except ControlError:
             results.append("blocked")
@@ -365,7 +365,7 @@ def test_nested_verification_uses_parent_wall_reservation_without_double_countin
     }
     generation = store.generation()
     parent = store.reserve_call(
-        component="worker_slice", max_wall_seconds=100, **scope,
+        component="worker_round", max_wall_seconds=100, **scope,
     )
     assert store.generation() == generation
     child = store.reserve_call(
@@ -380,7 +380,7 @@ def test_nested_verification_uses_parent_wall_reservation_without_double_countin
     assert nested["wall_seconds"] == 0
     assert nested["nested_wall_seconds"] == 6
     store.record_cost(
-        component="worker_slice", wall_seconds=8, reservation_id=parent["id"], **scope,
+        component="worker_round", wall_seconds=8, reservation_id=parent["id"], **scope,
     )
     assert store.budget_state()["wall_seconds"] == 8
 
@@ -520,13 +520,58 @@ def test_existing_v2_database_adds_resilience_columns_in_place(tmp_path: Path):
     assert "infra_wall_seconds" in columns
 
 
-def test_target_change_during_a_slice_settles_cost_but_discards_research_state(tmp_path: Path):
+def test_existing_v2_database_migrates_round_vocabulary_once(tmp_path: Path):
     store, assignment = _assigned(tmp_path)
-    reservation = store.reserve_call(component="worker_slice", max_wall_seconds=10, worker="high", assignment_epoch=assignment["epoch"])
+    old = dict(assignment)
+    old["slice_count"] = old.pop("rounds_used")
+    old["lease_remaining"] = old.pop("rounds_remaining")
+    old["max_slices"] = old.pop("max_rounds")
+    old["slice_timeout"] = old.pop("round_timeout_seconds")
+    with store._connect() as db:
+        db.execute("ALTER TABLE checkpoints RENAME COLUMN rounds_used TO slice_count")
+        db.execute(
+            "UPDATE assignments SET payload=? WHERE worker='high'", (json.dumps(old),),
+        )
+        db.execute(
+            "INSERT INTO events(event_id,timestamp_utc,event,payload) VALUES (?,?,?,?)",
+            ("old-slice-event", "2026-01-01T00:00:00Z", "slice_interrupted",
+             json.dumps({"slice_count": 1, "component": "worker_slice"})),
+        )
+        db.execute(
+            "INSERT INTO call_reservations VALUES (?,?,?,?,?,?,?,?,?,?)",
+            ("old-reservation", "worker_slice", "codex", 10, None, "cancelled",
+             "{}", "2026-01-01T00:00:00Z", 1, "2026-01-01T00:00:01Z"),
+        )
+        db.execute("UPDATE meta SET value='2' WHERE key='schema_version'")
+        db.commit()
+
+    reopened = ControlStore(store.project)
+    reopened.scaffold()
+    migrated = reopened.assignment("high")
+    assert migrated["rounds_used"] == 0 and migrated["rounds_remaining"] == 3
+    assert migrated["max_rounds"] == 12 and migrated["round_timeout_seconds"] == 5400
+    assert not {"slice_count", "lease_remaining", "max_slices", "slice_timeout"}.intersection(migrated)
+    event = reopened.events("round_interrupted")[-1]
+    assert event["rounds_used"] == 1 and event["component"] == "worker_round"
+    with reopened._connect() as db:
+        columns = {row[1] for row in db.execute("PRAGMA table_info(checkpoints)")}
+        component = db.execute(
+            "SELECT component FROM call_reservations WHERE id='old-reservation'",
+        ).fetchone()[0]
+        version = db.execute(
+            "SELECT value FROM meta WHERE key='schema_version'",
+        ).fetchone()[0]
+    assert "rounds_used" in columns and "slice_count" not in columns
+    assert component == "worker_round" and version == "3"
+
+
+def test_target_change_during_a_round_settles_cost_but_discards_research_state(tmp_path: Path):
+    store, assignment = _assigned(tmp_path)
+    reservation = store.reserve_call(component="worker_round", max_wall_seconds=10, worker="high", assignment_epoch=assignment["epoch"])
     replacement = store.propose_target(_target("replacement target"))
     store.approve_target(replacement["version"])
     result = store.evaluate_work_report("high", _low_report(), wall_seconds=3, reservation_id=reservation["id"])
-    assert result["decision"] == "invalidated" and result["assignment"]["slice_count"] == 0
-    assert store.events("slice_discarded")[-1]["reason"] == "assignment is not runnable: stale"
+    assert result["decision"] == "invalidated" and result["assignment"]["rounds_used"] == 0
+    assert store.events("round_discarded")[-1]["reason"] == "assignment is not runnable: stale"
     assert store.budget_state()["wall_seconds"] == 3
     assert store.budget_state()["reserved_wall_seconds"] == 0

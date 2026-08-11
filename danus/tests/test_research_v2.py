@@ -89,14 +89,14 @@ def test_file_backed_v2_state_is_imported_once_and_preserved(tmp_path: Path):
     target = {"version": "v0001", "statement": "T", "allowed_assumptions": [], "forbidden_assumptions": [], "required_conclusions": [{"id": "T", "statement": "T"}], "fallback_candidates": [], "budget": {"max_cost_usd": 10}}
     obligation = {"id": "v0001-T", "target_version": "v0001", "statement": "T", "kind": "root", "dependencies": [], "closure": "verified"}
     route = {"id": "r1", "target_version": "v0001", "obligation_id": "v0001-T", "method_family": "direct", "signature": "sig", "expected_result": "T", "input_fact_ids": []}
-    assignment = {"worker": "high", "epoch": "epoch-1", "status": "running", "target_version": "v0001", "obligation_id": "v0001-T", "route_id": "r1", "slice_count": 2, "max_slices": 12}
+    assignment = {"worker": "high", "epoch": "epoch-1", "status": "running", "target_version": "v0001", "obligation_id": "v0001-T", "route_id": "r1", "slice_count": 2, "lease_remaining": 1, "max_slices": 12, "slice_timeout": 5400}
     for folder, name, value in (("targets", "v0001", target), ("obligations", "v0001-T", obligation), ("routes", "r1", route), ("assignments", "high", assignment)):
         (control / folder / f"{name}.json").write_text(json.dumps(value), encoding="utf-8")
     events = [
         {"event_id": "e1", "timestamp_utc": "2026-01-01T00:00:00Z", "event": "target_approved", "target_version": "v0001"},
         {"event_id": "e2", "timestamp_utc": "2026-01-01T00:00:01Z", "event": "obligation_state", "target_version": "v0001", "obligation_id": "v0001-T", "state": "active"},
         {"event_id": "e3", "timestamp_utc": "2026-01-01T00:00:02Z", "event": "route_state", "target_version": "v0001", "obligation_id": "v0001-T", "route_id": "r1", "state": "active"},
-        {"event_id": "e4", "timestamp_utc": "2026-01-01T00:00:03Z", "event": "cost", "target_version": "v0001", "cost_usd": 2, "wall_seconds": 4},
+        {"event_id": "e4", "timestamp_utc": "2026-01-01T00:00:03Z", "event": "cost", "component": "worker_slice", "target_version": "v0001", "cost_usd": 2, "wall_seconds": 4},
     ]
     (control / "events.jsonl").write_text("".join(json.dumps(row) + "\n" for row in events), encoding="utf-8")
     store = ControlStore(project)
@@ -104,7 +104,12 @@ def test_file_backed_v2_state_is_imported_once_and_preserved(tmp_path: Path):
     assert store.current_target_version() == "v0001"
     assert store.obligation_state("v0001-T") == "active"
     assert store.route("r1")["method_key"] == "direct"
-    assert store.assignment("high")["epoch"] == "epoch-1"
+    imported = store.assignment("high")
+    assert imported["epoch"] == "epoch-1"
+    assert imported["rounds_used"] == 2 and imported["rounds_remaining"] == 1
+    assert imported["max_rounds"] == 12 and imported["round_timeout_seconds"] == 5400
+    assert not {"slice_count", "lease_remaining", "max_slices", "slice_timeout"}.intersection(imported)
+    assert store.events("cost")[-1]["component"] == "worker_round"
     assert store.budget_state()["cost_usd"] == 2
     assert (control / "MIGRATED_TO_SQLITE").is_file()
     assert (control / "targets" / "v0001.json").is_file()

@@ -15,7 +15,7 @@ which is also the codex working dir / LocalMemory root)::
         AGENTS.md -> agents/contracts/worker.md   # the static contract codex reads
         .agents/skills -> agents/skills/worker    # the worker skills
         .codex/config.toml                        # MCP = danus gateway, role=worker
-        TASK.md                                   # per-round assignment (danus assign)
+        TASK.md                                   # assignment mirror (danus assign)
         local_memory/                             # worker-private (codex writes)
         .role .pid .pid.lock .stop .status.json  logs/
 

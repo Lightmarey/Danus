@@ -207,8 +207,8 @@ def test_loop_stalls_only_after_audited_low_gain(tmp: Path):
             s = _st("P", "high")
             assert s["state"] == "paused" and s["round"] == 3
             wl = L.WorkerLayout(L.worker_dir("P", "high"))
-            assert (wl.logs / "slice_1.jsonl").exists()
-            assert (wl.logs / "slice_3.jsonl").exists()
+            assert (wl.logs / "round_1.jsonl").exists()
+            assert (wl.logs / "round_3.jsonl").exists()
         finally:
             _kill_project("P")
 
@@ -216,7 +216,7 @@ def test_loop_stalls_only_after_audited_low_gain(tmp: Path):
 def test_graceful_stop(tmp: Path):
     fc = _fake_codex(tmp)
     with _project_env(tmp, DANUS_CODEX_BIN=str(fc), DANUS_ROUND_BEAT="0.1",
-                      DANUS_MAX_ROUNDS="0", FAKE_CODEX_SLEEP="0.1"):
+                      FAKE_CODEX_SLEEP="0.1"):
         cli.do_new("P", roles="high:1")
         _prepare_route("P", ("high",))
         try:
@@ -244,7 +244,7 @@ def test_graceful_stop(tmp: Path):
 def test_force_stop(tmp: Path):
     fc = _fake_codex(tmp)
     with _project_env(tmp, DANUS_CODEX_BIN=str(fc), DANUS_ROUND_BEAT="0",
-                      DANUS_MAX_ROUNDS="0", FAKE_CODEX_SLEEP="30"):
+                      FAKE_CODEX_SLEEP="30"):
         cli.do_new("P", roles="high:1")
         _prepare_route("P", ("high",))
         try:
@@ -260,7 +260,7 @@ def test_force_stop(tmp: Path):
 def test_idempotent_start(tmp: Path):
     fc = _fake_codex(tmp)
     with _project_env(tmp, DANUS_CODEX_BIN=str(fc), DANUS_ROUND_BEAT="0",
-                      DANUS_MAX_ROUNDS="0", FAKE_CODEX_SLEEP="30"):
+                      FAKE_CODEX_SLEEP="30"):
         cli.do_new("P", roles="high:1")
         _prepare_route("P", ("high",))
         try:
@@ -274,7 +274,7 @@ def test_idempotent_start(tmp: Path):
 def test_project_wide_targets(tmp: Path):
     fc = _fake_codex(tmp)
     with _project_env(tmp, DANUS_CODEX_BIN=str(fc), DANUS_ROUND_BEAT="0",
-                      DANUS_MAX_ROUNDS="1", FAKE_CODEX_SLEEP="0"):
+                      FAKE_CODEX_SLEEP="0"):
         cli.do_new("P", roles="high:2")
         _prepare_route("P", ("high", "high2"))
         try:

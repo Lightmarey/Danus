@@ -14,9 +14,9 @@ The load-bearing property this module enforces (the reason it exists):
   ``glossary_introduces`` / ``external_refs`` — is STRIPPED, and no fact id or
   slug is emitted anywhere. The writer works from mathematics, nothing else.
 
-For V2, the shared ResearchQuery supplies every active fact explicitly scoped to
-the approved target plus its predecessor closure, in topological order; the
-assembler never scans Markdown. Legacy V1 keeps the original all-facts ordering.
+The shared ResearchQuery supplies every active fact explicitly scoped to the
+approved target plus its predecessor closure, in topological order. The
+assembler never scans Markdown or guesses from all terminal facts.
 
 The writer prompt lives in the operator-editable skill dir, located at CALL time
 via ``DANUS_HUMAN_SUMMARY_SKILL_DIR`` (default
