@@ -8,6 +8,8 @@ and under pytest.
 from __future__ import annotations
 
 import contextlib
+import importlib
+import json
 import os
 import runpy
 import sys
@@ -15,25 +17,18 @@ import tempfile
 import types
 from pathlib import Path
 
-import sys
-
-import danus.observability.app  # ensure the submodule is imported into sys.modules
+from danus.control import ControlStore
 
 # The package __init__ re-exports the FastAPI instance as danus.observability.app,
 # which shadows the submodule on attribute access — so reach the MODULE via sys.modules.
-app = sys.modules["danus.observability.app"]
+app = importlib.import_module("danus.observability.app")
 
-_MIN_FACT = (
-    "---\n"
-    "fact_id: g1\n"
-    "problem_id: P\n"
-    "author: w\n"
-    "predecessors: []\n"
-    "glossary_introduces: {}\n"
-    "external_refs: []\n"
-    "---\n"
-    "## statement\nS\n## proof\nP\n"
-)
+def _prepare_v2(path: str | Path) -> None:
+    project = Path(path)
+    (project / "project.json").write_text(
+        json.dumps({"name": project.name, "control_version": 2}), encoding="utf-8",
+    )
+    ControlStore(project).scaffold()
 
 
 @contextlib.contextmanager
@@ -83,6 +78,7 @@ def test_main_happy_path_runs_uvicorn():
     calls = {}
     fake.run = lambda application, **kw: calls.update(kw, application=application)
     with tempfile.TemporaryDirectory() as d, _env(DANUS_DASHBOARD_PROJECT=None), _argv("--project", d, "--host", "127.0.0.1", "--port", "9137"):
+        _prepare_v2(d)
         sys.modules["uvicorn"] = fake
         try:
             app.main()
@@ -94,6 +90,7 @@ def test_main_happy_path_runs_uvicorn():
 
 def test_health_identifies_pid_and_canonical_project():
     with tempfile.TemporaryDirectory() as d, _env(DANUS_DASHBOARD_PROJECT=d):
+        _prepare_v2(d)
         body = app.health()
     assert body["status"] == "ok"
     assert body["pid"] == os.getpid()
@@ -112,27 +109,11 @@ def test_module_entrypoint_runs_main():
     assert ran["v"] is True
 
 
-def test_load_facts_skips_unreadable_and_idless():
-    with tempfile.TemporaryDirectory() as d:
-        facts = Path(d) / "fact_graph" / "facts"
-        facts.mkdir(parents=True)
-        (facts / "good.md").write_text(_MIN_FACT, encoding="utf-8")
-        (facts / "bad.md").mkdir()  # a dir named *.md -> read_text raises OSError -> skipped
-        out = app._load_facts(Path(d))
-        assert [f["fact_id"] for f in out] == ["g1"]
-
-
 def test_load_jsonl_unreadable_returns_empty():
     with tempfile.TemporaryDirectory() as d:
         p = Path(d) / "chan.jsonl"
         p.mkdir()  # a dir -> read_text raises OSError -> []
         assert app._load_jsonl(p) == []
-
-
-def test_parse_fact_frontmatter_line_without_colon():
-    txt = "---\njust-a-bare-line\nfact_id: f9\n---\n## statement\nS\n## proof\nP\n"
-    fact = app._parse_fact(txt)
-    assert fact["fact_id"] == "f9"  # the colonless frontmatter line is skipped, not fatal
 
 
 def test_load_jsonl_permission_denied_returns_empty():
@@ -157,6 +138,7 @@ def test_app_module_run_as_main():
     fake = types.ModuleType("uvicorn")
     fake.run = lambda application, **kw: None
     with tempfile.TemporaryDirectory() as d, _env(DANUS_DASHBOARD_PROJECT=d), _argv():
+        _prepare_v2(d)
         sys.modules["uvicorn"] = fake
         try:
             runpy.run_module("danus.observability.app", run_name="__main__")
@@ -173,12 +155,8 @@ def main() -> None:
     print("  [ok] main() runs uvicorn on the given host/port (faked)")
     test_module_entrypoint_runs_main()
     print("  [ok] python -m danus.observability calls main()")
-    test_load_facts_skips_unreadable_and_idless()
-    print("  [ok] _load_facts skips an unreadable *.md entry")
     test_load_jsonl_unreadable_returns_empty()
     print("  [ok] _load_jsonl returns [] on an unreadable path")
-    test_parse_fact_frontmatter_line_without_colon()
-    print("  [ok] _parse_fact tolerates a colonless frontmatter line")
     test_load_jsonl_permission_denied_returns_empty()
     print("  [ok] _load_jsonl returns [] on an unreadable (exists-but-denied) file")
     test_app_module_run_as_main()

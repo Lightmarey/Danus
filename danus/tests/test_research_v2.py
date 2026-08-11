@@ -192,7 +192,8 @@ def test_browser_view_state_has_no_persistent_or_write_path():
     assert "const viewPins = new Set()" in script
     assert "localStorage" not in script
     assert "e.connectionFailure = true" in script
-    assert "e.status === 410" in script
+    assert "/api/research/map" in script
+    assert "/api/factgraph" not in script
     assert "function renderFactResearchMap(d)" in script
     assert "selectFactGraphRoute" in script
     assert "function renderResearchMap(d)" in script

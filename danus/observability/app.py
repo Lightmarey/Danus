@@ -26,7 +26,6 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import re
 import secrets
 import time
 from pathlib import Path
@@ -37,7 +36,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from danus.control import ControlError, ControlStore
+from danus.control import ControlError, ControlStore, require_v2_project
 from danus.control_service import ControlService
 from danus.research import ResearchQuery
 
@@ -67,12 +66,8 @@ def _project_dir() -> Path:
     p = os.environ.get("DANUS_DASHBOARD_PROJECT") or os.environ.get("DANUS_PROJECT_DIR")
     if not p:
         raise RuntimeError("no project dir — set --project / DANUS_PROJECT_DIR")
-    return Path(p)
-
-
-# on-disk layout, centralized so a layout change touches one spot.
-def _facts_dir(project: Path) -> Path:
-    return project / "fact_graph" / "facts"
+    project = Path(p)
+    return require_v2_project(project) if project.is_dir() else project
 
 
 def _channel_file(project: Path, kind: str) -> Path:
@@ -81,67 +76,6 @@ def _channel_file(project: Path, kind: str) -> Path:
 
 def _spend_file(project: Path) -> Path:
     return project / "spend" / "consult.jsonl"
-
-
-# ------------------------------------------------------------------------- #
-# parsing (self-contained; never writes; tolerant of partial/malformed data) #
-# ------------------------------------------------------------------------- #
-
-_FM = re.compile(r"^---\s*\n(.*?)\n---\s*\n(.*)$", re.DOTALL)
-
-
-def _parse_fact(text: str) -> Dict[str, Any]:
-    """fact md = YAML-ish frontmatter (fact_id / problem_id / author /
-    predecessors) + ``## statement`` / ``## proof`` / ``## intuition`` sections."""
-    m = _FM.match(text)
-    fm: Dict[str, Any] = {}
-    body = text
-    if m:
-        body = m.group(2)
-        for line in m.group(1).splitlines():
-            if ":" not in line:
-                continue
-            k, v = line.split(":", 1)
-            k, v = k.strip(), v.strip()
-            if v.startswith("[") and v.endswith("]"):
-                inner = v[1:-1].strip()
-                fm[k] = [x.strip().strip("'\"") for x in inner.split(",") if x.strip()] if inner else []
-            else:
-                fm[k] = v
-    secs = {"statement": "", "proof": "", "intuition": ""}
-    cur: Optional[str] = None
-    for line in body.splitlines():
-        h = re.match(r"^##\s+(\w+)", line)
-        if h and h.group(1).lower() in secs:
-            cur = h.group(1).lower()
-            continue
-        if cur:
-            secs[cur] += line + "\n"
-    return {
-        "fact_id": fm.get("fact_id", ""),
-        "problem_id": fm.get("problem_id", ""),
-        "author": fm.get("author", ""),
-        "predecessors": fm.get("predecessors", []) or [],
-        "statement": secs["statement"].strip(),
-        "proof": secs["proof"].strip(),
-        "intuition": secs["intuition"].strip(),
-    }
-
-
-def _load_facts(project: Path) -> List[Dict[str, Any]]:
-    d = _facts_dir(project)
-    if not d.is_dir():
-        return []
-    out: List[Dict[str, Any]] = []
-    for f in sorted(d.glob("*.md")):
-        try:
-            fact = _parse_fact(f.read_text(encoding="utf-8"))
-        except OSError:
-            continue
-        if not fact["fact_id"]:
-            fact["fact_id"] = f.stem
-        out.append(fact)
-    return out
 
 
 def _load_jsonl(path: Path) -> List[Dict[str, Any]]:
@@ -175,27 +109,6 @@ def _load_spend(project: Path) -> List[Dict[str, Any]]:
     return _load_jsonl(_spend_file(project))
 
 
-def _depths(deps: Dict[str, List[str]]) -> Dict[str, int]:
-    """depth = longest path from a leaf (no-predecessor) node up to this one —
-    how many dependency layers a fact is built on. Leaves = 0. Cycle-guarded (a
-    content-addressed DAG shouldn't cycle, but the store may be mid-write)."""
-    depth: Dict[str, int] = {}
-
-    def get(fid: str, stack: frozenset) -> int:
-        if fid in depth:
-            return depth[fid]
-        if fid in stack:  # cycle guard
-            return 0
-        ps = deps.get(fid, [])
-        d = 0 if not ps else 1 + max(get(p, stack | {fid}) for p in ps)
-        depth[fid] = d
-        return d
-
-    for fid in deps:
-        get(fid, frozenset())
-    return depth
-
-
 # ------------------------------------------------------------------------- #
 # typed response models (the four /api/* payloads)                           #
 # ------------------------------------------------------------------------- #
@@ -210,28 +123,6 @@ class Overview(BaseModel):
     consult_count: int
     consult_cost_usd: float
     updated_at: float
-
-
-class GraphNode(BaseModel):
-    id: str
-    author: str
-    problem_id: str
-    statement: str
-    proof: str
-    intuition: str
-    predecessors: List[str]
-    depth: int
-
-
-class GraphEdge(BaseModel):
-    source: str
-    target: str
-
-
-class FactGraphResp(BaseModel):
-    nodes: List[GraphNode]
-    edges: List[GraphEdge]
-    max_depth: int
 
 
 class ChannelInfo(BaseModel):
@@ -255,17 +146,12 @@ class ChannelResp(BaseModel):
 # ------------------------------------------------------------------------- #
 
 def build_overview(project: Optional[Path] = None) -> Dict[str, Any]:
-    project = project or _project_dir()
+    project = require_v2_project(project or _project_dir())
     control = ControlStore(project)
-    indexed = control.enabled
-    if indexed:
-        control.scaffold()
-        with control._connect() as db:
-            facts = [dict(row) for row in db.execute("SELECT author FROM facts")]
-            linked = int(db.execute("SELECT COUNT(DISTINCT fact_id) FROM fact_edges").fetchone()[0])
-    else:
-        facts = _load_facts(project)
-        linked = sum(1 for fact in facts if fact["predecessors"])
+    control.scaffold()
+    with control._connect() as db:
+        facts = [dict(row) for row in db.execute("SELECT author FROM facts")]
+        linked = int(db.execute("SELECT COUNT(DISTINCT fact_id) FROM fact_edges").fetchone()[0])
     counts = {k: len(_load_channel(project, k)) for k, _ in CHANNELS}
     verdicts: Dict[str, int] = {}
     for e in _load_channel(project, "verification"):
@@ -289,26 +175,8 @@ def build_overview(project: Optional[Path] = None) -> Dict[str, Any]:
     }
 
 
-def build_factgraph(project: Optional[Path] = None) -> Dict[str, Any]:
-    project = project or _project_dir()
-    if ControlStore(project).enabled:
-        raise ValueError("v2 fact graphs require a bounded route, obligation, or neighborhood query")
-    facts = _load_facts(project)
-    ids = {f["fact_id"] for f in facts}
-    deps = {f["fact_id"]: [p for p in f["predecessors"] if p in ids] for f in facts}
-    depth = _depths(deps)
-    nodes = [{
-        "id": f["fact_id"], "author": f["author"], "problem_id": f["problem_id"],
-        "statement": f["statement"], "proof": f["proof"], "intuition": f["intuition"],
-        "predecessors": deps[f["fact_id"]],
-        "depth": depth.get(f["fact_id"], 0),
-    } for f in facts]
-    edges = [{"source": p, "target": f["fact_id"]} for f in facts for p in deps[f["fact_id"]]]
-    return {"nodes": nodes, "edges": edges, "max_depth": max(depth.values(), default=0)}
-
-
 def build_channels(project: Optional[Path] = None) -> Dict[str, Any]:
-    project = project or _project_dir()
+    project = require_v2_project(project or _project_dir())
     return {"channels": [{"kind": k, "role": r, "count": len(_load_channel(project, k))}
                          for k, r in CHANNELS]}
 
@@ -316,28 +184,22 @@ def build_channels(project: Optional[Path] = None) -> Dict[str, Any]:
 def build_channel(kind: str, project: Optional[Path] = None) -> Dict[str, Any]:
     if kind not in _CHANNEL_KINDS:
         raise KeyError(kind)
-    project = project or _project_dir()
+    project = require_v2_project(project or _project_dir())
     entries = _load_channel(project, kind)
     entries.sort(key=lambda e: e.get("timestamp_utc", ""), reverse=True)
     return {"kind": kind, "count": len(entries), "entries": entries}
 
 
 def build_control(project: Optional[Path] = None) -> Dict[str, Any]:
-    """Compatibility summary backed by the same v2 ResearchQuery as agents."""
-    project = project or _project_dir()
-    try:
-        meta = json.loads((project / "project.json").read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        meta = {}
-    if meta.get("control_version") != 2:
-        return {"enabled": False}
+    """Control summary backed by the same ResearchQuery as agents."""
+    project = require_v2_project(project or _project_dir())
     query = ResearchQuery(project)
     research = query.research_map()
     store = query.store
     assignments = [item for worker in [row["worker"] for row in _assignment_rows(store)] if (item := store.assignment(worker))]
     costs = store.events("cost")
     routes = [route for method in research["methods"] for route in method["routes"]]
-    return {"enabled": True, "generation": research["generation"],
+    return {"generation": research["generation"],
             "current_target": (research["active_target"] or {}).get("version"),
             "targets": research["targets"], "obligations": research.get("obligations", []),
             "routes": routes, "methods": research["methods"], "assignments": assignments,
@@ -393,14 +255,6 @@ async def no_store_dashboard_assets(request: Request, call_next):
 @app.get("/api/overview", response_model=Overview)
 def overview() -> JSONResponse:
     return JSONResponse(build_overview())
-
-
-@app.get("/api/factgraph", response_model=FactGraphResp)
-def factgraph() -> JSONResponse:
-    try:
-        return JSONResponse(build_factgraph())
-    except ValueError as exc:
-        raise HTTPException(410, str(exc)) from exc
 
 
 @app.get("/api/channels", response_model=ChannelsResp)

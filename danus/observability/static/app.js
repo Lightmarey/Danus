@@ -122,56 +122,16 @@ async function loadOverview() {
 
 // ---- fact graph (echarts) ------------------------------------------------ //
 let graphChart = null;
-let factById = {};
 let currentFactResearchMap = null;
-// importance = dependency depth (longest path from an axiom/leaf up to a fact).
-// Continuous shade: the deeper a fact, the darker — shallow=light, deep=dark.
-function depthColor(depth, maxDepth) {
-  const t = maxDepth > 0 ? Math.min(1, depth / maxDepth) : 0;
-  return `hsl(248, ${(50 + t * 26).toFixed(0)}%, ${(80 - t * 52).toFixed(0)}%)`;
-}
 async function loadGraph() {
   try {
-    const d = await api('/api/factgraph');
+    const d = await api('/api/research/map');
     connError(false);
-    factById = {}; d.nodes.forEach((n) => (factById[n.id] = n));
-    const maxD = d.max_depth || 1;
-    const nodes = d.nodes.map((n) => {
-      const dp = n.depth || 0;
-      return {
-        id: n.id, name: n.id.slice(0, 7),
-        symbolSize: 6 + Math.min(16, dp * 2.5),        // bigger = deeper, but capped small so circles don't overlap when zoomed out
-        itemStyle: { color: depthColor(dp, maxD) },
-        depth: dp, author: n.author,                   // no per-node label (would clutter)
-      };
-    });
-    const links = d.edges.map((e) => ({ source: e.source, target: e.target }));
-    if (!graphChart) graphChart = echarts.init($('#graph'));
-    graphChart.setOption({
-      tooltip: stableTooltip((p) => p.dataType === 'node'
-          ? `<b>${htmlEsc(p.data.id.slice(0, 10))}</b> · by ${htmlEsc(p.data.author)}<br/>dependency depth: ${p.data.depth} layer(s)<br/>${htmlEsc((factById[p.data.id] || {}).statement).slice(0, 100)}…`
-          : ''),
-      series: [{
-        type: 'graph', layout: 'force', roam: true, draggable: true,
-        force: { repulsion: 160, edgeLength: 80, gravity: 0.06 },
-        label: { show: false }, emphasis: { disabled:true },
-        lineStyle: { color: '#cbd5e1', width: 1, opacity: 0.55, curveness: 0.05 },
-        edgeSymbol: ['none', 'arrow'], edgeSymbolSize: 5,
-        data: nodes, links: links,
-      }],
-    });
-    graphChart.off('click');
-    graphChart.on('click', (p) => { if (p.dataType === 'node') showFact(p.data.id); });
-    $('#graph-stat').textContent = `${d.nodes.length} facts · ${d.edges.length} edges · max depth ${d.max_depth}`;
-    graphChart.resize();
+    controlGeneration = d.generation;
+    currentFactResearchMap = d;
+    renderFactResearchMap(d);
   } catch (e) {
     connErrorFrom(e);
-    if (e.status === 410) {
-      const d = await api('/api/research/map');
-      controlGeneration = d.generation;
-      currentFactResearchMap = d;
-      renderFactResearchMap(d);
-    }
   }
 }
 
@@ -399,11 +359,6 @@ async function selectFactGraphObligation(obligationId) {
   if (d.routes && d.routes.length === 1) await selectFactGraphRoute(d.routes[0].id);
   else renderFactGraphGroup(d.fact_group);
 }
-function showFact(id) {
-  const f = factById[id]; if (!f) return;
-  renderFactDetail(f, $('#fact-detail'), showFact);
-}
-
 // ---- global memory ------------------------------------------------------- //
 let memInit = false;
 // channels whose entries are long markdown (summary/strategy) — render full, no clamp.

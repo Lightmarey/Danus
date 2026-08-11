@@ -1,8 +1,7 @@
-"""danus.observability — the strictly read-only dashboard.
+"""Danus' local research console.
 
-A single self-contained FastAPI app that re-parses one project's on-disk stores
-(fact graph + global memory + optional spend ledger) and serves a one-page
-browser view. Imports no danus.core runtime module; only ever reads files.
+The console reads the shared SQLite research model and serves a one-page
+browser view. It never parses fact Markdown for graph or overview requests.
 
     python -m danus.observability --project <dir> [--port 8099]
 
@@ -16,7 +15,7 @@ from .app import (
     app,
     build_channel,
     build_channels,
-    build_factgraph,
+    build_control,
     build_overview,
     main,
 )
@@ -26,7 +25,7 @@ __all__ = [
     "main",
     "CHANNELS",
     "build_overview",
-    "build_factgraph",
+    "build_control",
     "build_channels",
     "build_channel",
 ]
