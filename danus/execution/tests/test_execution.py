@@ -136,9 +136,9 @@ def test_do_new_refuses_existing(tmp: Path):
             pass
 
 
-def test_do_new_v2_uses_compact_worker_contract(tmp_path: Path):
+def test_do_new_uses_compact_worker_contract(tmp_path: Path):
     with _project_env(tmp_path):
-        scaffold.do_new("V2", roles="high:1", control_version=2)
+        scaffold.do_new("V2", roles="high:1")
         agents = L.worker_dir("V2", "high") / "AGENTS.md"
         assert agents.resolve() == L.worker_v2_md().resolve()
 
@@ -168,16 +168,6 @@ def test_worker_start_refreshes_copied_assets(tmp: Path):
         assert (wl.dir / "AGENTS.md").read_text(encoding="utf-8") == "fresh"
         assert (copied_skills / "current.md").read_text(encoding="utf-8") == "fresh"
         assert not (copied_skills / "removed.md").exists()
-
-
-def test_worker_start_refreshes_v2_contract(tmp_path: Path):
-    with _project_env(tmp_path):
-        wl = L.WorkerLayout(tmp_path / "project" / "workers" / "high")
-        wl.dir.mkdir(parents=True)
-        (wl.dir / ".agents").mkdir()
-        (wl.dir / "AGENTS.md").write_text("stale", encoding="utf-8")
-        loop.refresh_worker_assets(wl, v2=True)
-        assert (wl.dir / "AGENTS.md").read_text(encoding="utf-8") == "# worker v2 contract (stub)\n"
 
 
 # --- loop helpers (pure) --------------------------------------------------- #

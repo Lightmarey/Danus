@@ -29,14 +29,14 @@ from pathlib import Path
 from typing import Dict, List, Optional
 
 from danus.execution import layout as L
-from danus.execution.scaffold import atomic_write, do_new, spawn_loop
+from danus.execution.scaffold import atomic_write, do_new, migrate_project, spawn_loop
 from danus import runtime
-from danus.control import ControlError, ControlStore
+from danus.control import ControlError, ControlStore, is_v2_project, require_v2_project
 from danus.control_service import ControlService
 
 __all__ = [
     "do_new", "do_assign", "do_start", "do_status", "worker_status",
-    "do_list", "do_stop", "do_finalize", "do_target", "do_obligation",
+    "do_list", "do_stop", "do_finalize", "do_migrate", "do_target", "do_obligation",
     "do_route", "do_control_rebuild", "do_control_taint", "build_parser", "main",
 ]
 
@@ -86,18 +86,20 @@ def do_assign(target: str, task: str, *, obligation: Optional[str] = None,
         raise SystemExit(f"no such worker: {project}/{worker}")
     if not task.strip():
         raise SystemExit("refusing to assign an empty task")
+    try:
+        require_v2_project(wl.project_dir)
+    except ControlError as exc:
+        raise SystemExit(str(exc)) from exc
+    if not obligation or not route:
+        raise SystemExit("assign requires --obligation and --route")
     control = ControlStore(wl.project_dir)
-    assignment = None
-    if control.enabled:
-        if not obligation or not route:
-            raise SystemExit("Danus v2 assign requires --obligation and --route")
-        try:
-            assignment = control.assign(
-                worker, obligation_id=obligation, route_id=route, task=task,
-                max_slices=max_slices, slice_timeout=slice_timeout,
-            )
-        except ControlError as exc:
-            raise SystemExit(f"cannot assign: {exc}") from exc
+    try:
+        assignment = control.assign(
+            worker, obligation_id=obligation, route_id=route, task=task,
+            max_slices=max_slices, slice_timeout=slice_timeout,
+        )
+    except ControlError as exc:
+        raise SystemExit(f"cannot assign: {exc}") from exc
     atomic_write(wl.task, task if task.endswith("\n") else task + "\n")
     return {"worker": f"{project}/{worker}", "task_file": str(wl.task),
             "assignment": assignment}
@@ -198,15 +200,35 @@ def do_start(target: str, stagger: float = 0.2) -> List[Dict]:
         if i and stagger:
             time.sleep(stagger)
         wl = L.WorkerLayout(wdir)
+        try:
+            require_v2_project(wl.project_dir)
+        except ControlError as exc:
+            raise SystemExit(str(exc)) from exc
         control = ControlStore(wl.project_dir)
-        if control.enabled:
-            try:
-                control.validate_assignment(wl.name)
-            except ControlError as exc:
-                out.append({"worker": wdir.name, "result": "waiting", "reason": str(exc)})
-                continue
+        try:
+            control.validate_assignment(wl.name)
+        except ControlError as exc:
+            out.append({"worker": wdir.name, "result": "waiting", "reason": str(exc)})
+            continue
         out.append({"worker": wdir.name, "result": _start_one(wl)})
     return out
+
+
+def do_migrate(project: str) -> Dict:
+    """Convert a stopped V1 project to V2 without inventing research state."""
+    pdir = L.project_dir(project)
+    if not pdir.is_dir():
+        raise SystemExit(f"no such project: {project}")
+    if not is_v2_project(pdir):
+        live = [
+            worker for worker in L.list_workers(project)
+            if _alive(_read_pid(L.WorkerLayout(L.worker_dir(project, worker))))
+        ]
+        if live:
+            raise SystemExit(
+                f"cannot migrate {project}: stop live workers first: {', '.join(live)}"
+            )
+    return migrate_project(project)
 
 
 # --------------------------------------------------------------------------- #
@@ -469,7 +491,9 @@ def build_parser() -> argparse.ArgumentParser:
     n.add_argument("--roles", default="high:3,xhigh:4", help="e.g. high:3,xhigh:4 (default)")
     n.add_argument("--model", default=None)
     n.add_argument("--problem", default=None, help="optional PROBLEM.md source for the v2 project")
-    n.add_argument("--legacy", action="store_true", help="explicitly create a legacy v1 project")
+
+    migrate = sub.add_parser("migrate", help="convert a stopped V1 project to V2")
+    migrate.add_argument("project")
 
     a = sub.add_parser("assign", help="write a worker's per-round TASK.md")
     a.add_argument("target", help="<project>/<worker>")
@@ -560,15 +584,16 @@ def main(argv: Optional[List[str]] = None) -> int:
         rows = do_list()
         print(json.dumps(rows, ensure_ascii=False, indent=2) if args.json else _fmt_list(rows))
     elif args.cmd == "new":
-        if args.legacy and args.problem:
-            raise SystemExit("new accepts either --problem (v2) or --legacy, not both")
         r = do_new(
             args.project, roles=args.roles, model=args.model,
             problem=Path(args.problem) if args.problem else None,
-            control_version=1 if args.legacy else 2,
         )
         print(f"created {args.project} with {len(r['workers'])} workers: "
               f"{', '.join(r['workers'])}\n  {r['project_dir']}")
+    elif args.cmd == "migrate":
+        r = do_migrate(args.project)
+        action = "migrated" if r["migrated"] else "already v2"
+        print(f"{args.project}: {action}; indexed {r['facts']} facts; generation {r['generation']}")
     elif args.cmd == "assign":
         r = do_assign(
             args.target, _task_from_args(args), obligation=args.obligation,

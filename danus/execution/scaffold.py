@@ -121,22 +121,14 @@ def worker_gateway_config_arg(wl: "L.WorkerLayout") -> str:
 # --------------------------------------------------------------------------- #
 
 def do_new(project: str, roles: str = "high:3,xhigh:4",
-           model: Optional[str] = None, *, problem: Optional[Path] = None,
-           control_version: Optional[int] = None) -> Dict:
+           model: Optional[str] = None, *, problem: Optional[Path] = None) -> Dict:
     """Scaffold a project dir + one worker home per role. Refuses to clobber an
     existing project dir (no silent overwrite of a live fact graph). Returns
     ``{"project_dir", "workers"}``."""
     pdir = L.project_dir(project)
     if pdir.exists():
         raise SystemExit(f"project already exists: {pdir} (pick another name or remove it)")
-    if control_version is None:
-        # Direct library callers retain the legacy fixture-friendly path; the
-        # public CLI always passes an explicit version and defaults new projects
-        # to v2.
-        control_version = 2 if problem is not None else 1
-    if control_version not in {1, 2}:
-        raise SystemExit(f"unsupported control version: {control_version}")
-    if control_version == 2 and problem is not None:
+    if problem is not None:
         if not Path(problem).is_file():
             raise SystemExit(f"problem file does not exist: {problem}")
         problem = Path(problem).resolve()
@@ -154,8 +146,7 @@ def do_new(project: str, roles: str = "high:3,xhigh:4",
         wl.logs.mkdir(exist_ok=True)
 
         # static contract + skills (symlinks stay in sync with the repo)
-        contract = L.worker_v2_md() if control_version == 2 else L.worker_md()
-        symlink(contract, wl.dir / "AGENTS.md")
+        symlink(L.worker_v2_md(), wl.dir / "AGENTS.md")
         (wl.dir / ".agents").mkdir(exist_ok=True)
         symlink(L.worker_skills_dir(), wl.dir / ".agents" / "skills")
 
@@ -168,15 +159,65 @@ def do_new(project: str, roles: str = "high:3,xhigh:4",
                      json.dumps({"worker": worker, "state": "created", "round": 0}, indent=2))
         created.append(worker)
 
-    meta = {"name": project, "model": model, "roles": roles, "workers": created}
-    if control_version == 2:
-        meta["control_version"] = 2
-        if problem is not None:
-            shutil.copyfile(problem, pdir / "PROBLEM.md")
-        from danus.control import ControlStore
-        ControlStore(pdir).scaffold()
+    meta = {
+        "name": project, "model": model, "roles": roles, "workers": created,
+        "control_version": 2,
+    }
+    if problem is not None:
+        shutil.copyfile(problem, pdir / "PROBLEM.md")
+    from danus.control import ControlStore
+    ControlStore(pdir).scaffold()
     atomic_write(pdir / "project.json", json.dumps(meta, ensure_ascii=False, indent=2))
-    return {"project_dir": str(pdir), "workers": created, "control_version": control_version}
+    return {"project_dir": str(pdir), "workers": created, "control_version": 2}
+
+
+def migrate_project(project: str) -> Dict:
+    """Index a V1 project's existing stores, then atomically mark it V2.
+
+    No target, route, obligation, or assignment is inferred. Existing facts and
+    global memory stay in place; the original project metadata is preserved in
+    the migration event. Runtime callers must check that workers are stopped
+    before calling this function.
+    """
+    pdir = L.project_dir(project)
+    meta_path = pdir / "project.json"
+    if not pdir.is_dir():
+        raise SystemExit(f"no such project: {project}")
+    try:
+        meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise SystemExit(f"cannot migrate {project}: invalid project.json: {exc}") from exc
+    if not isinstance(meta, dict):
+        raise SystemExit(f"cannot migrate {project}: project.json must be an object")
+    version = meta.get("control_version")
+    if version == 2:
+        from danus.control import ControlStore
+        store = ControlStore(pdir)
+        store.scaffold()
+        with store._connect() as db:
+            fact_count = int(db.execute("SELECT COUNT(*) FROM facts").fetchone()[0])
+        return {"project": project, "migrated": False, "facts": fact_count,
+                "generation": store.generation()}
+    if version not in (None, 1):
+        raise SystemExit(f"cannot migrate {project}: unsupported control_version {version!r}")
+
+    from danus.control import ControlStore
+    store = ControlStore(pdir)
+    store.scaffold()
+    if not store.events("project_migrated_from_v1"):
+        store.append_event(
+            "project_migrated_from_v1",
+            source_control_version=version or 1,
+            source_project_meta=meta,
+        )
+    migrated = dict(meta)
+    migrated["control_version"] = 2
+    migrated["migrated_from_control_version"] = version or 1
+    atomic_write(meta_path, json.dumps(migrated, ensure_ascii=False, indent=2))
+    with store._connect() as db:
+        fact_count = int(db.execute("SELECT COUNT(*) FROM facts").fetchone()[0])
+    return {"project": project, "migrated": True, "facts": fact_count,
+            "generation": store.generation()}
 
 
 # --------------------------------------------------------------------------- #

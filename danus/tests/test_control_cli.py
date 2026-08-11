@@ -6,6 +6,7 @@ from contextlib import contextmanager
 from pathlib import Path
 
 from danus.control import ControlStore
+from danus.core import FactGraph
 from danus.orchestration import cli
 
 
@@ -41,9 +42,7 @@ def test_v2_cli_lifecycle_requires_approved_bound_work(tmp_path: Path):
     problem = tmp_path / "problem.md"
     problem.write_text("Prove T.\n", encoding="utf-8")
     with _env(tmp_path):
-        result = cli.do_new(
-            "P", roles="high:1", problem=problem, control_version=2,
-        )
+        result = cli.do_new("P", roles="high:1", problem=problem)
         assert result["control_version"] == 2
         project = Path(result["project_dir"])
         assert (project / "PROBLEM.md").read_text() == "Prove T.\n"
@@ -66,22 +65,57 @@ def test_v2_cli_lifecycle_requires_approved_bound_work(tmp_path: Path):
         assert cli.do_status("P/high")[0]["control"]["route_id"] == "r1"
 
 
-def test_public_new_command_defaults_to_empty_v2_or_explicit_legacy(tmp_path: Path):
+def test_public_new_command_is_v2_only(tmp_path: Path):
     with _env(tmp_path):
         assert cli.main(["new", "P", "--roles", "high:1"]) == 0
         meta = json.loads((tmp_path / "projects" / "P" / "project.json").read_text())
         assert meta["control_version"] == 2
         assert cli.do_start("P/high")[0]["result"] == "waiting"
-        assert cli.main(["new", "legacy", "--roles", "high:1", "--legacy"]) == 0
-        meta = json.loads((tmp_path / "projects" / "legacy" / "project.json").read_text())
-        assert "control_version" not in meta
+        try:
+            cli.build_parser().parse_args(["new", "legacy", "--legacy"])
+            raise AssertionError("--legacy must not be accepted")
+        except SystemExit:
+            pass
+
+
+def test_v1_project_requires_explicit_lossless_migration(tmp_path: Path):
+    with _env(tmp_path):
+        project = tmp_path / "projects" / "old"
+        worker = project / "workers" / "high"
+        worker.mkdir(parents=True)
+        (worker / ".status.json").write_text("{}", encoding="utf-8")
+        (project / "project.json").write_text(json.dumps({
+            "name": "old", "model": "m", "roles": "high:1", "workers": ["high"],
+        }), encoding="utf-8")
+        fact_id = FactGraph(project).add(
+            problem_id="old", author="high", statement="Legacy theorem",
+            proof="Legacy proof", display_title="Legacy theorem",
+        )
+
+        try:
+            cli.do_start("old/high")
+            raise AssertionError("unmigrated projects must not start")
+        except SystemExit as exc:
+            assert "danus migrate old" in str(exc)
+
+        result = cli.do_migrate("old")
+        assert result["migrated"] is True and result["facts"] == 1
+        meta = json.loads((project / "project.json").read_text(encoding="utf-8"))
+        assert meta["control_version"] == 2
+        store = ControlStore(project)
+        assert store.target_versions() == []
+        assert store.events("project_migrated_from_v1")[0]["source_project_meta"]["name"] == "old"
+        with store._connect() as db:
+            assert db.execute("SELECT fact_id FROM facts WHERE fact_id=?", (fact_id,)).fetchone()
+        assert cli.do_start("old/high")[0]["result"] == "waiting"
+        assert cli.do_migrate("old")["migrated"] is False
 
 
 def test_target_change_stales_assignment_and_fallback_remains_draft(tmp_path: Path):
     problem = tmp_path / "problem.md"
     problem.write_text("Prove T.\n", encoding="utf-8")
     with _env(tmp_path):
-        result = cli.do_new("P", roles="high:1", problem=problem, control_version=2)
+        result = cli.do_new("P", roles="high:1", problem=problem)
         store = ControlStore(Path(result["project_dir"]))
         first = store.propose_target({
             "statement": "T", "allowed_assumptions": [], "forbidden_assumptions": [],

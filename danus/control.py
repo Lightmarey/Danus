@@ -1,9 +1,9 @@
 """Versioned research control for Danus v2 projects.
 
 The verified FactGraph remains the truth store.  This module adds the small,
-append-only control plane that binds work to an approved target, obligation,
-route, and finite exploration lease.  Projects without ``control_version=2``
-remain legacy projects and never enter this code path implicitly.
+transactional control plane that binds work to an approved target, obligation,
+route, and finite exploration lease. Projects without ``control_version=2``
+must be migrated before any runtime entry point will use them.
 """
 
 from __future__ import annotations
@@ -77,6 +77,17 @@ def is_v2_project(project_dir: Path) -> bool:
         return json.loads(meta.read_text(encoding="utf-8")).get("control_version") == CONTROL_VERSION
     except (OSError, json.JSONDecodeError, AttributeError):
         return False
+
+
+def require_v2_project(project_dir: Path) -> Path:
+    """Reject an unmigrated project instead of silently running V1 semantics."""
+    project = Path(project_dir)
+    if not is_v2_project(project):
+        raise ControlError(
+            f"project {project.name!r} requires migration; run "
+            f"`danus migrate {project.name}` before using it"
+        )
+    return project
 
 
 class ControlStore:
