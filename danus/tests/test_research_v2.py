@@ -191,6 +191,11 @@ def test_browser_view_state_has_no_persistent_or_write_path():
     assert "function renderFactResearchMap(d)" in script
     assert "selectFactGraphRoute" in script
     assert "function renderResearchMap(d)" in script
+    assert "function layerFactNodes(facts, edges)" in script
+    assert "layout:'none'" in script
+    assert "focus:'adjacency'" not in script
+    assert "function factSection(title, text, open = false)" in script
+    assert "el('details', 'fact-section')" in script
     assert "Show all routes" in (Path(observability_app.__file__).parent / "static" / "index.html").read_text(encoding="utf-8")
 
 

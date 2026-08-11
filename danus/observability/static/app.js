@@ -4,6 +4,7 @@
 const $ = (s) => document.querySelector(s);
 const el = (tag, cls, txt) => { const e = document.createElement(tag); if (cls) e.className = cls; if (txt != null) e.textContent = txt; return e; };
 const esc = (s) => (s == null ? '' : String(s));
+const htmlEsc = (s) => esc(s).replace(/[&<>"']/g, (c) => ({ '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;' }[c]));
 
 let controlToken = '';
 if (location.hash.startsWith('#control-token=')) {
@@ -147,15 +148,13 @@ async function loadGraph() {
     const links = d.edges.map((e) => ({ source: e.source, target: e.target }));
     if (!graphChart) graphChart = echarts.init($('#graph'));
     graphChart.setOption({
-      tooltip: {
-        formatter: (p) => p.dataType === 'node'
-          ? `<b>${p.data.id.slice(0, 10)}</b> · by ${p.data.author}<br/>dependency depth: ${p.data.depth} layer(s)<br/>${esc((factById[p.data.id] || {}).statement).slice(0, 100)}…`
-          : '',
-      },
+      tooltip: stableTooltip((p) => p.dataType === 'node'
+          ? `<b>${htmlEsc(p.data.id.slice(0, 10))}</b> · by ${htmlEsc(p.data.author)}<br/>dependency depth: ${p.data.depth} layer(s)<br/>${htmlEsc((factById[p.data.id] || {}).statement).slice(0, 100)}…`
+          : ''),
       series: [{
         type: 'graph', layout: 'force', roam: true, draggable: true,
         force: { repulsion: 160, edgeLength: 80, gravity: 0.06 },
-        label: { show: false }, emphasis: { focus: 'adjacency', label: { show: false } },
+        label: { show: false }, emphasis: { disabled:true },
         lineStyle: { color: '#cbd5e1', width: 1, opacity: 0.55, curveness: 0.05 },
         edgeSymbol: ['none', 'arrow'], edgeSymbolSize: 5,
         data: nodes, links: links,
@@ -176,6 +175,123 @@ async function loadGraph() {
   }
 }
 
+function stableTooltip(formatter) {
+  return { trigger:'item', confine:true, enterable:false, transitionDuration:0, formatter };
+}
+
+function shortLabel(text, limit = 18) {
+  text = esc(text).replace(/^v\d+-/, '').replace(/[-_]/g, ' ');
+  return text.length > limit ? `${text.slice(0, limit - 1)}…` : text;
+}
+
+function readableFactTitle(fact) {
+  const raw = esc(fact.title).trim();
+  const statement = esc(fact.statement).trim();
+  const titleIsStatementPrefix = raw.length >= 60 && statement.startsWith(raw.replace(/…$/, ''));
+  if (raw && raw.length <= 120 && !titleIsStatementPrefix) return raw;
+  const conclusion = statement.match(/\b(?:Thus|Therefore|Hence)\b[^.!?]{18,140}[.!?]?/i);
+  return conclusion ? conclusion[0] : shortLabel(raw || fact.statement || `Fact ${fact.fact_id || fact.id}`, 96);
+}
+
+function layerFactNodes(facts, edges) {
+  const byId = new Map(facts.map((fact) => [fact.fact_id, fact]));
+  const predecessors = new Map(facts.map((fact) => [fact.fact_id, []]));
+  for (const edge of edges) {
+    if (byId.has(edge.source) && byId.has(edge.target)) predecessors.get(edge.target).push(edge.source);
+  }
+  const closing = facts.filter((fact) => fact.role === 'closing').map((fact) => fact.fact_id);
+  const sources = new Set(edges.map((edge) => edge.source));
+  const roots = closing.length ? closing : facts.filter((fact) => !sources.has(fact.fact_id)).map((fact) => fact.fact_id);
+  const levels = new Map(roots.map((id) => [id, 0]));
+  const queue = [...roots];
+  while (queue.length) {
+    const target = queue.shift();
+    const nextLevel = levels.get(target) + 1;
+    for (const predecessor of predecessors.get(target) || []) {
+      if (!levels.has(predecessor) || nextLevel < levels.get(predecessor)) {
+        levels.set(predecessor, nextLevel);
+        queue.push(predecessor);
+      }
+    }
+  }
+  const lastLevel = Math.max(0, ...levels.values()) + 1;
+  facts.forEach((fact) => { if (!levels.has(fact.fact_id)) levels.set(fact.fact_id, lastLevel); });
+  const rows = new Map();
+  facts.forEach((fact) => {
+    const level = levels.get(fact.fact_id);
+    if (!rows.has(level)) rows.set(level, []);
+    rows.get(level).push(fact);
+  });
+  const positions = new Map();
+  [...rows.entries()].sort((a, b) => a[0] - b[0]).forEach(([level, row]) => {
+    row.sort((a, b) => esc(a.title).localeCompare(esc(b.title)));
+    row.forEach((fact, index) => positions.set(fact.fact_id, {
+      x:(index + 1) * 1000 / (row.length + 1), y:50 + level * 170,
+    }));
+  });
+  return positions;
+}
+
+function factSection(title, text, open = false) {
+  if (!text) return null;
+  const section = el('details', 'fact-section');
+  section.open = open;
+  section.appendChild(el('summary', 'fact-section-title', title));
+  const body = el('div', 'fact-section-body');
+  mdmath(body, text);
+  section.appendChild(body);
+  return section;
+}
+
+function renderFactDetail(fact, detail, navigate, allowPin = false) {
+  detail.innerHTML = '';
+  const card = el('article', 'fact-card' + (viewPins.has(fact.fact_id || fact.id) ? ' pinned' : ''));
+  const title = readableFactTitle(fact);
+  card.appendChild(el('h2', 'fact-title', title));
+  card.appendChild(el('div', 'fid', fact.fact_id || fact.id));
+  const meta = el('div', 'fact-meta');
+  if (fact.role) meta.appendChild(el('span', 'tag', fact.role));
+  if (fact.shared) meta.appendChild(el('span', 'tag', 'shared'));
+  if (fact.author) meta.appendChild(el('span', 'tag', fact.author));
+  if (fact.problem_id) meta.appendChild(el('span', 'tag', fact.problem_id));
+  if (meta.childNodes.length) card.appendChild(meta);
+  const statement = factSection('Statement', fact.statement, true);
+  const intuition = factSection('Intuition', fact.intuition, false);
+  const proof = factSection('Proof', fact.proof, false);
+  if (statement) card.appendChild(statement);
+  if (intuition) card.appendChild(intuition);
+  if (proof) card.appendChild(proof);
+  const relations = [
+    ['Predecessors', fact.predecessors || []],
+    ['Successors', fact.successors || []],
+  ];
+  for (const [label, ids] of relations) {
+    if (!ids.length) continue;
+    const section = el('details', 'fact-section');
+    section.appendChild(el('summary', 'fact-section-title', `${label} (${ids.length})`));
+    const wrap = el('div', 'relation-list');
+    ids.forEach((id) => {
+      const button = el('button', 'relation-link', id.slice(0, 12));
+      button.onclick = () => navigate(id);
+      wrap.appendChild(button);
+    });
+    section.appendChild(wrap);
+    card.appendChild(section);
+  }
+  if (fact.scopes && fact.scopes.length) {
+    const scopes = el('div', 'fact-scopes');
+    fact.scopes.forEach((scope) => scopes.appendChild(el('span', 'tag', scope.role || scope.scope_type || 'scope')));
+    card.appendChild(scopes);
+  }
+  if (allowPin) {
+    const factId = fact.fact_id || fact.id;
+    const pin = el('button', 'pin-button', viewPins.has(factId) ? 'Unpin from view' : 'Pin in view');
+    pin.onclick = () => { viewPins.has(factId) ? viewPins.delete(factId) : viewPins.add(factId); renderFactDetail(fact, detail, navigate, true); };
+    card.appendChild(pin);
+  }
+  detail.appendChild(card);
+}
+
 function renderFactResearchMap(d) {
   const map = researchHierarchy(d);
   if (!graphChart) graphChart = echarts.init($('#graph'));
@@ -192,11 +308,19 @@ function renderFactResearchMap(d) {
 function renderFactGraphGroup(group) {
   const facts = group.facts || [];
   const ids = new Set(facts.map((fact) => fact.fact_id));
-  graphChart.setOption({ tooltip:{formatter:(p)=>p.data.title || p.data.name}, series:[{type:'graph',layout:'force',roam:true,
-    force:{repulsion:170,edgeLength:75,gravity:.05},label:{show:true,position:'right',formatter:(p)=>p.data.title.slice(0,32)},
-    data:facts.map((fact)=>({id:fact.fact_id,name:fact.fact_id,title:fact.title,kind:'fact',symbolSize:fact.role==='closing'?19:11,
-      itemStyle:{color:fact.role==='closing'?'#16a34a':fact.role==='support'?'#94a3b8':'#6366f1'}})),
-    links:(group.edges||[]).filter((edge)=>ids.has(edge.source)&&ids.has(edge.target)),lineStyle:{color:'#cbd5e1'},emphasis:{focus:'adjacency'}}] }, true);
+  const links = (group.edges||[]).filter((edge)=>ids.has(edge.source)&&ids.has(edge.target));
+  const positions = layerFactNodes(facts, links);
+  graphChart.setOption({
+    tooltip:stableTooltip((p)=>p.dataType === 'node'
+      ? `<b>${htmlEsc(p.data.title)}</b><br>${htmlEsc(p.data.role)}${p.data.shared ? ' · shared' : ''}` : ''),
+    series:[{type:'graph',layout:'none',roam:true,
+      label:{show:true,position:'bottom',distance:7,formatter:(p)=>shortLabel(p.data.title,22)},
+      data:facts.map((fact)=>({id:fact.fact_id,name:fact.fact_id,title:readableFactTitle(fact),role:fact.role,shared:fact.shared,kind:'fact',
+        ...positions.get(fact.fact_id),symbolSize:fact.role==='closing'?21:fact.role==='direct'?16:12,
+        label:{show:fact.role!=='support'},itemStyle:{color:fact.role==='closing'?'#16a34a':fact.role==='support'?'#94a3b8':'#6366f1'}})),
+      links,lineStyle:{color:'#b8c2d1',width:1.2,opacity:.72},edgeSymbol:['none','arrow'],edgeSymbolSize:[0,6],
+      emphasis:{disabled:true},select:{disabled:true}}]
+  }, true);
   graphChart.off('click');
   graphChart.on('click', (p) => { if (p.data.kind === 'fact') showResearchFact(p.data.id, '#fact-detail'); });
   $('#graph-stat').textContent = `${facts.length} facts · ${group.unexpanded_count || 0} unexpanded`;
@@ -213,19 +337,7 @@ async function selectFactGraphObligation(obligationId) {
 }
 function showFact(id) {
   const f = factById[id]; if (!f) return;
-  const d = $('#fact-detail'); d.innerHTML = '';
-  d.appendChild(el('div', 'fid', f.id));
-  if (f.author || f.problem_id) d.appendChild(el('div', 'muted', `${f.author || '?'} · ${f.problem_id || ''}`));
-  const addSec = (h, txt) => { if (!txt) return; d.appendChild(el('div', 'sec-h', h)); const m = el('div', 'math'); mdmath(m, txt); d.appendChild(m); };
-  addSec('Statement', f.statement);
-  addSec('Proof', f.proof);
-  addSec('Intuition', f.intuition);
-  if (f.predecessors.length) {
-    d.appendChild(el('div', 'sec-h', `Predecessors (${f.predecessors.length})`));
-    const wrap = el('div');
-    f.predecessors.forEach((p) => { const a = el('span', 'pred-link', p.slice(0, 10)); a.onclick = () => showFact(p); wrap.appendChild(a); });
-    d.appendChild(wrap);
-  }
+  renderFactDetail(f, $('#fact-detail'), showFact);
 }
 
 // ---- global memory ------------------------------------------------------- //
@@ -343,13 +455,31 @@ function researchHierarchy(d) {
       }
     });
   });
+  const byId = new Map(nodes.map((node) => [node.id, node]));
+  const routeNodes = nodes.filter((node) => node.kind === 'route');
+  routeNodes.forEach((node, index) => Object.assign(node, { x:(index + 1) * 1000 / (routeNodes.length + 1), y:350 }));
+  nodes.filter((node) => node.kind === 'obligation').forEach((node) => {
+    const routeLink = links.find((link) => link.target === node.id && byId.get(link.source)?.kind === 'route');
+    Object.assign(node, { x:routeLink ? byId.get(routeLink.source).x : 500, y:550 });
+  });
+  nodes.filter((node) => node.kind === 'method').forEach((node) => {
+    const children = links.filter((link) => link.source === node.id && byId.get(link.target)?.kind === 'route').map((link) => byId.get(link.target));
+    Object.assign(node, { x:children.length ? children.reduce((sum, child) => sum + child.x, 0) / children.length : 500, y:170 });
+  });
+  Object.assign(byId.get(targetId), { x:500, y:20 });
   return { nodes, links, stat:`${d.methods.length} methods · ${d.methods.reduce((n,m)=>n+m.routes.length,0)} routes · ${d.obligations.length} obligations` };
 }
 
 function researchHierarchyOption(map) {
-  return { tooltip:{formatter:(p)=>p.data.title || p.data.name}, series:[{type:'graph',layout:'force',roam:true,
-    force:{repulsion:220,edgeLength:95,gravity:.05},label:{show:true,position:'right',formatter:(p)=>p.data.name.slice(0,36)},
-    data:map.nodes,links:map.links,lineStyle:{color:'#cbd5e1'},emphasis:{focus:'adjacency'}}] };
+  return {
+    tooltip:stableTooltip((p)=>p.dataType === 'node'
+      ? `<b>${htmlEsc(p.data.title || p.data.name)}</b><br>${htmlEsc(p.data.kind)}` : ''),
+    series:[{type:'graph',layout:'none',roam:true,
+      label:{show:true,position:'bottom',distance:8,formatter:(p)=>p.data.kind === 'target'
+        ? p.data.name : shortLabel(p.data.kind === 'method' ? p.data.name : p.data.id.split(':').slice(1).join(':'), p.data.kind === 'method' ? 14 : 18)},
+      data:map.nodes,links:map.links,lineStyle:{color:'#aeb9c9',width:1.4,opacity:.82},
+      edgeSymbol:['none','arrow'],edgeSymbolSize:[0,6],emphasis:{disabled:true},select:{disabled:true}}]
+  };
 }
 
 function renderResearchMap(d) {
@@ -367,16 +497,20 @@ function renderResearchMap(d) {
 function renderFactGraph(group) {
   const facts = group.facts || [];
   const nodeById = Object.fromEntries(facts.map((fact) => [fact.fact_id, fact]));
+  const links = (group.edges || []).filter((edge) => nodeById[edge.source] && nodeById[edge.target]);
+  const positions = layerFactNodes(facts, links);
   if (!routeChart) routeChart = echarts.init($('#route-graph'));
   routeChart.setOption({
-    tooltip: { formatter: (p) => p.dataType === 'node' ? `${esc(p.data.title)}<br>${p.data.role}${p.data.shared ? ' · shared' : ''}` : '' },
-    series: [{ type:'graph', layout:'force', roam:true, force:{repulsion:170,edgeLength:75,gravity:.05},
-      label:{show:true,position:'right',formatter:(p)=>p.data.title.slice(0,32)},
-      data:facts.map((fact) => ({ id:fact.fact_id, name:fact.fact_id, title:fact.title, role:fact.role, shared:fact.shared,
+    tooltip:stableTooltip((p) => p.dataType === 'node'
+      ? `<b>${htmlEsc(p.data.title)}</b><br>${htmlEsc(p.data.role)}${p.data.shared ? ' · shared' : ''}` : ''),
+    series: [{ type:'graph', layout:'none', roam:true,
+      label:{show:true,position:'bottom',distance:7,formatter:(p)=>shortLabel(p.data.title,22)},
+      data:facts.map((fact) => ({ id:fact.fact_id, name:fact.fact_id, title:readableFactTitle(fact), role:fact.role, shared:fact.shared,
+        ...positions.get(fact.fact_id), label:{show:fact.role !== 'support'},
         symbolSize:fact.role === 'closing' ? 19 : fact.role === 'direct' ? 15 : 11,
         itemStyle:{color:viewPins.has(fact.fact_id) ? '#ef7f1a' : fact.role === 'closing' ? '#16a34a' : fact.role === 'support' ? '#94a3b8' : '#6366f1'} })),
-      links:(group.edges || []).filter((edge) => nodeById[edge.source] && nodeById[edge.target]),
-      lineStyle:{color:'#cbd5e1'}, emphasis:{focus:'adjacency'} }]
+      links,lineStyle:{color:'#b8c2d1',width:1.2,opacity:.72},edgeSymbol:['none','arrow'],edgeSymbolSize:[0,6],
+      emphasis:{disabled:true},select:{disabled:true} }]
   }, true);
   routeChart.off('click');
   routeChart.on('click', (p) => { if (p.dataType === 'node') showResearchFact(p.data.id); });
@@ -386,15 +520,8 @@ function renderFactGraph(group) {
 async function showResearchFact(factId, detailSelector = '#research-detail') {
   const detail = $(detailSelector); detail.innerHTML = '<div class="empty">loading…</div>';
   try {
-    const fact = await api(`/api/research/facts/${factId}?include_proof=true`); detail.innerHTML = '';
-    const card = el('div', 'entry' + (viewPins.has(factId) ? ' pinned' : ''));
-    card.appendChild(el('div', 'entry-author', fact.title));
-    card.appendChild(el('div', 'tag fid', fact.fact_id));
-    const statement = el('div', 'entry-claim'); mdmath(statement, fact.statement); card.appendChild(statement);
-    const proof = el('div', 'entry-evidence'); mdmath(proof, fact.proof); card.appendChild(proof);
-    const pin = el('button', '', viewPins.has(factId) ? 'Unpin from view' : 'Pin in view');
-    pin.onclick = () => { viewPins.has(factId) ? viewPins.delete(factId) : viewPins.add(factId); showResearchFact(factId, detailSelector); };
-    card.appendChild(pin); detail.appendChild(card);
+    const fact = await api(`/api/research/facts/${factId}?include_proof=true`);
+    renderFactDetail(fact, detail, (id) => showResearchFact(id, detailSelector), detailSelector === '#research-detail');
   } catch (e) { detail.innerHTML = `<div class="empty">${esc(e.message)}</div>`; }
 }
 
