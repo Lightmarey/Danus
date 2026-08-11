@@ -167,11 +167,7 @@ async function loadGraph() {
   } catch (e) {
     connErrorFrom(e);
     if (e.status === 410) {
-      $('#graph-stat').textContent = 'V2 uses bounded route and obligation graphs.';
-      const graph = $('#graph'); graph.innerHTML = '';
-      graph.appendChild(el('div', 'empty', 'The all-facts graph is disabled for V2. Select a route or obligation in Research Control.'));
-      const open = el('button', '', 'Open Research Control'); open.onclick = () => switchTab('control');
-      graph.appendChild(open);
+      switchTab('control');
     }
   }
 }
@@ -248,6 +244,7 @@ async function loadChannel(kind) {
 const viewPins = new Set(); // deliberately ephemeral and never sent to the server
 let routeChart = null;
 let controlGeneration = 0;
+let currentResearchMap = null;
 
 async function controlPost(path, body) {
   if (!controlToken) throw new Error('This page has no control capability token. Reopen the launch URL.');
@@ -283,6 +280,39 @@ function governanceCard(target) {
   }
   if (actions.childNodes.length) card.appendChild(actions);
   return card;
+}
+
+function renderResearchMap(d) {
+  const nodes = [];
+  const links = [];
+  const obligations = new Set();
+  const targetId = `target:${d.active_target ? d.active_target.version : 'none'}`;
+  nodes.push({ id:targetId, name:d.active_target ? d.active_target.version : 'No active target', kind:'target', symbolSize:26, itemStyle:{color:'#0f766e'} });
+  d.methods.forEach((method) => {
+    const methodId = `method:${method.method_key}`;
+    nodes.push({ id:methodId, name:method.method_title, kind:'method', symbolSize:21, itemStyle:{color:'#7c3aed'} });
+    links.push({ source:targetId, target:methodId });
+    method.routes.forEach((route) => {
+      const routeId = `route:${route.id}`;
+      const obligationId = `obligation:${route.obligation_id}`;
+      nodes.push({ id:routeId, name:route.id, title:route.method_title, kind:'route', routeId:route.id, symbolSize:17, itemStyle:{color:'#2563eb'} });
+      links.push({ source:methodId, target:routeId }, { source:routeId, target:obligationId });
+      if (!obligations.has(route.obligation_id)) {
+        obligations.add(route.obligation_id);
+        nodes.push({ id:obligationId, name:route.obligation_id, kind:'obligation', obligationId:route.obligation_id, symbolSize:14, itemStyle:{color:'#d97706'} });
+      }
+    });
+  });
+  if (!routeChart) routeChart = echarts.init($('#route-graph'));
+  routeChart.setOption({ tooltip:{formatter:(p)=>p.data.title || p.data.name}, series:[{type:'graph',layout:'force',roam:true,
+    force:{repulsion:220,edgeLength:95,gravity:.05},label:{show:true,position:'right',formatter:(p)=>p.data.name.slice(0,36)},
+    data:nodes,links:links,lineStyle:{color:'#cbd5e1'},emphasis:{focus:'adjacency'}}] }, true);
+  routeChart.off('click');
+  routeChart.on('click', async (p) => {
+    if (p.data.kind === 'route') await selectRoute(p.data.routeId);
+    if (p.data.kind === 'obligation') await selectObligation(p.data.obligationId);
+  });
+  $('#route-stat').textContent = `${d.methods.length} methods · ${d.methods.reduce((n,m)=>n+m.routes.length,0)} routes · ${d.obligations.length} obligations`;
 }
 
 function renderFactGraph(group) {
@@ -335,6 +365,13 @@ async function selectRoute(routeId) {
   } catch (e) { connErrorFrom(e); }
 }
 
+async function selectObligation(obligationId) {
+  try {
+    const d = await api(`/api/research/obligations/${obligationId}?snapshot=${controlGeneration}`);
+    renderFactGraph(d.fact_group);
+  } catch (e) { connErrorFrom(e); }
+}
+
 async function loadManifests() {
   const box = $('#context-manifests'); box.innerHTML = '';
   try {
@@ -367,11 +404,14 @@ async function loadControl() {
     const targets=$('#control-targets'); targets.innerHTML=''; d.targets.forEach((t)=>targets.appendChild(governanceCard(t)));
     const methods=$('#control-methods'); methods.innerHTML='';
     d.methods.forEach((method)=>{ const group=el('div','entry'); group.appendChild(el('div','entry-author',method.method_title)); method.routes.forEach((r)=>{ const row=el('div','entry-evidence clickable',`${r.id} · ${r.state} · ${r.obligation_id}`); row.onclick=()=>selectRoute(r.id); group.appendChild(row); }); methods.appendChild(group); });
-    const obligations=$('#control-obligations'); obligations.innerHTML=''; d.obligations.forEach((o)=>{ const row=el('div','entry clickable'); row.appendChild(el('div','entry-author',o.id)); row.appendChild(el('span','tag',o.state)); row.appendChild(el('div','entry-claim',o.statement)); row.onclick=async()=>{ const x=await api(`/api/research/obligations/${o.id}?snapshot=${controlGeneration}`); renderFactGraph(x.fact_group); }; obligations.appendChild(row); });
+    const obligations=$('#control-obligations'); obligations.innerHTML=''; d.obligations.forEach((o)=>{ const row=el('div','entry clickable'); row.appendChild(el('div','entry-author',o.id)); row.appendChild(el('span','tag',o.state)); row.appendChild(el('div','entry-claim',o.statement)); row.onclick=()=>selectObligation(o.id); obligations.appendChild(row); });
     await loadManifests();
+    currentResearchMap = d;
+    renderResearchMap(d);
   } catch (e) { connErrorFrom(e); }
 }
 $('#clear-pins').onclick = () => { viewPins.clear(); $('#research-detail').innerHTML='<div class="empty">View pins cleared.</div>'; };
+$('#show-research-map').onclick = () => { if (currentResearchMap) renderResearchMap(currentResearchMap); };
 
 // ---- init + polling ------------------------------------------------------ //
 loadOverview();
