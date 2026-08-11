@@ -54,7 +54,7 @@ new state:
 2. **Consult** — send that to a strong model. *(the `consult` skill; `gpt_pro`
    by default, `claude_api`, `claude_code`, or `off`)*
 3. **Assign** — record the reply as `master_guidance` and give each worker its
-   per-round task (`danus assign`).
+   route-bound assignment (`danus assign`).
 4. **Monitor** — watch `danus status` / the dashboard; repeat when there is new
    state.
 
@@ -67,17 +67,17 @@ For unattended worker operation see `operations.md`.
 
 `danus start <p>` launches only workers with a valid assignment. A v2 worker reads
 its approved target, obligation, route, `TASK.md`, and `master_guidance`, works one
-structured exploration slice, and submits results via
+structured exploration round, and submits results via
 `fact_submit` — which the **verifier** gates. A submission becomes a **fact** only
 on a `correct` verdict; every verdict is traced to global memory either way.
 
 Two consecutive low-information checkpoints trigger a fresh route audit; only a
 third low-gain audit stalls the route. Validated exploratory evidence can renew a
-lease without already being a theorem. See [research-control-v2.md](research-control-v2.md).
+round budget without already being a theorem. See [research-control-v2.md](research-control-v2.md).
 Search results are summaries, not bulk fact/proof loads: the worker expands a
 selected fact with `fact_get` only when the route needs its proof. `danus stop`
-also interrupts an active v2 slice promptly and records whatever usage was
-available, rather than waiting up to the full slice timeout.
+also interrupts an active round promptly and records whatever usage was
+available, rather than waiting up to the full round timeout.
 
 Monitor with:
 
@@ -125,7 +125,7 @@ without one.
   result can be written up while the swarm keeps exploring the rest; the main agent
   **asks you** whether to stop exploration first.
 - A project can hold **multiple papers** (one theorem each, or several theorems per
-  paper) via a `paper_id`; the default paper uses the legacy `<project>/paper/`
+  paper) via a `paper_id`; the default paper uses `<project>/paper/`
   workspace.
 - The pipeline drafts, compiles (a hard gate), audits + verifies citations online,
   and re-verifies the whole paper as written through a dedicated paper-math

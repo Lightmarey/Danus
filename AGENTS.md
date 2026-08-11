@@ -27,11 +27,12 @@ Respect the fact-graph boundary:
 - The main agent never submits facts or edits truth stores by hand.
 - Workers alone call `fact_submit`; the verifier is the sole correctness
   authority.
-- Read V2 state through `research_map`, scoped route/obligation context, and
-  `fact_get`; use `fact_search` for targeted indexed lookup and as the V1
-  compatibility path. Never reconstruct V2 state from worker-local memory or a
+- Read research state through `research_map`, scoped route/obligation context,
+  and `fact_get`; use `fact_search` for targeted indexed lookup. Never
+  reconstruct state from worker-local memory or a
   raw directory scan. Write strategy through `gm_add`; use `fact_revoke` only
-  with operator approval (V2 taints and pauses dependencies; V1 cascades).
+  with operator approval; it taints the fact and pauses dependencies without
+  deleting mathematical truth.
 - Stop a project when every target is verified and the route is credible.
   Finalizing a result as the answer remains an operator decision.
 

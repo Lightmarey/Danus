@@ -97,25 +97,22 @@ defaults apply everywhere; per-service overrides win.
 | `DANUS_RUNTIME` | `<repo>/runtime` | the whole self-contained runtime |
 | `DANUS_AGENTS_ROOT` | `runtime/projects` | where `danus new` puts projects |
 | `VERIFIER_RESULTS_DIR` | `runtime/verify-runs` | per-verification run logs |
-| `DANUS_PY` | current uv Python (legacy wrappers fall back to `python`) | the engine's Python |
+| `DANUS_PY` | current uv Python | the engine's Python |
 
-## Worker loop pacing (optional; engine defaults are sane)
+## Worker round pacing and limits
 
 | variable | default | meaning |
 |---|---|---|
-| `DANUS_ROUND_HARD_TIMEOUT` | `14400` (4h) | per-round wall-clock cap |
-| `DANUS_MAX_ROUNDS` | `0` (unlimited) | round backstop |
-| `DANUS_MAX_CONSEC_FAILURES` | `5` | bail after N consecutive failed rounds |
-| `DANUS_ROUND_BEAT` | `5` | seconds between rounds |
+| `DANUS_ROUND_BEAT` | `5` | seconds between structured rounds |
 
-Those variables govern legacy loops. V2 slice timeout and route limits are stored
-on each structured assignment (`--slice-timeout`, `--max-slices`). Optional
+Round timeout and route limits are stored on each structured assignment
+(`--round-timeout`, `--max-rounds`); there are no environment-variable
+overrides or unlimited-loop mode. Optional
 `TargetContract.budget` limits total wall time and/or USD cost. When the Codex
 backend exposes token usage, `DANUS_CODEX_PRICE_IN` and
 `DANUS_CODEX_PRICE_OUT` give per-million-token rates for cost attribution.
-Legacy rounds also request Codex JSON event logs so input/cached/output usage can
-be measured for diagnostics, but v1 still has no control database or project
-budget enforcement.
+Every round requests Codex JSON event logs so input/cached/output usage can be
+measured and settled against the project budget.
 
 V2 resilience defaults also live in the target's `budget` object, so every
 worker and restart observes the same values:
@@ -129,7 +126,7 @@ worker and restart observes the same values:
 | `max_call_cost_usd` | unset | conservative per-call USD reservation used by strict cost control |
 
 Infrastructure attempts count toward real project wall/cost totals but never
-consume route slices or low-gain checkpoints. Missing provider usage is stored
+consume route rounds or low-gain checkpoints. Missing provider usage is stored
 as unknown cost, not zero cost. A provider/account hard spending limit remains
 necessary for a strict external USD ceiling because a disconnected request may
 not return a billing receipt.
@@ -140,11 +137,11 @@ in the 70/85/100% thresholds, so concurrent callers cannot all pass a stale
 budget check. Completion atomically replaces the reservation with the real
 `CostEvent`; a crashed process leaves a conservative reservation that expires
 after the hard timeout plus a short cleanup grace period.
-Verifier calls nested inside a worker slice reuse the parent's wall reservation,
+Verifier calls nested inside a worker round reuse the parent's wall reservation,
 so elapsed wall time is not double-counted; their token and USD cost are still
-attributed separately. A graceful `danus stop` polls active v2 slices, cancels
+attributed separately. A graceful `danus stop` polls active rounds, cancels
 the child promptly, and records partial or unavailable usage without decrementing
-the route lease.
+the route round budget.
 If a strict USD reservation was configured but the provider returns no usage or
 cost receipt, settlement consumes the reserved per-call ceiling with
 `cost_status=estimated_ceiling`; it is never released as an invented zero.

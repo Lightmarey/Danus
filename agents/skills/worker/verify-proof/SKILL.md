@@ -64,11 +64,10 @@ Concretely, before you submit:
 
 ## Submit and repair
 
-For a legacy project, call
-`fact_submit(statement, proof, predecessors=[...], glossary_introduces={...})`.
-For a v2 assignment, also pass its `target_version`, `obligation_id`, `route_id`,
-`assignment_epoch`, `display_title`, `assumptions_used`, and `closes_obligation`.
-The v2 `claim_role` must be exactly one of:
+Call `fact_submit` with the statement, proof, predecessors, glossary additions,
+and the current assignment's `target_version`, `obligation_id`, `route_id`,
+`assignment_epoch`, `display_title`, `assumptions_used`, and
+`closes_obligation`. `claim_role` must be exactly one of:
 
 - `unconditional` — the default for an ordinary positive lemma or theorem proved
   under the target contract;

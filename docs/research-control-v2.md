@@ -2,8 +2,11 @@
 
 Danus v2 keeps the verified fact graph as the only mathematical truth and adds a
 separate control plane for approved targets, proof obligations, research routes,
-bounded assignments, checkpoints, and cost attribution. Existing projects that
-do not declare `"control_version": 2` continue to use the legacy loop.
+bounded assignments, checkpoints, and cost attribution. This is the only
+runtime model. Older projects must be stopped and converted once with
+`danus migrate <project>` before any worker, Gateway, authoring, or dashboard
+entry point will use them. Migration indexes existing facts and memories but
+does not invent a target, obligation, route, or assignment.
 
 ## Create and approve a target
 
@@ -52,15 +55,18 @@ A route records a stable `method_key`, readable `method_title`, `expected_result
 and optional `novelty_basis` / `fallback_route_ids`. An exact duplicate route is
 rejected unless it cites concrete novelty.
 
-Each Codex session is one structured exploration slice. A route starts with three
-slices, gains two on validated high/medium information gain, enters an independent
+Each Codex session is one structured exploration round. A route starts with a
+three-round budget, gains two rounds on validated high/medium information gain, enters an independent
 audit after two consecutive low-gain reports, and stalls only after a third
-low-gain audit. The default per-slice timeout is 90 minutes and the route hard
-ceiling is 12 slices. Reusing the same evidence does not renew the lease twice.
+low-gain audit. The default per-round timeout is 90 minutes and the route hard
+ceiling is 12 rounds. Reusing the same evidence does not extend the round budget twice.
+`rounds_used`, `rounds_remaining`, `max_rounds`, and
+`round_timeout_seconds` are the canonical runtime and storage names; there is no
+separate slice or lease abstraction.
 
 ## Fact binding and recovery
 
-For v2 projects a worker's `fact_submit` must include the current
+A worker's `fact_submit` must include the current
 `target_version`, `obligation_id`, `route_id`, `assignment_epoch`, `claim_role`,
 `assumptions_used`, `closes_obligation`, and a one-line 4-80 character
 `display_title`. The title is stored in Markdown but is not part of `fact_id`;
@@ -76,8 +82,8 @@ structured external references and an applicability audit.
 
 Use `danus control taint <project> <fact_id> --reason "..."` to append a
 non-destructive review marker and stop routes that explicitly depend on the fact.
-For v2, the gateway's legacy-named `fact_revoke` action also taints rather than
-deleting. Formal removal remains a separate operator review action.
+The gateway's `fact_revoke` action also taints rather than deleting. Formal
+removal remains a separate operator review action.
 
 ## Read model and budget
 
@@ -97,11 +103,12 @@ Omit the project argument to list configured projects and choose one by number.
 obligations, routes, assignments, events, and the outbox. Verified Markdown in
 `fact_graph/facts/` remains the mathematical authority. Fact indexes, scopes,
 checkpoints, obstacles, and FTS5 live in the same database but are rebuildable.
-Existing file-backed v2 control state is imported once and retained only as a
-migration source; v1 projects are not migrated.
+Existing pre-SQLite control files are imported once and retained only as a
+migration source. Older projects use the explicit `danus migrate` data
+conversion; no old worker runtime remains.
 
 Gateway tools, worker kickoff, write-paper, and the dashboard all use
-`ResearchQuery`. A worker slice receives a persisted `ContextManifest` containing
+`ResearchQuery`. A worker round receives a persisted `ContextManifest` containing
 stable route facts, dependency closures, open obstacles, recent checkpoints, and
 a bounded set of search candidates. The default manifest budget is 16,000
 characters, at most 20 facts include their statement, and at most three FTS
@@ -117,7 +124,7 @@ unchanged while avoiding an unreadable route-wide fact dump. The underlying fact
 roles remain closing/direct/input/support/shared.
 
 Fact Markdown supports KaTeX delimiters (`$...$`, `$$...$$`, `\(...\)`, and
-`\[...\]`). The renderer never guesses LaTeX from legacy ASCII mathematics.
+`\[...\]`). The renderer never guesses LaTeX from plain-text mathematics.
 Migrated facts therefore keep their authoritative statement/proof unchanged and
 should receive readable presentation titles (and, in a later derived display
 index, optional `display_markdown`) without changing `fact_id`.
@@ -134,7 +141,7 @@ danus target withdraw my-project v0001 --reason "incorrect target contract"
 Withdrawal invalidates assignments and leaves no active target; it never revives
 an older target automatically.
 
-Target budgets warn at 70%, force an audit at 85%, and block new slices at 100%.
+Target budgets warn at 70%, force an audit at 85%, and block new rounds at 100%.
 Worker, verifier, consult, paper, and human-summary calls write scoped `CostEvent`
 records. If a backend does not expose metered usage, Danus records wall time and
 leaves monetary cost unknown rather than inventing a zero price.
@@ -148,16 +155,16 @@ expire during recovery. With `strict_cost_reservations` enabled, a call whose
 maximum USD cost cannot be estimated is rejected. If actual usage remains
 unknown, the reserved ceiling is recorded as `estimated_ceiling`, never as zero.
 
-A verifier call made inside a worker slice is a child reservation: its wall time
+A verifier call made inside a worker round is a child reservation: its wall time
 is recorded as `nested_wall_seconds` and is not counted a second time against the
 project wall budget, while its token and monetary cost remain separate. A real
 wall/cost reservation rejection is a typed control event, forces `gain=none`, and
 cannot be reframed as medium progress using old evidence. An operator stop
 interrupts an active v2 child promptly, settles the reservation, records partial
 usage when the provider emitted it (otherwise `usage_status=unavailable`), and
-does not consume a research slice.
+does not consume a research round.
 
-Transport and provider failures do not consume route slices or low-gain counts.
+Transport and provider failures do not consume route rounds or low-gain counts.
 They do consume their real wall time and known or reserved cost. Bounded retries
 move an assignment through `waiting_retry`; quota, authentication, configuration,
 or exhausted outage limits move it to `infra_blocked`. A provider-wide circuit

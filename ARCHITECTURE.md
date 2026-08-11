@@ -84,10 +84,10 @@ Danus/
    (problem_id + predecessors + glossary_introduces + statement + proof);
    `external_refs` is deliberately excluded so the paper pipeline can rewrite
    citations without breaking the DAG.
-5. Autonomy and resumability. Workers run detached; a "round" continues from
+5. Autonomy and resumability. Workers run detached; a bounded round continues from
    persisted memory rather than adding one increment, so no single crash loses
    verified work. In a v2 project, autonomy is bounded by an approved target and
-   a finite route lease: structured checkpoints renew useful exploration,
+   a finite round budget: structured checkpoints extend useful exploration,
    repeated low-gain work is independently audited, and stale target epochs
    cannot write facts.
 6. The strategy consult is the brain. Between rounds the main agent consults a
@@ -130,7 +130,7 @@ Danus/
 | v2 research reads | one `ResearchQuery` snapshot → bounded `ContextManifest` for agents and layered indexed views for humans | execution · gateway · authoring · observability |
 | v2 call admission | atomically reserve timeout and optional USD ceiling before every expensive call; active reservations count against the budget; settlement emits one `CostEvent`; expired reservations are recovered after crashes | control DB ↔ execution · gateway · strategy · authoring |
 | v2 provider resilience | persistent assignment retry state plus one project-wide provider circuit; bounded failures become `waiting_retry`/`infra_blocked`; only one half-open probe is admitted | control DB ↔ execution · gateway · strategy · authoring · operations |
-| v2 fact binding | legacy arguments plus current `display_title, target_version, obligation_id, route_id, assignment_epoch, claim_role, assumptions_used, closes_obligation` | worker ↔ gateway ↔ v2 control |
+| fact binding | `statement, proof, display_title, predecessors, target_version, obligation_id, route_id, assignment_epoch, claim_role, assumptions_used, closes_obligation` | worker ↔ gateway ↔ control |
 | fact id inputs | `problem_id + sorted(predecessors) + sorted(glossary) + normalized(statement,proof)`; **external_refs EXCLUDED** | `danus.core` ↔ everyone (write-paper reads `external_refs`) |
 | global-memory kinds | the 11 `GLOBAL_KINDS` (incl. `master_guidance`/`elaboration`/`verification`) | `danus.core` ↔ agents · strategy · consult |
 | consult JSON envelope | `{transport,reply,usage,cost_usd,…}`; always one envelope — a consult that could not run is `status="failed"` + `error`, never a traceback | `danus.strategy` CLI ↔ consult skill |

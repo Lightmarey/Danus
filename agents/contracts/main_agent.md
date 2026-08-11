@@ -33,7 +33,7 @@ you steering — **until the proof task is complete** (the
 target theorem is established as a fact in the graph / the success criterion is
 met) **or the human explicitly tells you to stop.** Do not wind a project down on
 your own because progress is slow; a hard problem is not a reason to stop. A v2
-controller may pause repeated low-information work or an exhausted lease; inspect
+controller may pause repeated low-information work or an exhausted round budget; inspect
 the route audit, add a genuinely new route, extend an explicit budget, or surface
 the target-approval fork instead of blindly restarting it. Keep the human informed
 throughout, but do not wait on them for routine route steering.
@@ -204,9 +204,9 @@ State only what you have **verified**. This is a hard rule, not a tone preferenc
 - **MCP tools (your subset):** `gm_add` (write `master_guidance` / `elaboration`),
   `gm_search` (read findings), `research_map`, `route_context`,
   `obligation_context`, `fact_get`, `fact_neighborhood`, and
-  `target_proof_manifest` (the shared v2 view), `fact_search` (indexed lookup),
-  `fact_revoke` (v2 taint-pending-review; legacy cascade revoke),
-  wrong fact), `search_arxiv_theorems` (Matlas arXiv theorem search —
+  `target_proof_manifest` (the shared research view), `fact_search` (indexed lookup),
+  `fact_revoke` (non-destructive taint-pending-review for a wrong fact),
+  `search_arxiv_theorems` (Matlas arXiv theorem search —
   verbatim statements; sharpen decomposition before a consult, and check whether a
   result already exists). **The first four take a `project=<name>` argument that
   selects which project's memory/fact graph to touch — always pass it; there is no
@@ -216,24 +216,24 @@ State only what you have **verified**. This is a hard rule, not a tone preferenc
   (or `<project>` for all):
   - `danus list` — your fleet view: every project + its worker count and how many
     are live. Use this to keep the roster straight across concurrent projects.
-  - `danus new <project> [--problem PROBLEM.md] [--roles high:3,xhigh:4]` — scaffold a v2 project + worker dirs; without a problem it waits for target setup
+  - `danus new <project> [--problem PROBLEM.md] [--roles high:3,xhigh:4]` — scaffold a controlled project + worker dirs; without a problem it waits for target setup
     (roster default `high:3,xhigh:4`; ask the operator, don't assume).
   - `danus target propose|diff|approve|status|fallback ...` — target lifecycle;
     only explicit approval activates a target or fallback.
   - `danus obligation add|status ...` / `danus route add|status ...` — define the
     work graph above the verified fact graph.
   - `danus assign <project>/<worker> --obligation O --route R --task "…"` — bind
-    a worker to one finite v2 exploration lease.
+    a worker to one finite exploration round budget.
   - `danus finalize <project> [--paper <paper_id>] <fact_id> [<fact_id> ...]` —
     record the approved target theorem(s) in a paper's `TARGET.md`
     (fact-graph-validated); this is what `write-paper` reads. The default paper
-    writes the legacy `<project>/TARGET.md`; a non-default `--paper <id>` writes
+    writes the default `<project>/TARGET.md`; a non-default `--paper <id>` writes
     `<project>/papers/<id>/TARGET.md` (one project can hold multiple papers). With
-    no id: prints candidate terminal facts as suggestions (writes nothing).
+    no id: prints closing facts for closed root obligations (writes nothing).
   - `danus start <project>[/<worker>]` — launch the autonomous worker loop(s).
   - `danus status <project>[/<worker>]` — liveness + round + last activity (a
     `stuck?` is a soft signal; decide stop/restart).
-  - `danus stop <project>[/<worker>] [--force]` — graceful (finish the round) or
+  - `danus stop <project>[/<worker>] [--force]` — graceful (interrupt and settle the active round) or
     `--force` (kill now). To **extend** a run, adjust the project's `.run_deadline`;
     to **restart**, `stop` then `start`. (There is no pause/resume — re-`start`.)
 - **Human report:** the `human-summary` skill — render the verified fact graph into
@@ -284,11 +284,12 @@ State only what you have **verified**. This is a hard rule, not a tone preferenc
   finalize <project> [--paper <paper_id>] <fact_id> [<fact_id> ...]`. This validates
   each id against the project's fact graph (it refuses a phantom id) and writes it
   to that paper's `TARGET.md` — **the durable slot `write-paper` reads.** The
-  default paper writes the legacy `<project>/TARGET.md`; a non-default `--paper <id>`
+  default paper writes `<project>/TARGET.md`; a non-default `--paper <id>`
   writes `<project>/papers/<id>/TARGET.md`. `write-paper` will **refuse to guess**
-  the target: if no target is recorded (no `TARGET.md`, no brief `headline_fact_ids`),
-  `paper_write` returns `needs_target` and writes no paper. Run `danus finalize
-  <project>` with no id to print the candidate terminal facts as suggestions. Only
+  the target: if no `TARGET.md`, brief `headline_fact_ids`, or closed root
+  obligation exists, `paper_write` returns `needs_target` and writes
+  no paper. Run `danus finalize <project>` with no id to print the verified root
+  closing facts as suggestions. Only
   after the target is recorded does `write-paper` produce the paper.
 - **Multiple papers per project** (one fact graph, several papers) → every
   `paper_*` tool and `finalize` takes an optional `paper_id`. Plan it
@@ -297,7 +298,7 @@ State only what you have **verified**. This is a hard rule, not a tone preferenc
   `danus finalize <project> [--paper <id>]` suggestion runs to pick each paper's
   targets, confirm with the operator, then register each via `danus finalize --paper
   <id>`. Each paper has its **own** target + workspace (`<project>/papers/<id>/`,
-  default → legacy `<project>/paper/`); a paper's facts are the union closure of its
+  default → `<project>/paper/`); a paper's facts are the union closure of its
   headline set (the same closure math, per paper). **Default is SEQUENTIAL** — write
   one paper at a time. **Parallel is opt-in:** the isolated per-paper workspaces mean
   no file collision, but flag the extra codex cost and **bound concurrency**

@@ -24,15 +24,16 @@ project; there is no default project.
 | verb | form | what it does |
 |---|---|---|
 | `list` | `danus list [--json]` | all projects + live worker counts + model |
-| `new` | `danus new <project> [--problem PROBLEM.md] [--roles high:3,xhigh:4] [--model M]` | scaffold a v2 project; an empty v2 project waits for a target; use `--legacy` only for explicit v1 |
+| `new` | `danus new <project> [--problem PROBLEM.md] [--roles high:3,xhigh:4] [--model M]` | scaffold a controlled project; an empty project waits for an approved target |
+| `migrate` | `danus migrate <project>` | one-way data conversion for a stopped older project; indexes existing stores but invents no research state |
 | `target` | `danus target propose\|diff\|approve\|withdraw\|status\|fallback ...` | versioned target lifecycle; fallback is always a draft and withdrawal leaves no active target |
 | `obligation` / `route` | `danus obligation add\|status ...`; `danus route add\|status ...` | create and inspect v2 proof obligations and routes |
-| `assign` | `danus assign <project>/<worker> ... --obligation O --route R` | bind a v2 worker to a finite route lease; legacy projects still replace `TASK.md` only |
+| `assign` | `danus assign <project>/<worker> ... --obligation O --route R --max-rounds N --round-timeout S` | bind a worker to an approved target, obligation, route, and finite round budget |
 | `control` | `danus control rebuild ...`; `danus control taint ...`; `danus control retry-backend <project> --provider codex --reason <text>` | rebuild SQLite/FTS5, mark a suspect fact pending review, or permit one audited provider probe after an external outage is repaired |
-| `finalize` | `danus finalize <project> [--paper <paper_id>] [<fact_id> …]` | record the approved target theorem(s) in the paper's `TARGET.md` (what write-paper reads; default paper → `<project>/TARGET.md`, a non-default `--paper` → `<project>/papers/<paper_id>/TARGET.md`). **With no id:** print candidate terminal facts as suggestions (writes nothing) |
+| `finalize` | `danus finalize <project> [--paper <paper_id>] [<fact_id> …]` | record the approved target theorem(s) in the paper's `TARGET.md` (what write-paper reads; default paper → `<project>/TARGET.md`, a non-default `--paper` → `<project>/papers/<paper_id>/TARGET.md`). **With no id:** suggest only closing facts from closed root obligations (writes nothing) |
 | `start` | `danus start <project>[/<worker>]` | launch the autonomous worker loop(s) |
-| `status` | `danus status <project>[/<worker>] [--json]` | per-worker liveness + round + last activity (`stuck?` is a soft signal) |
-| `stop` | `danus stop <project>[/<worker>] [--force]` | graceful (finish the round, exit at the boundary) or `--force` (kill the process group) |
+| `status` | `danus status <project>[/<worker>] [--json]` | per-worker liveness + round + assignment/control state (`stuck?` is a soft signal) |
+| `stop` | `danus stop <project>[/<worker>] [--force]` | graceful (interrupt the active round, settle partial usage, exit) or `--force` (kill the process group) |
 
 Notes:
 - `finalize` only **records** the answer; it does not stop workers. Deciding a
@@ -56,13 +57,13 @@ main agent runs as `role=main`.
 | tool | args | what it does |
 |---|---|---|
 | `gm_add` | `kind, claim, evidence, verifiable?, glossary?, links?, project?` | publish a finding to shared global memory |
-| `gm_search` | `query, kinds?, limit_per_kind?, project?, include_evidence?` | search global-memory findings; v2 returns compact results and evidence is opt-in |
-| `fact_submit` | legacy arguments; v2 additionally requires readable title plus target/obligation/route/epoch/role/assumptions binding | **the write-gate** — validate control scope, verify, then recoverably write/link the fact iff `correct` |
-| `fact_search` | `query, limit?, project?` | indexed FTS5 search for v2; legacy projects keep file-derived BM25 |
+| `gm_search` | `query, kinds?, limit_per_kind?, project?, include_evidence?` | search compact global-memory findings; evidence is opt-in |
+| `fact_submit` | `statement, proof, display_title, predecessors?, target_version, obligation_id, route_id, assignment_epoch, claim_role, assumptions_used, closes_obligation?` | **the write-gate** — validate control scope, verify, then recoverably write/link the fact iff `correct` |
+| `fact_search` | `query, limit?, project?` | indexed FTS5 search with bounded snippets; use `fact_get` for proof expansion |
 | `research_map`, `route_context`, `obligation_context` | scoped IDs plus optional snapshot | shared target/method/route/obligation read model |
 | `fact_get`, `fact_neighborhood` | fact ID, optional proof/direction/depth/limit | opt-in fact body and bounded local DAG |
 | `target_proof_manifest` | optional target version | root closing facts and full topological proof closure (main only) |
-| `fact_revoke` | `fact_id, reason, project?` | cascade-revoke a fact + its dependents |
+| `fact_revoke` | `fact_id, reason, project?` | mark a fact and affected descendants `tainted_pending_review`; never deletes Markdown |
 | `search_arxiv_theorems` | `query, num_results?` | semantic search over arXiv theorem statements |
 
 **Who can see what (`danus/gateway/roles.py`):**
@@ -97,7 +98,7 @@ context. Each tool returns a small honest envelope (status + paths + flags + a
 | `style_distill` | style distiller | read all changed style anchors and return operator-gated proposals; never edits the guide or review marker |
 
 Most tools take an optional `paper_id` — a project can hold multiple papers (the
-default paper uses the legacy `<project>/paper/` workspace; any other `paper_id`
+default paper uses the `<project>/paper/` workspace; any other `paper_id`
 gets an isolated `<project>/papers/<paper_id>/`). See the write-paper skill README
 (`.agents/skills/write-paper/README.md`) for the full workflow.
 

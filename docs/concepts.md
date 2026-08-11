@@ -92,7 +92,7 @@ new state:
 2. **Consult** — send that synthesis to a strong reasoning model. *(the
    `consult` skill)*
 3. **Record & dispatch** — store the reply verbatim as `master_guidance` and give
-   each worker its per-round assignment (`danus assign`).
+   each worker its route-bound assignment (`danus assign`).
 4. **Monitor** — watch progress; repeat when there is genuinely new state.
 
 The consult transport is configurable: **`gpt_pro`** (a paid OpenAI-compatible

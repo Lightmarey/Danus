@@ -1,9 +1,8 @@
 # danus/observability — research console
 
 A single **FastAPI** app that shows one project's research map, bounded fact DAG,
-global-memory channels, and cost. v2 fact/control reads use `ResearchQuery` over
-SQLite; v1 keeps the tolerant file readers. The only v2 mutations are secured
-target approval and withdrawal.
+global-memory channels, and cost. All fact/control reads use `ResearchQuery`
+over SQLite. The only mutations are secured target approval and withdrawal.
 
 ```
 danus/observability/
@@ -16,8 +15,7 @@ danus/observability/
 ## Endpoints
 
 - `GET /api/overview` — counts, per-channel totals, verdict split, consult cost
-- `GET /api/factgraph` — legacy projects only; v2 returns 410 rather than loading every proof
-- `GET /api/research/map`, `/routes/{id}`, `/obligations/{id}` — layered v2 state
+- `GET /api/research/map`, `/routes/{id}`, `/obligations/{id}` — layered research state
 - `GET /api/research/facts/{id}` and `/neighborhood` — opt-in detail and ≤300-node graph
 - `GET /api/research/context-manifests` — exact persisted LLM snapshots
 - `GET /api/channels` — per-kind counts

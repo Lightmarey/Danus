@@ -17,14 +17,15 @@ danus/orchestration/
 |---|---|
 | `list [--json]` | projects + live worker counts + model |
 | `new <p> [--roles high:3,xhigh:4] [--model M]` | → `execution.scaffold.do_new` |
-| `assign <p>/<w> (--task/--file/--stdin)` | legacy: overwrite `TASK.md`; v2: also requires `--obligation` + `--route` |
-| `target propose/diff/approve/status/fallback` | versioned v2 target lifecycle |
-| `obligation add/status`, `route add/status` | v2 obligation and research-route definitions |
+| `migrate <p>` | one-way conversion of a stopped older project; invents no research state |
+| `assign <p>/<w> (--task/--file/--stdin) --obligation O --route R` | bind the worker to one controlled finite round budget; `TASK.md` is only a mirror |
+| `target propose/diff/approve/status/fallback` | versioned target lifecycle |
+| `obligation add/status`, `route add/status` | obligation and research-route definitions |
 | `control rebuild/taint` | rebuild derived SQLite/FTS5 or pause tainted dependencies |
-| `finalize <p> [<fact_id>…]` | record target(s) in `TARGET.md` (no id ⇒ suggest terminal facts); records only, does not stop workers |
+| `finalize <p> [<fact_id>…]` | record target(s) in `TARGET.md` (no id ⇒ suggest closed-root facts); records only, does not stop workers |
 | `start <p>[/<w>]` | → `execution.scaffold.spawn_loop` (idempotent via `.pid.lock`) |
-| `status <p>[/<w>] [--json]` | per-worker liveness + round + `stuck?` soft signal |
-| `stop <p>[/<w>] [--force]` | graceful `.stop` / `--force` `killpg` |
+| `status <p>[/<w>] [--json]` | per-worker liveness + round/control state + `stuck?` soft signal |
+| `stop <p>[/<w>] [--force]` | graceful round interruption / `--force` process-tree kill |
 
 ## Notes
 
