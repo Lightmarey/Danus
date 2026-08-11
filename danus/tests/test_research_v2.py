@@ -188,7 +188,8 @@ def test_browser_view_state_has_no_persistent_or_write_path():
     assert "localStorage" not in script
     assert "e.connectionFailure = true" in script
     assert "e.status === 410" in script
-    assert "switchTab('control')" in script
+    assert "function renderFactResearchMap(d)" in script
+    assert "selectFactGraphRoute" in script
     assert "function renderResearchMap(d)" in script
     assert "Show all routes" in (Path(observability_app.__file__).parent / "static" / "index.html").read_text(encoding="utf-8")
 

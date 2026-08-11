@@ -122,6 +122,7 @@ async function loadOverview() {
 // ---- fact graph (echarts) ------------------------------------------------ //
 let graphChart = null;
 let factById = {};
+let currentFactResearchMap = null;
 // importance = dependency depth (longest path from an axiom/leaf up to a fact).
 // Continuous shade: the deeper a fact, the darker — shallow=light, deep=dark.
 function depthColor(depth, maxDepth) {
@@ -167,9 +168,48 @@ async function loadGraph() {
   } catch (e) {
     connErrorFrom(e);
     if (e.status === 410) {
-      switchTab('control');
+      const d = await api('/api/research/map');
+      controlGeneration = d.generation;
+      currentFactResearchMap = d;
+      renderFactResearchMap(d);
     }
   }
+}
+
+function renderFactResearchMap(d) {
+  const map = researchHierarchy(d);
+  if (!graphChart) graphChart = echarts.init($('#graph'));
+  graphChart.setOption(researchHierarchyOption(map), true);
+  graphChart.off('click');
+  graphChart.on('click', async (p) => {
+    if (p.data.kind === 'route') await selectFactGraphRoute(p.data.routeId);
+    if (p.data.kind === 'obligation') await selectFactGraphObligation(p.data.obligationId);
+  });
+  $('#graph-map-reset').hidden = false;
+  $('#graph-stat').textContent = map.stat;
+}
+
+function renderFactGraphGroup(group) {
+  const facts = group.facts || [];
+  const ids = new Set(facts.map((fact) => fact.fact_id));
+  graphChart.setOption({ tooltip:{formatter:(p)=>p.data.title || p.data.name}, series:[{type:'graph',layout:'force',roam:true,
+    force:{repulsion:170,edgeLength:75,gravity:.05},label:{show:true,position:'right',formatter:(p)=>p.data.title.slice(0,32)},
+    data:facts.map((fact)=>({id:fact.fact_id,name:fact.fact_id,title:fact.title,kind:'fact',symbolSize:fact.role==='closing'?19:11,
+      itemStyle:{color:fact.role==='closing'?'#16a34a':fact.role==='support'?'#94a3b8':'#6366f1'}})),
+    links:(group.edges||[]).filter((edge)=>ids.has(edge.source)&&ids.has(edge.target)),lineStyle:{color:'#cbd5e1'},emphasis:{focus:'adjacency'}}] }, true);
+  graphChart.off('click');
+  graphChart.on('click', (p) => { if (p.data.kind === 'fact') showResearchFact(p.data.id, '#fact-detail'); });
+  $('#graph-stat').textContent = `${facts.length} facts · ${group.unexpanded_count || 0} unexpanded`;
+}
+
+async function selectFactGraphRoute(routeId) {
+  const d = await api(`/api/research/routes/${routeId}?snapshot=${controlGeneration}`);
+  renderFactGraphGroup(d.fact_group);
+}
+
+async function selectFactGraphObligation(obligationId) {
+  const d = await api(`/api/research/obligations/${obligationId}?snapshot=${controlGeneration}`);
+  renderFactGraphGroup(d.fact_group);
 }
 function showFact(id) {
   const f = factById[id]; if (!f) return;
@@ -282,7 +322,7 @@ function governanceCard(target) {
   return card;
 }
 
-function renderResearchMap(d) {
+function researchHierarchy(d) {
   const nodes = [];
   const links = [];
   const obligations = new Set();
@@ -303,16 +343,25 @@ function renderResearchMap(d) {
       }
     });
   });
-  if (!routeChart) routeChart = echarts.init($('#route-graph'));
-  routeChart.setOption({ tooltip:{formatter:(p)=>p.data.title || p.data.name}, series:[{type:'graph',layout:'force',roam:true,
+  return { nodes, links, stat:`${d.methods.length} methods · ${d.methods.reduce((n,m)=>n+m.routes.length,0)} routes · ${d.obligations.length} obligations` };
+}
+
+function researchHierarchyOption(map) {
+  return { tooltip:{formatter:(p)=>p.data.title || p.data.name}, series:[{type:'graph',layout:'force',roam:true,
     force:{repulsion:220,edgeLength:95,gravity:.05},label:{show:true,position:'right',formatter:(p)=>p.data.name.slice(0,36)},
-    data:nodes,links:links,lineStyle:{color:'#cbd5e1'},emphasis:{focus:'adjacency'}}] }, true);
+    data:map.nodes,links:map.links,lineStyle:{color:'#cbd5e1'},emphasis:{focus:'adjacency'}}] };
+}
+
+function renderResearchMap(d) {
+  const map = researchHierarchy(d);
+  if (!routeChart) routeChart = echarts.init($('#route-graph'));
+  routeChart.setOption(researchHierarchyOption(map), true);
   routeChart.off('click');
   routeChart.on('click', async (p) => {
     if (p.data.kind === 'route') await selectRoute(p.data.routeId);
     if (p.data.kind === 'obligation') await selectObligation(p.data.obligationId);
   });
-  $('#route-stat').textContent = `${d.methods.length} methods · ${d.methods.reduce((n,m)=>n+m.routes.length,0)} routes · ${d.obligations.length} obligations`;
+  $('#route-stat').textContent = map.stat;
 }
 
 function renderFactGraph(group) {
@@ -334,8 +383,8 @@ function renderFactGraph(group) {
   $('#route-stat').textContent = `${facts.length} nodes · ${group.unexpanded_count || 0} unexpanded`;
 }
 
-async function showResearchFact(factId) {
-  const detail = $('#research-detail'); detail.innerHTML = '<div class="empty">loading…</div>';
+async function showResearchFact(factId, detailSelector = '#research-detail') {
+  const detail = $(detailSelector); detail.innerHTML = '<div class="empty">loading…</div>';
   try {
     const fact = await api(`/api/research/facts/${factId}?include_proof=true`); detail.innerHTML = '';
     const card = el('div', 'entry' + (viewPins.has(factId) ? ' pinned' : ''));
@@ -344,7 +393,7 @@ async function showResearchFact(factId) {
     const statement = el('div', 'entry-claim'); mdmath(statement, fact.statement); card.appendChild(statement);
     const proof = el('div', 'entry-evidence'); mdmath(proof, fact.proof); card.appendChild(proof);
     const pin = el('button', '', viewPins.has(factId) ? 'Unpin from view' : 'Pin in view');
-    pin.onclick = () => { viewPins.has(factId) ? viewPins.delete(factId) : viewPins.add(factId); showResearchFact(factId); };
+    pin.onclick = () => { viewPins.has(factId) ? viewPins.delete(factId) : viewPins.add(factId); showResearchFact(factId, detailSelector); };
     card.appendChild(pin); detail.appendChild(card);
   } catch (e) { detail.innerHTML = `<div class="empty">${esc(e.message)}</div>`; }
 }
@@ -412,6 +461,7 @@ async function loadControl() {
 }
 $('#clear-pins').onclick = () => { viewPins.clear(); $('#research-detail').innerHTML='<div class="empty">View pins cleared.</div>'; };
 $('#show-research-map').onclick = () => { if (currentResearchMap) renderResearchMap(currentResearchMap); };
+$('#graph-map-reset').onclick = () => { if (currentFactResearchMap) renderFactResearchMap(currentFactResearchMap); };
 
 // ---- init + polling ------------------------------------------------------ //
 loadOverview();
