@@ -31,21 +31,23 @@ from __future__ import annotations
 import json
 import os
 import re
-import urllib.request
 import time
+import urllib.request
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Literal, Optional, get_args
 
 from danus._mcp import FastMCP
+from danus.control import ControlError, ControlStore
 from danus.core import FactGraph, GlobalMemory
 from danus.core.schema import compute_fact_id
-from danus.control import ControlError, ControlStore
 from danus.integrations import search as _arxiv_search
 from danus.research import ResearchQuery
 
 from .roles import tools_for
 
 _PROJECT_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+ClaimRole = Literal["unconditional", "conditional", "counterexample", "literature_import"]
+CLAIM_ROLES = get_args(ClaimRole)
 
 
 # --------------------------------------------------------------------------- #
@@ -211,7 +213,7 @@ def fact_submit(
     obligation_id: Optional[str] = None,
     route_id: Optional[str] = None,
     assignment_epoch: Optional[str] = None,
-    claim_role: Optional[str] = None,
+    claim_role: Optional[ClaimRole] = None,
     assumptions_used: Optional[List[str]] = None,
     closes_obligation: bool = False,
 ) -> Dict[str, Any]:
@@ -248,7 +250,7 @@ def fact_submit(
         if missing:
             return {"accepted": False, "verdict": "control_error",
                     "error": f"Danus v2 fact_submit missing: {', '.join(missing)}"}
-        if claim_role not in {"unconditional", "conditional", "counterexample", "literature_import"}:
+        if claim_role not in CLAIM_ROLES:
             return {"accepted": False, "verdict": "control_error",
                     "error": f"invalid claim_role: {claim_role}"}
         try:

@@ -46,6 +46,18 @@ returning the required `WorkReport` JSON. In v2:
 - `fact_submit` must include `target_version`, `obligation_id`, `route_id`,
   `assignment_epoch`, a readable 4-80 character `display_title`, `claim_role`,
   `assumptions_used`, and whether the fact is intended to close the obligation;
+- `claim_role` must be exactly one of the following values:
+  - `unconditional` — a positive theorem proved using only the target contract's
+    declared assumptions and verified predecessor facts. **Use this for ordinary
+    positive lemmas and theorems.** Only this role may close an unconditional
+    obligation;
+  - `conditional` — a result whose statement retains an additional explicit
+    hypothesis or condition. It may be useful downstream but cannot close an
+    unconditional obligation;
+  - `counterexample` — a verified construction refuting a proposed claim;
+  - `literature_import` — a published result imported with structured
+    `external_refs` and an applicability check;
+  Never invent synonyms such as `theorem`, `lemma`, `positive`, or `result`.
 - the kickoff `Research context snapshot` is the baseline state for this slice.
   Use its titles and statements first, and call `fact_get` only for proof bodies
   needed now; do not reconstruct the route by scanning every Markdown file;

@@ -64,7 +64,22 @@ Concretely, before you submit:
 
 ## Submit and repair
 
-Call `fact_submit(statement, proof, predecessors=[...], glossary_introduces={...})`.
+For a legacy project, call
+`fact_submit(statement, proof, predecessors=[...], glossary_introduces={...})`.
+For a v2 assignment, also pass its `target_version`, `obligation_id`, `route_id`,
+`assignment_epoch`, `display_title`, `assumptions_used`, and `closes_obligation`.
+The v2 `claim_role` must be exactly one of:
+
+- `unconditional` — the default for an ordinary positive lemma or theorem proved
+  under the target contract;
+- `conditional` — the statement retains an additional explicit condition;
+- `counterexample` — the fact refutes a claim by construction;
+- `literature_import` — the fact imports a published result with
+  `external_refs` and an applicability check.
+
+Do not submit positive theorems with invented roles such as `theorem`, `lemma`,
+`positive`, or `result`.
+
 Read the result:
 
 - `accepted: true, fact_id` — the fact is written. **Cite `fact_id`** downstream.

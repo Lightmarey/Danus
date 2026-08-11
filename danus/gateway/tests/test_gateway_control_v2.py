@@ -61,6 +61,42 @@ def _args(assignment: dict, **extra):
     }
 
 
+def test_fact_submit_claim_role_schema_matches_worker_contract():
+    tool = next(item for item in server.build_app("worker")._tool_manager.list_tools() if item.name == "fact_submit")
+    schemas = tool.parameters["properties"]["claim_role"]["anyOf"]
+    enum = next(item["enum"] for item in schemas if "enum" in item)
+    assert tuple(enum) == server.CLAIM_ROLES
+    contract = (Path(__file__).parents[3] / "agents" / "contracts" / "worker.md").read_text(encoding="utf-8")
+    assert all(f"`{role}`" in contract for role in server.CLAIM_ROLES)
+
+
+def test_all_documented_claim_roles_reach_verifier(tmp_path: Path):
+    _, assignment = _project(tmp_path)
+    calls = []
+    original = server._verify
+    server._verify = lambda statement, _proof: (calls.append(statement) or {
+        "verdict": "correct", "verification_report": {"summary": "ok"},
+    })
+    try:
+        with _env(DANUS_PROJECT_DIR=tmp_path, DANUS_AUTHOR="high", DANUS_VERIFY_URL="mock"):
+            results = [
+                server.fact_submit(
+                    statement=f"Verified claim {index}.", proof="Proof.", display_title=f"Verified claim {index}",
+                    **(_args(assignment) | {"claim_role": role}),
+                )
+                for index, role in enumerate(server.CLAIM_ROLES)
+            ]
+            invalid = server.fact_submit(
+                statement="Invalid role claim.", proof="Proof.", display_title="Invalid role claim",
+                **(_args(assignment) | {"claim_role": "theorem"}),
+            )
+    finally:
+        server._verify = original
+    assert all(result["accepted"] is True for result in results)
+    assert len(calls) == len(server.CLAIM_ROLES)
+    assert invalid["verdict"] == "control_error" and "invalid claim_role" in invalid["error"]
+
+
 def test_v2_submission_requires_current_assignment_binding(tmp_path: Path):
     _, assignment = _project(tmp_path)
     with _env(DANUS_PROJECT_DIR=tmp_path, DANUS_AUTHOR="high", DANUS_VERIFY_URL="mock"):

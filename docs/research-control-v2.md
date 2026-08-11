@@ -67,6 +67,13 @@ For v2 projects a worker's `fact_submit` must include the current
 the first accepted title wins for duplicate mathematical content. Stale assignments, forbidden or
 undeclared assumptions, and tainted predecessors are rejected before verification.
 
+`claim_role` is an MCP-schema enum: `unconditional`, `conditional`,
+`counterexample`, or `literature_import`. Ordinary positive lemmas and theorems
+use `unconditional` when they rely only on target-contract assumptions and
+verified predecessors. `conditional` preserves an additional condition and
+cannot close an unconditional obligation; `literature_import` requires
+structured external references and an applicability audit.
+
 Use `danus control taint <project> <fact_id> --reason "..."` to append a
 non-destructive review marker and stop routes that explicitly depend on the fact.
 For v2, the gateway's legacy-named `fact_revoke` action also taints rather than
