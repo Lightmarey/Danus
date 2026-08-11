@@ -126,6 +126,24 @@ def test_v2_run_round_ignores_user_config(tmp: Path):
     assert reservation.read_text(encoding="utf-8") == "reservation-1"
 
 
+def test_v2_run_round_interrupts_an_active_child_on_stop_request(tmp: Path):
+    wl = _mk_worker(tmp)
+    fake = _write_fake_codex(tmp, "import time\ntime.sleep(30)\n")
+    schema = wl.dir / "report.schema.json"
+    schema.write_text("{}", encoding="utf-8")
+    wl.stop.touch()
+    with _env(DANUS_CODEX_BIN=str(fake)):
+        started = time.monotonic()
+        rc = loop.run_round(
+            wl, {"MODEL": "m", "REASONING_EFFORT": "high"}, "prompt",
+            wl.dir / "slice.jsonl", hard_timeout=30,
+            report_path=wl.dir / "report.json", output_schema=schema,
+        )
+    assert rc == 130
+    assert time.monotonic() - started < 5
+    assert "interrupted by stop request" in (wl.dir / "slice.jsonl").read_text()
+
+
 # --- run_round: hard timeout → terminate → 124 ----------------------------- #
 
 def test_run_round_hard_timeout_terminates(tmp: Path):

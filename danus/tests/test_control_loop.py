@@ -155,6 +155,36 @@ def test_quota_exhaustion_blocks_without_retry_or_slice_charge(tmp_path: Path):
     assert assignment["slice_count"] == 0
 
 
+def test_operator_stop_records_partial_usage_without_consuming_a_slice(tmp_path: Path):
+    wl, store = _worker(tmp_path, budget={"max_wall_seconds": 20}, slice_timeout=10)
+    original = loop.run_round
+
+    def interrupted(_wl, _role, _prompt, log_path, _timeout, **_kwargs):
+        log_path.write_text(
+            '{"type":"turn.completed","usage":{"input_tokens":12,"output_tokens":3}}\n',
+            encoding="utf-8",
+        )
+        wl.stop.touch()
+        return 130
+
+    loop.run_round = interrupted
+    try:
+        assert loop._run_v2_loop(
+            wl, {"MODEL": "m", "REASONING_EFFORT": "high"}, store, beat=0,
+        ) == 0
+    finally:
+        loop.run_round = original
+    assignment = store.assignment("high")
+    assert assignment["status"] == "assigned"
+    assert assignment["slice_count"] == 0
+    assert store.events("work_checkpoint") == []
+    assert store.events("slice_interrupted")[-1]["usage_status"] == "partial"
+    cost = store.events("cost")[-1]
+    assert cost["attempt_status"] == "interrupted"
+    assert cost["usage"]["input_tokens"] == 12
+    assert store.active_call_reservations() == []
+
+
 def test_a_call_reservation_at_the_budget_ceiling_does_not_reject_its_own_report(tmp_path: Path):
     _wl, store = _worker(tmp_path, budget={"max_wall_seconds": 10}, slice_timeout=10)
     assignment = store.assignment("high")

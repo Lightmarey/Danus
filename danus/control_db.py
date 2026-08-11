@@ -843,6 +843,43 @@ class SQLiteControlStore:
                 self._event(db, "backend_recovered", provider_key=provider_key, worker=worker)
             self._bump(db)
 
+    def record_worker_interruption(self, worker: str, *, wall_seconds: float,
+                                   usage: Optional[dict[str, Any]] = None,
+                                   reservation_id: Optional[str] = None,
+                                   reason: str = "operator_stop") -> dict[str, Any]:
+        """Settle a cancelled slice without charging a research checkpoint."""
+        assignment = self.assignment(worker)
+        if not assignment:
+            raise ControlError(f"worker {worker} has no v2 assignment")
+        if assignment.get("status") in {"assigned", "running", "auditing"}:
+            assignment["status"] = "assigned"
+        usage = usage or {}
+        with self._tx() as db:
+            db.execute(
+                "UPDATE assignments SET status=?,payload=? WHERE worker=?",
+                (assignment["status"], _dump(assignment), worker),
+            )
+            event = self._event(
+                db, "slice_interrupted", worker=worker,
+                assignment_epoch=assignment["epoch"],
+                target_version=assignment["target_version"],
+                obligation_id=assignment["obligation_id"],
+                route_id=assignment["route_id"], reason=reason,
+                usage_status="partial" if usage else "unavailable",
+            )
+            self._record_cost(
+                db, component="worker_slice", wall_seconds=wall_seconds,
+                usage=usage, reservation_id=reservation_id, worker=worker,
+                assignment_epoch=assignment["epoch"],
+                target_version=assignment["target_version"],
+                obligation_id=assignment["obligation_id"],
+                route_id=assignment["route_id"], attempt_status="interrupted",
+                usage_status="partial" if usage else "unavailable",
+            )
+            self._bump(db)
+        self._record_budget_threshold()
+        return {"assignment": assignment, "event": event}
+
     def record_backend_failure(self, outcome: dict[str, Any], *, provider_key: str, actor: str, wall_seconds: float = 0.0) -> dict[str, Any]:
         """Open the shared circuit for non-worker Codex/provider calls."""
         self.scaffold()

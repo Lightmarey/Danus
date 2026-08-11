@@ -232,7 +232,20 @@ def run_round(wl: L.WorkerLayout, role: dict, prompt: str, log_path: Path,
             logf.write(f"[worker_loop] codex binary not found: {cmd[0]}\n")
             return 127
         try:
-            return _Child.proc.wait(timeout=hard_timeout if hard_timeout > 0 else None)
+            if not structured:
+                return _Child.proc.wait(timeout=hard_timeout if hard_timeout > 0 else None)
+            deadline = time.monotonic() + hard_timeout if hard_timeout > 0 else None
+            while True:
+                wait_for = .5 if deadline is None else min(.5, max(.01, deadline - time.monotonic()))
+                try:
+                    return _Child.proc.wait(timeout=wait_for)
+                except subprocess.TimeoutExpired:
+                    if wl.stop.exists():
+                        runtime.stop_process(_Child.proc, wait_seconds=1, force=True)
+                        logf.write("\n[worker_loop] slice interrupted by stop request\n")
+                        return 130
+                    if deadline is not None and time.monotonic() >= deadline:
+                        raise
         except subprocess.TimeoutExpired:
             runtime.stop_process(_Child.proc, wait_seconds=10, force=True)
             logf.write(f"\n[worker_loop] round hard-timeout after {hard_timeout}s\n")
@@ -338,6 +351,19 @@ def _run_v2_loop(wl: L.WorkerLayout, role: dict, control: ControlStore, beat: fl
         wall = time.monotonic() - started
         report = parse_work_report(report_path)
         complete_report = report_path.is_file() and work_report_valid(report)
+        if rc == 130 and wl.stop.exists():
+            usage = parse_codex_usage(log_path)
+            control.record_worker_interruption(
+                worker, wall_seconds=wall, usage=usage,
+                reservation_id=reservation["id"],
+            )
+            wl.stop.unlink(missing_ok=True)
+            write_status(
+                wl, state="stopped", last_rc=rc,
+                usage_status="partial" if usage else "unavailable",
+                control_reason="operator stop interrupted the active slice",
+            )
+            return 0
         if rc != 0 and not (rc == 124 and complete_report):
             outcome = codex.classify_failure(rc, log_path)
             failure = control.record_worker_infra_failure(
