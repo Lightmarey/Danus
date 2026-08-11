@@ -100,7 +100,7 @@ def test_run_round_success_rc0(tmp: Path):
     assert rc == 0
 
 
-def test_v2_run_round_ignores_user_config(tmp: Path):
+def test_v2_run_round_injects_the_worker_gateway_config(tmp: Path):
     wl = _mk_worker(tmp)
     argv = wl.dir / "argv.json"
     reservation = wl.dir / "reservation.txt"
@@ -122,7 +122,11 @@ def test_v2_run_round_ignores_user_config(tmp: Path):
             reservation_id="reservation-1",
         )
     assert rc == 0
-    assert "--ignore-user-config" in json.loads(argv.read_text(encoding="utf-8"))
+    args = json.loads(argv.read_text(encoding="utf-8"))
+    assert "--ignore-user-config" not in args
+    inline = next(arg for arg in args if "mcp_servers.danus=" in arg)
+    assert "mcp_servers.danus=" in inline
+    assert "DANUS_PROJECT_DIR=" in inline and 'DANUS_ROLE="worker"' in inline
     assert reservation.read_text(encoding="utf-8") == "reservation-1"
 
 

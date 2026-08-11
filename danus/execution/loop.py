@@ -204,8 +204,11 @@ def run_round(wl: L.WorkerLayout, role: dict, prompt: str, log_path: Path,
     if report_path is not None and output_schema is not None:
         report_path.parent.mkdir(parents=True, exist_ok=True)
         report_path.unlink(missing_ok=True)
-        structured = ["--ignore-user-config", "--json", "--output-schema", str(output_schema),
-                      "--output-last-message", str(report_path)]
+        structured = [
+            "--config", scaffold.worker_gateway_config_arg(wl),
+            "--json", "--output-schema", str(output_schema),
+            "--output-last-message", str(report_path),
+        ]
     cmd = codex.exec_cmd(
         codex_bin, role["MODEL"], role["REASONING_EFFORT"],
         "-C", str(wdir),
@@ -329,6 +332,7 @@ def _run_v2_loop(wl: L.WorkerLayout, role: dict, control: ControlStore, beat: fl
             round_started_at=time.time(), target_version=assignment["target_version"],
             obligation_id=assignment["obligation_id"], route_id=assignment["route_id"],
             context_manifest_id=manifest["id"], context_snapshot=manifest["snapshot_generation"],
+            last_rc=None, usage_status=None, control_reason=None,
         )
         try:
             reservation = control.reserve_call(
@@ -442,7 +446,10 @@ def main(worker_dir: str) -> int:
     signal.signal(signal.SIGTERM, _on_term)
 
     _write_own_pid(wl)
-    write_status(wl, state="running", round=0, started_at=time.time())
+    write_status(
+        wl, state="running", round=0, started_at=time.time(),
+        last_rc=None, last_fact_id=None, usage_status=None, control_reason=None,
+    )
     rnd = 0
     consec_fail = 0
     try:

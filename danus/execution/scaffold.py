@@ -102,6 +102,20 @@ def write_codex_config(wl: "L.WorkerLayout") -> None:
     ))
 
 
+def worker_gateway_config_arg(wl: "L.WorkerLayout") -> str:
+    """Inline the authoritative worker gateway regardless of ambient config."""
+    py = json.dumps(runtime.current_python())
+    project = json.dumps(str(wl.project_dir))
+    author = json.dumps(wl.name)
+    verify_url = json.dumps(_verify_url())
+    return (
+        f'mcp_servers.danus={{command={py},args=["-m","danus.gateway"],'
+        f'tool_timeout_sec=3600,env={{DANUS_PROJECT_DIR={project},'
+        f'DANUS_AUTHOR={author},DANUS_ROLE="worker",'
+        f'DANUS_VERIFY_URL={verify_url}}}}}'
+    )
+
+
 # --------------------------------------------------------------------------- #
 # do_new — scaffold a project                                                 #
 # --------------------------------------------------------------------------- #
