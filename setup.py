@@ -27,7 +27,7 @@ class BuildPy(build_py):
         rmtree(agent_target, ignore_errors=True)
         contracts = agent_target / "contracts"
         contracts.mkdir(parents=True)
-        for name in ("worker.md", "verifier.md"):
+        for name in ("worker.md", "worker_v2.md", "verifier.md"):
             copy2(root / "agents" / "contracts" / name, contracts)
         for role, script in (
             ("worker", "check_conformance.py"),

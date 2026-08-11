@@ -7,6 +7,7 @@ recursive-include .agents/skills/write-paper/roles *
 recursive-include .agents/skills/write-paper/style *
 recursive-include .agents/skills/write-paper/templates *
 include agents/contracts/worker.md
+include agents/contracts/worker_v2.md
 include agents/contracts/verifier.md
 include agents/skills/worker/check_conformance.py
 include agents/skills/verify/test_verification_schema.py

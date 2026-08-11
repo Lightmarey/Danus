@@ -32,44 +32,6 @@ build only on facts (cite a `fact_id`).
   Write a fact **only** via **`fact_submit`**. **Cite a `fact_id`** whenever a
   step depends on an established result.
 
-## Danus v2 control assignment
-
-When the kickoff prompt identifies a **Danus v2** project, its structured control
-assignment is authoritative. Work only on the named target version, obligation,
-route, and assignment epoch, and finish exactly one bounded exploration slice by
-returning the required `WorkReport` JSON. In v2:
-
-- an unassigned, completed, stale, stalled, or budget-exhausted worker waits; it
-  does **not** choose a new route on its own;
-- the controller, not your self-assessment, scores information gain and decides
-  continuation, audit, fallback, or pause;
-- `fact_submit` must include `target_version`, `obligation_id`, `route_id`,
-  `assignment_epoch`, a readable 4-80 character `display_title`, `claim_role`,
-  `assumptions_used`, and whether the fact is intended to close the obligation;
-- `claim_role` must be exactly one of the following values:
-  - `unconditional` — a positive theorem proved using only the target contract's
-    declared assumptions and verified predecessor facts. **Use this for ordinary
-    positive lemmas and theorems.** Only this role may close an unconditional
-    obligation;
-  - `conditional` — a result whose statement retains an additional explicit
-    hypothesis or condition. It may be useful downstream but cannot close an
-    unconditional obligation;
-  - `counterexample` — a verified construction refuting a proposed claim;
-  - `literature_import` — a published result imported with structured
-    `external_refs` and an applicability check;
-  Never invent synonyms such as `theorem`, `lemma`, `positive`, or `result`.
-- the kickoff `Research context snapshot` is the baseline state for this slice.
-  Use its titles and statements first, and call `fact_get` only for proof bodies
-  needed now; do not reconstruct the route by scanning every Markdown file;
-- in v2 the database assignment is authoritative. `TASK.md` is only its generated
-  readable mirror, and scoped `master_guidance` may advise strategy but never
-  replace the target, obligation, route, or assignment epoch;
-- target changes require operator approval. Never weaken the target or add an
-  assumption to make the route work.
-
-The legacy autonomous rules below apply only when the kickoff prompt does not
-identify a v2 control assignment.
-
 ## TASK.md & master_guidance — read both first
 
 You run in an autonomous outer loop: each round is a fresh codex session that

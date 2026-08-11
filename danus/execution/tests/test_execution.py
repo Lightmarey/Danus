@@ -45,10 +45,13 @@ def _project_env(tmp: Path):
     are self-contained (no dependency on the repo's agents/ tree existing)."""
     contract = tmp / "worker.md"
     contract.write_text("# worker contract (stub)\n", encoding="utf-8")
+    contract_v2 = tmp / "worker_v2.md"
+    contract_v2.write_text("# worker v2 contract (stub)\n", encoding="utf-8")
     skills = tmp / "skills"
     skills.mkdir(exist_ok=True)
     with _env(DANUS_AGENTS_ROOT=str(tmp / "agents"),
               DANUS_WORKER_CONTRACT=str(contract),
+              DANUS_WORKER_V2_CONTRACT=str(contract_v2),
               DANUS_WORKER_SKILLS=str(skills)):
         yield
 
@@ -132,6 +135,13 @@ def test_do_new_refuses_existing(tmp: Path):
             pass
 
 
+def test_do_new_v2_uses_compact_worker_contract(tmp_path: Path):
+    with _project_env(tmp_path):
+        scaffold.do_new("V2", roles="high:1", control_version=2)
+        agents = L.worker_dir("V2", "high") / "AGENTS.md"
+        assert agents.resolve() == L.worker_v2_md().resolve()
+
+
 def test_do_new_verify_url_from_env(tmp: Path):
     with _project_env(tmp):
         with _env(DANUS_VERIFY_URL="http://127.0.0.1:9999/verify"):
@@ -157,6 +167,16 @@ def test_worker_start_refreshes_copied_assets(tmp: Path):
         assert (wl.dir / "AGENTS.md").read_text(encoding="utf-8") == "fresh"
         assert (copied_skills / "current.md").read_text(encoding="utf-8") == "fresh"
         assert not (copied_skills / "removed.md").exists()
+
+
+def test_worker_start_refreshes_v2_contract(tmp_path: Path):
+    with _project_env(tmp_path):
+        wl = L.WorkerLayout(tmp_path / "project" / "workers" / "high")
+        wl.dir.mkdir(parents=True)
+        (wl.dir / ".agents").mkdir()
+        (wl.dir / "AGENTS.md").write_text("stale", encoding="utf-8")
+        loop.refresh_worker_assets(wl, v2=True)
+        assert (wl.dir / "AGENTS.md").read_text(encoding="utf-8") == "# worker v2 contract (stub)\n"
 
 
 # --- loop helpers (pure) --------------------------------------------------- #

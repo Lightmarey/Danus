@@ -77,6 +77,14 @@ def worker_md() -> Path:
     return agent_assets.contract("worker")
 
 
+def worker_v2_md() -> Path:
+    """The compact contract used only by transactional v2 workers."""
+    env = os.environ.get("DANUS_WORKER_V2_CONTRACT")
+    if env:
+        return Path(env).resolve()
+    return agent_assets.contract("worker_v2")
+
+
 def worker_skills_dir() -> Path:
     """The worker skills dir (symlinked to .agents/skills). Pinned path
     ``agents/skills/worker``; override with ``DANUS_WORKER_SKILLS``."""

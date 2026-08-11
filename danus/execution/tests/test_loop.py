@@ -442,6 +442,23 @@ def test_kickoff_mentions_worker_and_project():
     assert "wkrY" in p and "ProjX" in p and "TASK.md" in p
 
 
+def test_v2_kickoff_is_scoped_without_full_assignment_dump():
+    assignment = {
+        "target_version": "v0001",
+        "obligation_id": "O",
+        "route_id": "R",
+        "epoch": "E",
+        "slice_count": 2,
+        "task": "Prove the assigned lemma.",
+        "credited_evidence_refs": ["should-not-be-embedded"],
+    }
+    prompt = loop.kickoff_v2("P", "high", assignment, audit=False, context="CTX")
+    assert all(value in prompt for value in ("v0001", "O", "R", "E", "CTX"))
+    assert "Prove the assigned lemma." in prompt
+    assert "should-not-be-embedded" not in prompt
+    assert "Do not reopen" in prompt
+
+
 # --- __main__ entry -------------------------------------------------------- #
 
 def test_dunder_main_dispatches(tmp: Path):

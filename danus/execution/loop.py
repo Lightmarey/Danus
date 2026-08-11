@@ -75,18 +75,23 @@ def kickoff_v2(project: str, worker: str, assignment: dict, *, audit: bool, cont
         "Explore the assigned route deeply for this bounded slice. Preserve useful partial "
         "progress, but do not change the approved target or silently adopt extra assumptions."
     )
+    scope = {
+        "target_version": assignment["target_version"],
+        "obligation_id": assignment["obligation_id"],
+        "route_id": assignment["route_id"],
+        "assignment_epoch": assignment["epoch"],
+        "slice_number": int(assignment.get("slice_count", 0)) + 1,
+    }
     return (
         f"You are worker '{worker}' on Danus v2 project '{project}'.\n"
         f"{mode}\n"
-        f"The control assignment below is authoritative:\n"
-        f"{json.dumps(assignment, ensure_ascii=False, indent=2)}\n"
+        f"Authoritative scope:\n{json.dumps(scope, ensure_ascii=False, indent=2)}\n"
+        f"Assigned task:\n{assignment['task']}\n"
         f"\n{context}\n"
-        "Read AGENTS.md and use the included research snapshot before requesting additional facts. "
-        "Consult relevant global-memory evidence and dead ends as supporting material. "
-        "Work only on this target version, obligation, and route. fact_submit must use the exact "
-        "target_version, obligation_id, route_id, and assignment epoch above. Ordinary memory "
-        "notes do not count as progress. Finish this one slice by returning the required WorkReport "
-        "JSON; do not continue into an unassigned route."
+        "AGENTS.md, the task, and this research snapshot are already loaded. Do not reopen them, "
+        "list the workspace, or perform routine memory/fact searches. Use included facts first and "
+        "expand only what the route needs. Work only in the scope above. Finish this slice with the "
+        "required WorkReport JSON; after completion or a control/budget/provider block, stop."
     )
 
 
@@ -229,8 +234,9 @@ def _cleanup_pid(wl: L.WorkerLayout) -> None:
         pass
 
 
-def refresh_worker_assets(wl: L.WorkerLayout) -> None:
-    runtime.sync_symlink_or_copy(L.worker_md(), wl.dir / "AGENTS.md")
+def refresh_worker_assets(wl: L.WorkerLayout, *, v2: bool = False) -> None:
+    contract = L.worker_v2_md() if v2 else L.worker_md()
+    runtime.sync_symlink_or_copy(contract, wl.dir / "AGENTS.md")
     runtime.sync_symlink_or_copy(
         L.worker_skills_dir(), wl.dir / ".agents" / "skills",
     )
@@ -358,12 +364,12 @@ def main(worker_dir: str) -> int:
         print(f"worker dir not found: {wdir}", file=sys.stderr)
         return 2
     wl = L.WorkerLayout(wdir)
-    refresh_worker_assets(wl)
     project_dir = wl.project_dir
     project = wl.project
     worker = wl.name
     role = _read_role(wl)
     control = ControlStore(project_dir)
+    refresh_worker_assets(wl, v2=control.enabled)
 
     # Refresh the worker gateway command from the shared runtime resolver on every
     # start, so a moved/rebuilt or explicitly configured interpreter is picked up.

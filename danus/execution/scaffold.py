@@ -140,7 +140,8 @@ def do_new(project: str, roles: str = "high:3,xhigh:4",
         wl.logs.mkdir(exist_ok=True)
 
         # static contract + skills (symlinks stay in sync with the repo)
-        symlink(L.worker_md(), wl.dir / "AGENTS.md")
+        contract = L.worker_v2_md() if control_version == 2 else L.worker_md()
+        symlink(contract, wl.dir / "AGENTS.md")
         (wl.dir / ".agents").mkdir(exist_ok=True)
         symlink(L.worker_skills_dir(), wl.dir / ".agents" / "skills")
 
