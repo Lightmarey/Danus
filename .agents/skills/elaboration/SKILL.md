@@ -48,10 +48,11 @@ reads are project-scoped for the main agent (`project=<p>`):
 - **global memory** — findings, dead ends, recent `verification` traces, the
   current `master_guidance`. Read via `gm_search`, or as a fallback by reading the
   raw `runtime/projects/<p>/global_memory/<kind>.jsonl` files.
-- **fact graph** — the verified facts, their statements, and the DAG. Read via
-  `fact_search`, or as a fallback by reading the raw
-  `runtime/projects/<p>/fact_graph/facts/*.md` files: what is established vs. still
-  open, and how facts compose.
+- **V2 research state** — start with `research_map`, then use `route_context` /
+  `obligation_context` for the relevant branch and `fact_get` only when a full
+  proof is needed. These are one snapshot-consistent ResearchQuery view shared
+  with workers and the console. For legacy V1 only, use `fact_search` and raw
+  fact files as the compatibility fallback.
 - **the project's problem statement** — the fixed goal and, if present, its
   enumerated sub-tasks / intended proof architecture.
 
@@ -224,9 +225,10 @@ Reference the role=main MCP tools by name (never internal engine paths):
 
 - `gm_search` / read `runtime/projects/<p>/global_memory/<kind>.jsonl` — gather
   findings, dead ends, recent verifications, current `master_guidance`.
-- `fact_search` / read `runtime/projects/<p>/fact_graph/facts/*.md` — the verified
-  facts and the DAG (`fact_search` to pull the facts bearing on a sub-task; read
-  the files for the full statements/proofs and predecessor structure).
+- `research_map` → `route_context` / `obligation_context` → `fact_get` — the V2
+  target, routes, obligations, obstacles, and verified facts from one shared read
+  model. Use `target_proof_manifest` for a completed target. `fact_search` and raw
+  fact files are legacy V1 fallbacks, not a way to reconstruct V2 state manually.
 - `gm_add` (kind `elaboration`) — publish the synthesis.
 - `search_arxiv_theorems` — optional, to sanity-check whether a missing bridge
   already exists in the literature before you name it.

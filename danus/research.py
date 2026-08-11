@@ -333,22 +333,19 @@ class ResearchQuery:
         dependencies = [self.store.obligation(item) for item in obligation.get("dependencies") or []]
         return {"snapshot_generation": generation, "obligation": obligation, "dependencies": dependencies, "routes": routes, "fact_group": self._scoped_facts(obligation_id=obligation_id)}
 
-    def target_proof_manifest(self, target_version: Optional[str] = None) -> dict[str, Any]:
-        target_version = target_version or self.store.current_target_version()
-        if not target_version:
-            return {"target_version": None, "complete": False, "root_obligations": [], "closing_fact_ids": [], "fact_ids": []}
-        roots = [item for item in self.store.list_obligations(target_version) if item.get("kind") == "root"]
-        root_ids = [item["id"] for item in roots]
+    def _topological_closure(self, seeds: Iterable[str]) -> list[str]:
+        support, _, _ = self._support_closure(seeds, depth=None, limit=100000)
+        selected = set(str(item) for item in seeds) | set(support)
+        if not selected:
+            return []
+        marks = ",".join("?" for _ in selected)
         with self.store._connect() as db:
-            closing = [str(row[0]) for row in db.execute(f"SELECT DISTINCT fact_id FROM fact_scopes WHERE relation='closing' AND obligation_id IN ({','.join('?' for _ in root_ids)}) ORDER BY fact_id", root_ids)] if root_ids else []
-        support, _, _ = self._support_closure(closing, depth=None, limit=100000)
-        selected = set(closing) | set(support)
-        indegree = {item: 0 for item in selected}
-        children: dict[str, list[str]] = defaultdict(list)
-        with self.store._connect() as db:
+            active = {str(row[0]) for row in db.execute(f"SELECT fact_id FROM facts WHERE status='active' AND fact_id IN ({marks})", sorted(selected))}
+            indegree = {item: 0 for item in active}
+            children: dict[str, list[str]] = defaultdict(list)
             for row in db.execute("SELECT predecessor_id,fact_id FROM fact_edges"):
                 source, target = str(row[0]), str(row[1])
-                if source in selected and target in selected:
+                if source in active and target in active:
                     children[source].append(target)
                     indegree[target] += 1
         queue = deque(sorted(item for item, degree in indegree.items() if degree == 0))
@@ -360,6 +357,29 @@ class ResearchQuery:
                 indegree[child] -= 1
                 if indegree[child] == 0:
                     queue.append(child)
+        if len(ordered) != len(active):
+            ordered.extend(sorted(active - set(ordered)))
+        return ordered
+
+    def target_research_manifest(self, target_version: Optional[str] = None) -> dict[str, Any]:
+        """All active facts explicitly used by one target plus their proof support."""
+        target_version = target_version or self.store.current_target_version()
+        if not target_version:
+            return {"target_version": None, "snapshot_generation": self.store.generation(), "fact_ids": [], "facts": []}
+        with self.store._connect() as db:
+            seeds = [str(row[0]) for row in db.execute("SELECT DISTINCT s.fact_id FROM fact_scopes s JOIN facts f ON f.fact_id=s.fact_id WHERE s.target_version=? AND f.status='active' ORDER BY s.fact_id", (target_version,))]
+        ordered = self._topological_closure(seeds)
+        return {"target_version": target_version, "snapshot_generation": self.store.generation(), "fact_ids": ordered, "facts": self._fact_rows(ordered)}
+
+    def target_proof_manifest(self, target_version: Optional[str] = None) -> dict[str, Any]:
+        target_version = target_version or self.store.current_target_version()
+        if not target_version:
+            return {"target_version": None, "complete": False, "root_obligations": [], "closing_fact_ids": [], "fact_ids": []}
+        roots = [item for item in self.store.list_obligations(target_version) if item.get("kind") == "root"]
+        root_ids = [item["id"] for item in roots]
+        with self.store._connect() as db:
+            closing = [str(row[0]) for row in db.execute(f"SELECT DISTINCT s.fact_id FROM fact_scopes s JOIN facts f ON f.fact_id=s.fact_id WHERE s.relation='closing' AND f.status='active' AND s.obligation_id IN ({','.join('?' for _ in root_ids)}) ORDER BY s.fact_id", root_ids)] if root_ids else []
+        ordered = self._topological_closure(closing)
         complete = bool(roots) and all(item.get("state") in {"closed", "refuted"} for item in roots) and all(any(scope["obligation_id"] == item["id"] for fid in closing for scope in self.fact_get(fid)["scopes"]) for item in roots)
         return {"target_version": target_version, "snapshot_generation": self.store.generation(), "complete": complete, "root_obligations": roots, "closing_fact_ids": closing, "fact_ids": ordered, "facts": self._fact_rows(ordered)}
 

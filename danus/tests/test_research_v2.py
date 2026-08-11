@@ -138,6 +138,13 @@ def test_fact_title_pending_recovery_scopes_and_manifest_are_deterministic(tmp_p
     assert "assignment_new" in first["facts"][0]["reasons"]
     manifest = query.target_proof_manifest("v0001")
     assert manifest["complete"] is True and manifest["closing_fact_ids"] == [fact_id]
+    research = query.target_research_manifest("v0001")
+    assert research["fact_ids"] == [fact_id]
+    from danus.human_summary import assemble as summary_assemble
+    assert "T holds" in summary_assemble.fact_bundle(project)
+    recovered.taint_fact(fact_id, "test invalidation")
+    assert query.target_research_manifest("v0001")["fact_ids"] == []
+    assert query.target_proof_manifest("v0001")["complete"] is False
 
 
 def test_same_fact_can_be_shared_by_routes_and_indexed_reads_do_not_open_markdown(tmp_path: Path, monkeypatch):
@@ -155,6 +162,9 @@ def test_same_fact_can_be_shared_by_routes_and_indexed_reads_do_not_open_markdow
     monkeypatch.setattr(Path, "read_text", lambda self, *a, **k: (_ for _ in ()).throw(AssertionError("Markdown read")) if self.suffix == ".md" else original(self, *a, **k))
     assert query.fact_get(fact_id)["title"] == "Shared supporting lemma"
     assert query.fact_search("supporting lemma")[0]["fact_id"] == fact_id
+    from danus.human_summary import assemble as summary_assemble
+    assert "Shared supporting lemma" not in summary_assemble.fact_bundle(project)
+    assert "## statement\n\nL" in summary_assemble.fact_bundle(project)
 
 
 def test_control_http_requires_capability_origin_and_generation(tmp_path: Path, monkeypatch):

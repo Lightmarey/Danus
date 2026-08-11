@@ -14,11 +14,9 @@ The load-bearing property this module enforces (the reason it exists):
   ``glossary_introduces`` / ``external_refs`` — is STRIPPED, and no fact id or
   slug is emitted anywhere. The writer works from mathematics, nothing else.
 
-Every verified fact is emitted in topological order (a fact always follows every
-fact it depends on); no fact is dropped. Dependency depth (longest predecessor
-chain) and in-degree (how many facts name it as a predecessor) only break ties
-within a topological level, so the load-bearing results lead where the order is
-otherwise free.
+For V2, the shared ResearchQuery supplies every active fact explicitly scoped to
+the approved target plus its predecessor closure, in topological order; the
+assembler never scans Markdown. Legacy V1 keeps the original all-facts ordering.
 
 The writer prompt lives in the operator-editable skill dir, located at CALL time
 via ``DANUS_HUMAN_SUMMARY_SKILL_DIR`` (default
@@ -134,17 +132,27 @@ def _ordered_load_bearing(fg: FactGraph) -> List[str]:
 
 
 def fact_bundle(project_dir: Path) -> str:
-    """The scrubbed fact bundle: each load-bearing fact's body sections
+    """The scrubbed fact bundle: each target-scoped fact's body sections
     (statement / proof / intuition), id-free, in dependency order. No frontmatter,
     no fact id, no slug — nothing but the mathematics."""
-    fg = FactGraph(Path(project_dir))
-    ids = _ordered_load_bearing(fg)
-    if not ids:
+    project_dir = Path(project_dir)
+    from danus.control import is_v2_project
+    if is_v2_project(project_dir):
+        from danus.research import ResearchQuery
+        query = ResearchQuery(project_dir)
+        ids = query.target_research_manifest()["fact_ids"]
+        rows = [query.fact_get(fid, include_proof=True) for fid in ids]
+        blocks = [
+            f"--- Result {n} ---\n## statement\n\n{row['statement']}\n\n"
+            f"## proof\n\n{row.get('proof') or ''}\n\n## intuition\n\n{row.get('intuition') or ''}\n"
+            for n, row in enumerate(rows, start=1)
+        ]
+    else:
+        fg = FactGraph(project_dir)
+        ids = _ordered_load_bearing(fg)
+        blocks = [f"--- Result {n} ---\n{_body_sections(fg.get_raw(fid) or '')}" for n, fid in enumerate(ids, start=1)]
+    if not blocks:
         return "_(no verified results are available for this project yet)_\n"
-    blocks: List[str] = []
-    for n, fid in enumerate(ids, start=1):
-        raw = fg.get_raw(fid) or ""
-        blocks.append(f"--- Result {n} ---\n{_body_sections(raw)}")
     return "\n".join(blocks)
 
 
