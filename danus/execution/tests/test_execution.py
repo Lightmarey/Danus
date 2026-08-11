@@ -115,7 +115,8 @@ def test_do_new_scaffolds_project(tmp: Path):
             cfg = wl.codex_config.read_text()
             assert 'DANUS_ROLE = "worker"' in cfg
             assert 'args = ["-m", "danus.gateway"]' in cfg  # pinned MCP launch
-            assert f'command = "{runtime.current_python().replace("\\", "\\\\")}"' in cfg
+            escaped_python = runtime.current_python().replace("\\", "\\\\")
+            assert f'command = "{escaped_python}"' in cfg
             assert "tool_timeout_sec = 3600" in cfg
             assert f'DANUS_AUTHOR = "{w}"' in cfg
             assert str(pdir).replace("\\", "\\\\") in cfg
