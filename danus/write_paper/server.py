@@ -103,19 +103,37 @@ def _attach_raw(res: Dict[str, Any], cp: Any) -> Dict[str, Any]:
     return res
 
 
-def _record_control_cost(project_dir: Optional[Path], component: str, started: float) -> None:
+def _prepare_control_call(project_dir: Optional[Path], component: str) -> tuple[Any, Optional[dict], Optional[Dict[str, Any]]]:
     if project_dir is None:
-        return
+        return None, None, None
     try:
         from danus.control import ControlStore
         control = ControlStore(project_dir)
         if control.enabled:
-            control.record_cost(
-                component=component, wall_seconds=time.monotonic() - started,
-                target_version=control.current_target_version(),
-            )
-    except (OSError, ValueError):
-        pass
+            reservation = control.reserve_call(component=component, max_wall_seconds=_timeout(), target_version=control.current_target_version())
+            gate = control.claim_backend_call("codex")
+            if not gate["allowed"]:
+                control.cancel_call_reservation(reservation["id"], reason="provider circuit is open")
+                return control, None, {"status": "infra_blocked", "returncode": None, "stdout": "", "stderr_tail": "", "error": f"Codex provider circuit is {gate['state']}"}
+            return control, reservation, None
+    except (OSError, ValueError) as exc:
+        return None, None, {"status": "budget_exhausted", "returncode": None, "stdout": "", "stderr_tail": "", "error": str(exc)}
+    return None, None, None
+
+
+def _record_control_cost(control: Any, reservation: Optional[dict], component: str, started: float, result: Dict[str, Any]) -> None:
+    if control is None:
+        return
+    control.record_cost(component=component, wall_seconds=time.monotonic() - started, reservation_id=reservation["id"] if reservation else None, target_version=control.current_target_version(), attempt_status=result.get("status"))
+    if result.get("status") == "ok" or result.get("returncode") == 0:
+        control.record_backend_success(provider_key="codex", actor=component)
+        return
+    from danus import codex
+    status = result.get("status")
+    error = str(result.get("stderr_full") or result.get("error") or "")
+    rc = 124 if status == "timeout" else 127 if "binary not found" in error.lower() else int(result.get("returncode") or 1)
+    outcome = codex.classify_failure(rc, text=error)
+    control.record_backend_failure(outcome, provider_key="codex", actor=component)
 
 
 def _drive(prompt: str, effort: Optional[str] = None) -> Dict[str, Any]:
@@ -136,9 +154,12 @@ def _drive(prompt: str, effort: Optional[str] = None) -> Dict[str, Any]:
 
 def _drive_scoped(prompt: str, project_dir: Path,
                   effort: Optional[str] = None) -> Dict[str, Any]:
+    control, reservation, blocked = _prepare_control_call(project_dir, "authoring")
+    if blocked:
+        return blocked
     started = time.monotonic()
     result = _drive(prompt, effort=effort)
-    _record_control_cost(project_dir, "authoring", started)
+    _record_control_cost(control, reservation, "authoring", started, result)
     return result
 
 
@@ -160,9 +181,12 @@ def _drive_networked(prompt: str) -> Dict[str, Any]:
 
 
 def _drive_networked_scoped(prompt: str, project_dir: Path) -> Dict[str, Any]:
+    control, reservation, blocked = _prepare_control_call(project_dir, "authoring_reference_verify")
+    if blocked:
+        return blocked
     started = time.monotonic()
     result = _drive_networked(prompt)
-    _record_control_cost(project_dir, "authoring_reference_verify", started)
+    _record_control_cost(control, reservation, "authoring_reference_verify", started, result)
     return result
 
 

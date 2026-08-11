@@ -15,6 +15,7 @@ import json
 import os
 import shutil
 import sys
+import time
 from dataclasses import replace
 from pathlib import Path
 from typing import Any, Dict, Optional
@@ -50,6 +51,50 @@ def _write_out(path: str, res: Dict[str, Any]) -> None:
         f"## reply (record this as master_guidance)\n\n{res.get('reply', '')}\n"
     )
     Path(path).write_text(md, encoding="utf-8")
+
+
+def _consult_scoped(project: Optional[str], provider_key: str, max_wall: float, run: Any) -> Dict[str, Any]:
+    """Reserve/settle one consult and share its provider circuit with later calls."""
+    control = None
+    reservation = None
+    if project:
+        try:
+            from danus.control import ControlStore
+            control = ControlStore(Path(project))
+            if control.enabled:
+                reservation = control.reserve_call(component="strategy_consult", provider_key=provider_key, max_wall_seconds=max_wall, target_version=control.current_target_version())
+                gate = control.claim_backend_call(provider_key)
+                if not gate["allowed"]:
+                    control.cancel_call_reservation(reservation["id"], reason="provider circuit is open")
+                    return {"status": "infra_blocked", "reply": "", "usage": {}, "cost_usd": 0.0, "seconds": 0.0, "error": f"provider circuit is {gate['state']}", "_control_recorded": True}
+            else:
+                control = None
+        except (OSError, ValueError) as exc:
+            return {"status": "budget_exhausted", "reply": "", "usage": {}, "cost_usd": 0.0, "seconds": 0.0, "error": str(exc), "_control_recorded": True}
+    started = time.monotonic()
+    try:
+        result = run()
+    except Exception as exc:
+        result = {"status": "error", "reply": "", "usage": {}, "cost_usd": None, "seconds": time.monotonic() - started, "error": str(exc)}
+    if control is not None:
+        usage = result.get("usage") or {}
+        has_usage = any(usage.get(key) for key in ("input", "output", "reasoning"))
+        cost = result.get("cost_usd") if result.get("status") == "completed" or has_usage else None
+        control.record_cost(component="strategy_consult", provider_key=provider_key, wall_seconds=float(result.get("seconds") or time.monotonic() - started), usage={"input_tokens": usage.get("input", 0), "output_tokens": usage.get("output", 0), "reasoning_tokens": usage.get("reasoning")}, cost_usd=cost, reservation_id=reservation["id"] if reservation else None, target_version=control.current_target_version(), attempt_status=result.get("status"))
+        if result.get("status") == "completed" or (result.get("status") != "timeout" and not result.get("error")):
+            control.record_backend_success(provider_key=provider_key, actor="strategy_consult")
+        else:
+            from danus import codex
+            rc = 124 if result.get("status") == "timeout" else 1
+            control.record_backend_failure(codex.classify_failure(rc, text=str(result.get("error") or "")), provider_key=provider_key, actor="strategy_consult")
+        result["_control_recorded"] = True
+    return result
+
+
+def _log_project_spend(project: Optional[str], result: Dict[str, Any]) -> None:
+    if project:
+        recorded = bool(result.pop("_control_recorded", False))
+        result["project_total_usd"] = log_spend(project, result, record_control=not recorded)
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -97,8 +142,7 @@ def main(argv: Optional[list] = None) -> int:
             prompt, effort=args.effort, tools=args.tools,
             max_output_tokens=args.max_output_tokens,
         )
-        if args.project:
-            res["project_total_usd"] = log_spend(args.project, res)  # records the $0 event
+        _log_project_spend(args.project, res)
         if args.out:
             _write_out(args.out, res)
         print(json.dumps(res, ensure_ascii=False))
@@ -114,16 +158,12 @@ def main(argv: Optional[list] = None) -> int:
             print(f"claude CLI not found at '{cfg.claude_bin}' (set DANUS_CONSULT_CLAUDE_CODE_BIN, "
                   "or use --transport off)", file=sys.stderr, flush=True)
             return 3
-        res = ClaudeCodeTransport(model, claude_bin=cfg.claude_bin, max_wall=cfg.max_wall,
-                              price_in=cfg.price_in, price_out=cfg.price_out).consult(
-            prompt, effort=args.effort, tools=args.tools,
-            max_output_tokens=args.max_output_tokens,
-        )
+        transport = ClaudeCodeTransport(model, claude_bin=cfg.claude_bin, max_wall=cfg.max_wall, price_in=cfg.price_in, price_out=cfg.price_out)
+        res = _consult_scoped(args.project, "consult:claude_code", cfg.max_wall, lambda: transport.consult(prompt, effort=args.effort, tools=args.tools, max_output_tokens=args.max_output_tokens))
         if res.get("status") != "completed":
             print(f"[consult] WARNING status={res.get('status')} (claude_code transport did not "
                   "complete; main agent should reason on its own)", file=sys.stderr, flush=True)
-        if args.project:
-            res["project_total_usd"] = log_spend(args.project, res)  # records the consult event with its metered cost_usd
+        _log_project_spend(args.project, res)
         if args.out:
             _write_out(args.out, res)
         print(json.dumps(res, ensure_ascii=False))
@@ -145,17 +185,13 @@ def main(argv: Optional[list] = None) -> int:
             print(f"[consult {elapsed:.0f}s status={status} events={n}]",
                   file=sys.stderr, flush=True)
 
-        res = ClaudeApiTransport(acfg).consult(
-            prompt, effort=args.effort, tools=args.tools,
-            max_output_tokens=args.max_output_tokens,
-            on_progress=None if args.quiet else _ahb,
-        )
+        transport = ClaudeApiTransport(acfg)
+        res = _consult_scoped(args.project, "consult:claude_api", acfg.timeout, lambda: transport.consult(prompt, effort=args.effort, tools=args.tools, max_output_tokens=args.max_output_tokens, on_progress=None if args.quiet else _ahb))
         if res.get("status") != "completed":
             print(f"[consult] WARNING status={res.get('status')} (claude_api transport "
                   "did not complete; main agent should reason on its own)",
                   file=sys.stderr, flush=True)
-        if args.project:
-            res["project_total_usd"] = log_spend(args.project, res)  # real usage × per-1M rate
+        _log_project_spend(args.project, res)
         if args.out:
             _write_out(args.out, res)
         print(json.dumps(res, ensure_ascii=False))
@@ -172,15 +208,11 @@ def main(argv: Optional[list] = None) -> int:
     def _hb(elapsed: float, status: Optional[str], n: int) -> None:
         print(f"[consult {elapsed:.0f}s status={status} events={n}]", file=sys.stderr, flush=True)
 
-    res = GptProTransport(config).consult(
-        prompt, effort=args.effort, tools=args.tools,
-        max_output_tokens=args.max_output_tokens,
-        on_progress=None if args.quiet else _hb,
-    )
+    transport = GptProTransport(config)
+    res = _consult_scoped(args.project, "consult:gpt_pro", config.timeout, lambda: transport.consult(prompt, effort=args.effort, tools=args.tools, max_output_tokens=args.max_output_tokens, on_progress=None if args.quiet else _hb))
     if res.get("status") and res["status"] != "completed":
         print(f"[consult] WARNING status={res['status']} (not completed)", file=sys.stderr, flush=True)
-    if args.project:
-        res["project_total_usd"] = log_spend(args.project, res)
+    _log_project_spend(args.project, res)
     if args.out:
         _write_out(args.out, res)
     print(json.dumps(res, ensure_ascii=False))

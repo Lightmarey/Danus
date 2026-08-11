@@ -137,3 +137,27 @@ def test_conditional_fact_cannot_close_unconditional_obligation(tmp_path: Path):
         server._verify = original
     assert result["accepted"] is True and result["closure"]["closed"] is False
     assert store.obligation_state("v0001-root-1") == "active"
+
+
+def test_verifier_quota_failure_opens_shared_circuit_and_prevents_retry_storm(tmp_path: Path):
+    store, assignment = _project(tmp_path)
+    calls = 0
+    original = server._verify
+
+    def quota(_statement: str, _proof: str):
+        nonlocal calls
+        calls += 1
+        raise RuntimeError("insufficient_quota: credit balance exhausted")
+
+    server._verify = quota
+    try:
+        with _env(DANUS_PROJECT_DIR=tmp_path, DANUS_AUTHOR="high", DANUS_VERIFY_URL="mock"):
+            first = server.fact_submit(statement="A new lemma.", proof="Proof.", display_title="A new lemma", **_args(assignment))
+            second = server.fact_submit(statement="Another lemma.", proof="Proof.", display_title="Another lemma", **_args(assignment))
+    finally:
+        server._verify = original
+    assert first["verdict"] == second["verdict"] == "error"
+    assert calls == 1
+    assert store.assignment("high")["slice_count"] == 0
+    assert store.events("backend_failure")[-1]["failure_class"] == "quota_exhausted"
+    assert store.budget_state()["reserved_wall_seconds"] == 0

@@ -250,6 +250,10 @@ def worker_status(wl: L.WorkerLayout) -> Dict:
             "max_slices": assignment.get("max_slices"),
             "consecutive_low": assignment.get("consecutive_low"),
             "audit_required": assignment.get("audit_required"),
+            "infra_failure_count": assignment.get("infra_failure_count", 0),
+            "infra_wall_seconds": assignment.get("infra_wall_seconds", 0),
+            "last_failure_class": assignment.get("last_failure_class"),
+            "next_retry_at_epoch": assignment.get("next_retry_at_epoch"),
         } if assignment else {"status": "unassigned"})
     return out
 

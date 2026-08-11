@@ -300,7 +300,7 @@ class ResearchQuery:
             with self.store._connect() as db:
                 unassigned_count = int(db.execute("SELECT COUNT(*) FROM facts f WHERE NOT EXISTS (SELECT 1 FROM fact_scopes s WHERE s.fact_id=f.fact_id)").fetchone()[0])
                 unassigned = [dict(row) | {"role": "unassigned"} for row in db.execute("SELECT fact_id,title,statement,status FROM facts f WHERE NOT EXISTS (SELECT 1 FROM fact_scopes s WHERE s.fact_id=f.fact_id) ORDER BY title,fact_id LIMIT 100")]
-            return {"generation": self.store.generation(), "active_target": None, "targets": targets, "methods": [], "obligations": [], "unassigned_count": unassigned_count, "unassigned_facts": unassigned, "budget": self.store.budget_state(), "outbox": self.store.list_outbox()}
+            return {"generation": self.store.generation(), "active_target": None, "targets": targets, "methods": [], "obligations": [], "unassigned_count": unassigned_count, "unassigned_facts": unassigned, "budget": self.store.budget_state(), "backend_circuits": self.store.backend_circuits(), "active_call_reservations": self.store.active_call_reservations(), "outbox": self.store.list_outbox()}
         obligations = self.store.list_obligations(target_version)
         routes = self.store.list_routes(target_version)
         with self.store._connect() as db:
@@ -315,7 +315,7 @@ class ResearchQuery:
             obligation = next((item for item in obligations if item["id"] == route["obligation_id"]), None)
             by_method[(route["method_key"], route["method_title"])].append({**route, "obligation": obligation, "gain_sequence": [item["gain"] for item in route_checkpoints], "checkpoints": len(route_checkpoints), "obstacles": route_obstacles})
         methods = [{"method_key": key, "method_title": title, "routes": values} for (key, title), values in sorted(by_method.items())]
-        return {"generation": self.store.generation(), "active_target": self.store.target(target_version), "target_state": self.store.target_state(target_version), "targets": targets, "methods": methods, "obligations": obligations, "unassigned_count": unassigned_count, "unassigned_facts": unassigned, "budget": self.store.budget_state(), "outbox": self.store.list_outbox()}
+        return {"generation": self.store.generation(), "active_target": self.store.target(target_version), "target_state": self.store.target_state(target_version), "targets": targets, "methods": methods, "obligations": obligations, "unassigned_count": unassigned_count, "unassigned_facts": unassigned, "budget": self.store.budget_state(), "backend_circuits": self.store.backend_circuits(), "active_call_reservations": self.store.active_call_reservations(), "outbox": self.store.list_outbox()}
 
     def route_context(self, route_id: str, *, snapshot: Optional[int] = None) -> dict[str, Any]:
         generation = self._snapshot(snapshot)

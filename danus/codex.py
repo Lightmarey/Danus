@@ -47,19 +47,20 @@ _FAILURE_PATTERNS = (
 )
 
 
-def classify_failure(return_code: int, log_path: Optional[Path] = None) -> Dict[str, Any]:
+def classify_failure(return_code: int, log_path: Optional[Path] = None, *, text: str = "") -> Dict[str, Any]:
     """Classify a failed Codex subprocess without storing its potentially sensitive log."""
     if return_code == 0:
         return {"failure_class": "success", "retryable": False, "retry_after_seconds": 0, "error_signature": ""}
     if return_code == 124:
-        failure_class, retryable, text = "timeout", True, ""
+        failure_class, retryable = "timeout", True
     elif return_code == 127:
-        failure_class, retryable, text = "auth_or_config", False, "codex binary not found"
+        failure_class, retryable, text = "auth_or_config", False, text or "codex binary not found"
     else:
-        try:
-            text = (log_path.read_text(encoding="utf-8", errors="replace")[-200_000:] if log_path else "")
-        except OSError:
-            text = ""
+        if not text:
+            try:
+                text = (log_path.read_text(encoding="utf-8", errors="replace")[-200_000:] if log_path else "")
+            except OSError:
+                text = ""
         lowered = text.lower()
         failure_class, retryable = "unknown_infra", True
         for category, can_retry, needles in _FAILURE_PATTERNS:

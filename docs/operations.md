@@ -104,6 +104,10 @@ danus stop   <project> --force  # kill the process group now
   Codex circuit permits only a single half-open probe after an outage. Quota,
   authentication, and configuration failures enter `infra_blocked` immediately;
   changing mathematics or restarting repeatedly does not clear that condition.
+- `research_map` exposes `backend_circuits`, `active_call_reservations`, known and
+  unknown billing counts, and infrastructure wall time. `danus status` includes
+  each assignment's persisted failure count, last failure class, retry deadline,
+  and infrastructure wall time.
 
 ## Unattended operation (examples, not core)
 

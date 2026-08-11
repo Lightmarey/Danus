@@ -199,6 +199,14 @@ class SQLiteControlStore:
                     consecutive_failures INTEGER NOT NULL, opened_until REAL,
                     failure_class TEXT, updated_at_utc TEXT NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS call_reservations(
+                    id TEXT PRIMARY KEY, component TEXT NOT NULL, provider_key TEXT NOT NULL,
+                    reserved_wall_seconds REAL NOT NULL, reserved_cost_usd REAL,
+                    status TEXT NOT NULL, scope TEXT NOT NULL,
+                    created_at_utc TEXT NOT NULL, expires_at_epoch REAL NOT NULL,
+                    settled_at_utc TEXT
+                );
+                CREATE INDEX IF NOT EXISTS call_reservations_active ON call_reservations(status, expires_at_epoch);
                 """
                 )
                 # Route signatures are a deterministic duplicate warning, not a
@@ -217,6 +225,7 @@ class SQLiteControlStore:
             self._migrate_files_once()
             self._initialized = True
             self.recover_pending_facts()
+            self.recover_call_reservations()
         finally:
             self._initializing = False
 
@@ -718,6 +727,24 @@ class SQLiteControlStore:
             wait = max(1, int(opened_until - now)) if opened_until else 1
             return {"allowed": False, "state": str(row["state"]), "wait_seconds": wait, "failure_class": row["failure_class"]}
 
+    def backend_circuits(self) -> list[dict[str, Any]]:
+        self.scaffold()
+        with self._connect() as db:
+            return [dict(row) for row in db.execute("SELECT * FROM backend_circuits ORDER BY provider_key")]
+
+    def cancel_backend_probe(self, provider_key: str = "codex") -> None:
+        """Release a half-open claim when local preflight prevents the actual call."""
+        self.scaffold()
+        with self._tx() as db:
+            changed = db.execute("UPDATE backend_circuits SET state='open',opened_until=?,updated_at_utc=? WHERE provider_key=? AND state='half_open'", (time.time(), utc_now(), provider_key)).rowcount
+            if changed:
+                self._bump(db)
+
+    def active_call_reservations(self) -> list[dict[str, Any]]:
+        self.scaffold()
+        with self._connect() as db:
+            return [dict(row) | {"scope": _load(row["scope"], {})} for row in db.execute("SELECT * FROM call_reservations WHERE status='active' AND expires_at_epoch>? ORDER BY created_at_utc", (time.time(),))]
+
     def _infra_policy(self, failure_class: str) -> tuple[int, float, list[int]]:
         budget = (self.current_target() or {}).get("budget") or {}
         attempts = max(1, int(budget.get("max_infra_attempts", 3)))
@@ -734,7 +761,7 @@ class SQLiteControlStore:
         retry = [max(0, int(value)) for value in raw] if isinstance(raw, list) and raw else [30, 120, 600]
         return attempts, wall_limit, retry
 
-    def record_worker_infra_failure(self, worker: str, outcome: dict[str, Any], *, wall_seconds: float, usage: Optional[dict[str, Any]] = None, provider_key: str = "codex") -> dict[str, Any]:
+    def record_worker_infra_failure(self, worker: str, outcome: dict[str, Any], *, wall_seconds: float, usage: Optional[dict[str, Any]] = None, provider_key: str = "codex", reservation_id: Optional[str] = None) -> dict[str, Any]:
         """Persist retry/circuit state and actual cost without consuming a research slice."""
         self.scaffold()
         with self._tx() as db:
@@ -766,7 +793,7 @@ class SQLiteControlStore:
                 (provider_key, circuit_state, 1, next_retry, failure_class, utc_now()),
             )
             event = self._event(db, "slice_infra_error", worker=worker, assignment_epoch=assignment["epoch"], target_version=assignment["target_version"], obligation_id=assignment["obligation_id"], route_id=assignment["route_id"], failure_class=failure_class, retryable=retryable, retry_at_epoch=next_retry, error_signature=outcome.get("error_signature"), return_code=outcome.get("return_code"), blocked=blocked)
-            self._record_cost(db, component="worker_infra", wall_seconds=wall_seconds, usage=usage, worker=worker, assignment_epoch=assignment["epoch"], target_version=assignment["target_version"], obligation_id=assignment["obligation_id"], route_id=assignment["route_id"], failure_class=failure_class, attempt_status="failed")
+            self._record_cost(db, component="worker_infra", wall_seconds=wall_seconds, usage=usage, reservation_id=reservation_id, worker=worker, assignment_epoch=assignment["epoch"], target_version=assignment["target_version"], obligation_id=assignment["obligation_id"], route_id=assignment["route_id"], failure_class=failure_class, attempt_status="failed")
             self._bump(db)
         self._record_budget_threshold()
         return {"assignment": assignment, "event": event, "blocked": blocked, "wait_seconds": None if blocked else wait}
@@ -795,6 +822,35 @@ class SQLiteControlStore:
             db.execute("INSERT INTO backend_circuits VALUES (?, 'closed', 0, NULL, NULL, ?) ON CONFLICT(provider_key) DO UPDATE SET state='closed',consecutive_failures=0,opened_until=NULL,failure_class=NULL,updated_at_utc=excluded.updated_at_utc", (provider_key, utc_now()))
             if circuit and circuit["state"] != "closed":
                 self._event(db, "backend_recovered", provider_key=provider_key, worker=worker)
+            self._bump(db)
+
+    def record_backend_failure(self, outcome: dict[str, Any], *, provider_key: str, actor: str) -> dict[str, Any]:
+        """Open the shared circuit for non-worker Codex/provider calls."""
+        self.scaffold()
+        failure_class = str(outcome.get("failure_class") or "unknown_infra")
+        attempts_limit, _wall_limit, retry_schedule = self._infra_policy(failure_class)
+        with self._tx() as db:
+            row = db.execute("SELECT consecutive_failures FROM backend_circuits WHERE provider_key=?", (provider_key,)).fetchone()
+            attempts = int(row[0] if row else 0) + 1
+            retryable = bool(outcome.get("retryable"))
+            blocked = not retryable or attempts >= attempts_limit
+            requested_wait = max(0, int(outcome.get("retry_after_seconds") or 0))
+            wait = max(requested_wait, retry_schedule[min(attempts - 1, len(retry_schedule) - 1)])
+            opened_until = None if blocked else time.time() + wait
+            state = "blocked" if blocked else "open"
+            db.execute("INSERT INTO backend_circuits VALUES (?,?,?,?,?,?) ON CONFLICT(provider_key) DO UPDATE SET state=excluded.state,consecutive_failures=excluded.consecutive_failures,opened_until=excluded.opened_until,failure_class=excluded.failure_class,updated_at_utc=excluded.updated_at_utc", (provider_key, state, attempts, opened_until, failure_class, utc_now()))
+            event = self._event(db, "backend_failure", provider_key=provider_key, actor=actor, failure_class=failure_class, retryable=retryable, retry_at_epoch=opened_until, error_signature=outcome.get("error_signature"), blocked=blocked)
+            self._bump(db)
+        return {"event": event, "state": state, "wait_seconds": None if blocked else wait}
+
+    def record_backend_success(self, *, provider_key: str, actor: str) -> None:
+        self.scaffold()
+        with self._tx() as db:
+            row = db.execute("SELECT state FROM backend_circuits WHERE provider_key=?", (provider_key,)).fetchone()
+            if not row or row["state"] == "closed":
+                return
+            db.execute("UPDATE backend_circuits SET state='closed',consecutive_failures=0,opened_until=NULL,failure_class=NULL,updated_at_utc=? WHERE provider_key=?", (utc_now(), provider_key))
+            self._event(db, "backend_recovered", provider_key=provider_key, actor=actor)
             self._bump(db)
 
     def validate_submission(self, worker: str, *, target_version: str, obligation_id: str, route_id: str, assignment_epoch: str, assumptions_used: Iterable[str]) -> dict[str, Any]:
@@ -882,7 +938,7 @@ class SQLiteControlStore:
             return True
         return any(any(row.get("id") == reference for row in read_jsonl(path)) for path in (self.project / "global_memory").glob("*.jsonl"))
 
-    def evaluate_work_report(self, worker: str, report: dict[str, Any], *, wall_seconds: float, usage: Optional[dict[str, Any]] = None) -> dict[str, Any]:
+    def evaluate_work_report(self, worker: str, report: dict[str, Any], *, wall_seconds: float, usage: Optional[dict[str, Any]] = None, reservation_id: Optional[str] = None) -> dict[str, Any]:
         assignment = self.validate_assignment(worker)
         assignment.update(status="running", slice_count=int(assignment["slice_count"]) + 1, lease_remaining=max(0, int(assignment["lease_remaining"]) - 1), wall_seconds=float(assignment.get("wall_seconds", 0)) + max(0.0, wall_seconds))
         recent = self.events()[int(assignment.get("event_cursor", 0)):]
@@ -931,7 +987,7 @@ class SQLiteControlStore:
             db.execute("INSERT INTO checkpoints VALUES (?,?,?,?,?,?,?,?,?)", (event["seq"], assignment["target_version"], assignment["obligation_id"], assignment["route_id"], worker, assignment["slice_count"], gain, decision, _dump(report)))
             for signature in report.get("failed_attempt_signatures") or []:
                 db.execute("INSERT INTO obstacles VALUES (?,?,?,?,?,?,?,?) ON CONFLICT(signature,route_id) DO UPDATE SET occurrences=occurrences+1,last_seen_seq=excluded.last_seen_seq,title=excluded.title,status='open'", (signature, assignment["route_id"], assignment["obligation_id"], signature, "open", 1, event["seq"], event["seq"]))
-            self._record_cost(db, component="worker_slice", wall_seconds=wall_seconds, usage=usage, worker=worker, target_version=assignment["target_version"], obligation_id=assignment["obligation_id"], route_id=assignment["route_id"], assignment_epoch=assignment["epoch"])
+            self._record_cost(db, component="worker_slice", wall_seconds=wall_seconds, usage=usage, reservation_id=reservation_id, worker=worker, target_version=assignment["target_version"], obligation_id=assignment["obligation_id"], route_id=assignment["route_id"], assignment_epoch=assignment["epoch"])
             self._bump(db)
         self._record_budget_threshold()
         return {"gain": gain, "decision": decision, "assignment": assignment}
@@ -947,31 +1003,100 @@ class SQLiteControlStore:
                 return self.assign(worker, obligation_id=assignment["obligation_id"], route_id=rid, task=f"Fallback route {rid}: {self.route(rid)['expected_result']}", max_slices=assignment["max_slices"], slice_timeout=assignment["slice_timeout"])
         return None
 
-    def _record_cost(self, db: sqlite3.Connection, *, component: str, wall_seconds: float, usage: Optional[dict[str, Any]] = None, cost_usd: Optional[float] = None, **scope: Any) -> dict[str, Any]:
+    def reserve_call(self, *, component: str, max_wall_seconds: float, provider_key: str = "codex", estimated_cost_usd: Optional[float] = None, **scope: Any) -> dict[str, Any]:
+        """Atomically reserve the worst-case local budget before spawning a paid call."""
+        self.scaffold()
+        wall = float(max_wall_seconds)
+        if wall <= 0:
+            raise ControlError("V2 paid calls require a finite positive timeout")
+        estimated = None if estimated_cost_usd is None else max(0.0, float(estimated_cost_usd))
+        now = time.time()
+        with self._tx() as db:
+            target = db.execute("SELECT payload FROM targets WHERE state='approved' ORDER BY version DESC LIMIT 1").fetchone()
+            budget = (_load(target[0], {}).get("budget") if target else {}) or {}
+            if estimated is None and budget.get("max_call_cost_usd") is not None:
+                estimated = max(0.0, float(budget["max_call_cost_usd"]))
+            spent = self._budget_state_in(db)
+            try:
+                wall_limit = float(budget.get("max_wall_seconds"))
+            except (TypeError, ValueError):
+                wall_limit = 0.0
+            if wall_limit > 0 and spent["wall_seconds"] + spent["reserved_wall_seconds"] + wall > wall_limit:
+                raise ControlError("project wall budget cannot reserve this call")
+            try:
+                cost_limit = float(budget.get("max_cost_usd"))
+            except (TypeError, ValueError):
+                cost_limit = 0.0
+            if cost_limit > 0 and estimated is not None and spent["cost_usd"] + spent["reserved_cost_usd"] + estimated > cost_limit:
+                raise ControlError("project cost budget cannot reserve this call")
+            if cost_limit > 0 and estimated is None and budget.get("strict_cost_reservations"):
+                raise ControlError("strict project cost budget requires an estimated call cost")
+            reservation_id = uuid.uuid4().hex
+            expires = now + wall + 60.0
+            db.execute("INSERT INTO call_reservations VALUES (?,?,?,?,?,'active',?,?,?,NULL)", (reservation_id, component, provider_key, wall, estimated, _dump(scope), utc_now(), expires))
+            self._event(db, "call_reserved", reservation_id=reservation_id, component=component, provider_key=provider_key, reserved_wall_seconds=wall, reserved_cost_usd=estimated, **scope)
+            self._bump(db)
+        return {"id": reservation_id, "component": component, "provider_key": provider_key, "reserved_wall_seconds": wall, "reserved_cost_usd": estimated, "expires_at_epoch": expires}
+
+    def _settle_reservation(self, db: sqlite3.Connection, reservation_id: Optional[str]) -> None:
+        if not reservation_id:
+            return
+        changed = db.execute("UPDATE call_reservations SET status='settled',settled_at_utc=? WHERE id=? AND status='active'", (utc_now(), reservation_id)).rowcount
+        if not changed:
+            raise ControlError(f"call reservation is not active: {reservation_id}")
+
+    def cancel_call_reservation(self, reservation_id: str, *, reason: str) -> None:
+        self.scaffold()
+        with self._tx() as db:
+            changed = db.execute("UPDATE call_reservations SET status='cancelled',settled_at_utc=? WHERE id=? AND status='active'", (utc_now(), reservation_id)).rowcount
+            if not changed:
+                raise ControlError(f"call reservation is not active: {reservation_id}")
+            self._event(db, "call_reservation_cancelled", reservation_id=reservation_id, reason=reason)
+            self._bump(db)
+
+    def recover_call_reservations(self) -> list[str]:
+        if not self.db_path.exists():
+            return []
+        now = time.time()
+        with self._tx() as db:
+            rows = db.execute("SELECT id,component,provider_key FROM call_reservations WHERE status='active' AND expires_at_epoch<=?", (now,)).fetchall()
+            for row in rows:
+                db.execute("UPDATE call_reservations SET status='expired',settled_at_utc=? WHERE id=?", (utc_now(), row["id"]))
+                self._event(db, "call_reservation_expired", reservation_id=row["id"], component=row["component"], provider_key=row["provider_key"])
+            if rows:
+                self._bump(db)
+        return [str(row["id"]) for row in rows]
+
+    def _record_cost(self, db: sqlite3.Connection, *, component: str, wall_seconds: float, usage: Optional[dict[str, Any]] = None, cost_usd: Optional[float] = None, reservation_id: Optional[str] = None, **scope: Any) -> dict[str, Any]:
+        self._settle_reservation(db, reservation_id)
         usage = usage or {}
         if cost_usd is None:
             try:
                 cost_usd = (float(usage.get("input_tokens", 0) or 0) * float(os.environ.get("DANUS_CODEX_PRICE_IN", "")) + float(usage.get("output_tokens", 0) or 0) * float(os.environ.get("DANUS_CODEX_PRICE_OUT", ""))) / 1_000_000
             except ValueError:
                 cost_usd = None
-        return self._event(db, "cost", component=component, wall_seconds=round(max(0.0, wall_seconds), 3), usage=usage, cost_usd=cost_usd, cost_status="known" if cost_usd is not None else "unknown", **scope)
+        return self._event(db, "cost", component=component, wall_seconds=round(max(0.0, wall_seconds), 3), usage=usage, cost_usd=cost_usd, cost_status="known" if cost_usd is not None else "unknown", reservation_id=reservation_id, **scope)
 
-    def record_cost(self, *, component: str, wall_seconds: float, usage: Optional[dict[str, Any]] = None, cost_usd: Optional[float] = None, **scope: Any) -> dict[str, Any]:
+    def record_cost(self, *, component: str, wall_seconds: float, usage: Optional[dict[str, Any]] = None, cost_usd: Optional[float] = None, reservation_id: Optional[str] = None, **scope: Any) -> dict[str, Any]:
         self.scaffold()
         with self._tx() as db:
-            event = self._record_cost(db, component=component, wall_seconds=wall_seconds, usage=usage, cost_usd=cost_usd, **scope)
+            event = self._record_cost(db, component=component, wall_seconds=wall_seconds, usage=usage, cost_usd=cost_usd, reservation_id=reservation_id, **scope)
             self._bump(db)
         self._record_budget_threshold()
         return event
 
-    def budget_state(self) -> dict[str, Any]:
-        target = self.current_target() or {}
-        costs = self.events("cost")
+    def _budget_state_in(self, db: sqlite3.Connection) -> dict[str, Any]:
+        target_row = db.execute("SELECT payload FROM targets WHERE state='approved' ORDER BY version DESC LIMIT 1").fetchone()
+        target = _load(target_row[0], {}) if target_row else {}
+        costs = [_load(row[0], {}) for row in db.execute("SELECT payload FROM events WHERE event='cost'")]
         wall = sum(float(row.get("wall_seconds") or 0) for row in costs)
         cost = sum(float(row.get("cost_usd") or 0) for row in costs if row.get("cost_usd") is not None)
+        active = db.execute("SELECT reserved_wall_seconds,reserved_cost_usd FROM call_reservations WHERE status='active' AND expires_at_epoch>?", (time.time(),)).fetchall()
+        reserved_wall = sum(float(row["reserved_wall_seconds"] or 0) for row in active)
+        reserved_cost = sum(float(row["reserved_cost_usd"] or 0) for row in active)
         ratios = []
         budget = target.get("budget") or {}
-        for spent, key in ((wall, "max_wall_seconds"), (cost, "max_cost_usd")):
+        for spent, key in ((wall + reserved_wall, "max_wall_seconds"), (cost + reserved_cost, "max_cost_usd")):
             try:
                 limit = float(budget.get(key))
                 if limit > 0:
@@ -980,7 +1105,12 @@ class SQLiteControlStore:
                 pass
         ratio = max(ratios, default=0.0)
         stage = "exhausted" if ratio >= 1 else "audit" if ratio >= .85 else "warn" if ratio >= .70 else "normal"
-        return {"stage": stage, "ratio": ratio, "wall_seconds": wall, "cost_usd": cost, "unknown_cost_events": sum(row.get("cost_usd") is None for row in costs), "infra_wall_seconds": sum(float(row.get("wall_seconds") or 0) for row in costs if row.get("component") == "worker_infra"), "budget": budget}
+        return {"stage": stage, "ratio": ratio, "wall_seconds": wall, "cost_usd": cost, "reserved_wall_seconds": reserved_wall, "reserved_cost_usd": reserved_cost, "unknown_cost_events": sum(row.get("cost_usd") is None for row in costs), "infra_wall_seconds": sum(float(row.get("wall_seconds") or 0) for row in costs if row.get("component") == "worker_infra"), "budget": budget}
+
+    def budget_state(self) -> dict[str, Any]:
+        self.scaffold()
+        with self._connect() as db:
+            return self._budget_state_in(db)
 
     def _record_budget_threshold(self) -> None:
         state = self.budget_state()

@@ -288,6 +288,18 @@ def _run_v2_loop(wl: L.WorkerLayout, role: dict, control: ControlStore, beat: fl
             obligation_id=assignment["obligation_id"], route_id=assignment["route_id"],
             context_manifest_id=manifest["id"], context_snapshot=manifest["snapshot_generation"],
         )
+        try:
+            reservation = control.reserve_call(
+                component="worker_slice", max_wall_seconds=float(assignment["slice_timeout"]),
+                worker=worker, assignment_epoch=assignment["epoch"],
+                target_version=assignment["target_version"], obligation_id=assignment["obligation_id"],
+                route_id=assignment["route_id"],
+            )
+        except ControlError as exc:
+            if probe_claimed:
+                control.cancel_backend_probe("codex")
+            write_status(wl, state="budget_exhausted", control_reason=str(exc))
+            return 0
         started = time.monotonic()
         rc = run_round(
             wl, role, prompt, log_path, int(assignment["slice_timeout"]),
@@ -300,6 +312,7 @@ def _run_v2_loop(wl: L.WorkerLayout, role: dict, control: ControlStore, beat: fl
             outcome = codex.classify_failure(rc, log_path)
             failure = control.record_worker_infra_failure(
                 worker, outcome, wall_seconds=wall, usage=parse_codex_usage(log_path),
+                reservation_id=reservation["id"],
             )
             write_status(
                 wl, state=failure["assignment"]["status"], last_rc=rc,
@@ -314,6 +327,7 @@ def _run_v2_loop(wl: L.WorkerLayout, role: dict, control: ControlStore, beat: fl
         result = control.evaluate_work_report(
             worker, report, wall_seconds=wall,
             usage=parse_codex_usage(log_path),
+            reservation_id=reservation["id"],
         )
         current = result["assignment"]
         write_status(

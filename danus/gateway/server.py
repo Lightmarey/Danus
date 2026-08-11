@@ -95,15 +95,18 @@ def _fg(project: Optional[str] = None) -> FactGraph:
     return FactGraph(_project(project))
 
 
+def _verify_timeout() -> int:
+    try:
+        return max(1, int(os.environ.get("DANUS_VERIFY_TIMEOUT", "3600")))
+    except ValueError:
+        return 3600
+
+
 def _verify(statement: str, proof: str) -> Dict[str, Any]:
     """POST {statement, proof} to the verify service; return its JSON."""
     verify_url = os.environ.get("DANUS_VERIFY_URL", "")
     if not verify_url:
         raise RuntimeError("DANUS_VERIFY_URL is not set (verify service not wired yet)")
-    try:
-        timeout = int(os.environ.get("DANUS_VERIFY_TIMEOUT", "3600"))
-    except ValueError:
-        timeout = 3600
     data = json.dumps({"statement": statement, "proof": proof}).encode("utf-8")
     req = urllib.request.Request(
         verify_url, data=data, headers={"Content-Type": "application/json"}
@@ -111,7 +114,7 @@ def _verify(statement: str, proof: str) -> Dict[str, Any]:
     # The verifier is a loopback service.  Bypass host proxy variables so a
     # machine-wide HTTP_PROXY cannot redirect local proof material elsewhere.
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
-    with opener.open(req, timeout=timeout) as resp:  # noqa: S310 (trusted local URL)
+    with opener.open(req, timeout=_verify_timeout()) as resp:  # noqa: S310 (trusted local URL)
         return json.loads(resp.read().decode("utf-8"))
 
 
@@ -301,6 +304,16 @@ def fact_submit(
 
     # 1) Verify. If the verify service errors, no verdict exists yet: return a
     #    clean error so the worker retries. Nothing is lost.
+    reservation = None
+    if control.enabled:
+        try:
+            reservation = control.reserve_call(component="verification", max_wall_seconds=_verify_timeout(), worker=_author(), target_version=target_version, obligation_id=obligation_id, route_id=route_id, assignment_epoch=assignment_epoch)
+            gate = control.claim_backend_call("codex")
+            if not gate["allowed"]:
+                control.cancel_call_reservation(reservation["id"], reason="provider circuit is open")
+                return {"accepted": False, "verdict": "error", "error": f"Codex provider circuit is {gate['state']}", "undefined_symbols": undefined}
+        except ControlError as exc:
+            return {"accepted": False, "verdict": "control_error", "error": str(exc), "undefined_symbols": undefined}
     try:
         result = _verify(statement, proof)
     except Exception as e:
@@ -309,7 +322,12 @@ def fact_submit(
                 component="verification", wall_seconds=time.monotonic() - started,
                 worker=_author(), target_version=target_version, obligation_id=obligation_id,
                 route_id=route_id, assignment_epoch=assignment_epoch,
+                reservation_id=reservation["id"] if reservation else None,
+                attempt_status="failed",
             )
+            from danus import codex
+            rc = 124 if "timed out" in str(e).lower() or "504" in str(e) else 1
+            control.record_backend_failure(codex.classify_failure(rc, text=str(e)), provider_key="codex", actor="verification")
         return {"accepted": False, "verdict": "error", "error": str(e),
                 "undefined_symbols": undefined}
     # A successful call that returned a non-dict body (e.g. a bare list) would make
@@ -321,7 +339,10 @@ def fact_submit(
                 component="verification", wall_seconds=time.monotonic() - started,
                 worker=_author(), target_version=target_version, obligation_id=obligation_id,
                 route_id=route_id, assignment_epoch=assignment_epoch,
+                reservation_id=reservation["id"] if reservation else None,
+                attempt_status="invalid_response",
             )
+            control.record_backend_failure({"failure_class": "invalid_response", "retryable": False, "retry_after_seconds": 0, "error_signature": "invalid-response"}, provider_key="codex", actor="verification")
         return {"accepted": False, "verdict": "error",
                 "error": f"verify service returned a non-dict body ({type(result).__name__})",
                 "undefined_symbols": undefined}
@@ -379,7 +400,10 @@ def fact_submit(
             route_id=route_id, assignment_epoch=assignment_epoch,
             usage=(result.get("usage") if isinstance(result.get("usage"), dict) else {}),
             cost_usd=result.get("cost_usd"),
+            reservation_id=reservation["id"] if reservation else None,
+            attempt_status="completed",
         )
+        control.record_backend_success(provider_key="codex", actor="verification")
         if accepted and fact_id:
             closure = _close_v2_obligation(
                 control, statement=statement, fact_id=fact_id,

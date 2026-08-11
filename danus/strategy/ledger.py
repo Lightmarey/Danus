@@ -19,7 +19,7 @@ def ledger_path(project: str) -> Path:
     return Path(project).joinpath(*LEDGER_RELPATH)
 
 
-def log_spend(project: str, envelope: Dict[str, Any]) -> str:
+def log_spend(project: str, envelope: Dict[str, Any], *, record_control: bool = True) -> str:
     """Append one spend record for this consult and return the running total
     (formatted to 4 dp) over the whole ledger."""
     ledger = ledger_path(project)
@@ -42,7 +42,7 @@ def log_spend(project: str, envelope: Dict[str, Any]) -> str:
     try:
         from danus.control import ControlStore
         control = ControlStore(Path(project))
-        if control.enabled:
+        if control.enabled and record_control:
             control.record_cost(
                 component="strategy_consult", wall_seconds=float(envelope.get("seconds") or 0),
                 usage={

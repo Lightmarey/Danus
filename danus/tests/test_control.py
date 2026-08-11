@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import threading
 from pathlib import Path
 
 from danus.control import ControlError, ControlStore, is_v2_project, parse_codex_usage
@@ -285,3 +286,76 @@ def test_infra_failure_and_project_circuit_survive_restart(tmp_path: Path):
     assert assignment["status"] == "waiting_retry"
     assert reopened.claim_backend_call()["allowed"] is True
     assert reopened.claim_backend_call()["allowed"] is False  # only one half-open probe
+
+
+def test_call_reservations_atomically_prevent_concurrent_budget_overshoot(tmp_path: Path):
+    store = _store(tmp_path)
+    target = store.propose_target(_target() | {"budget": {"max_wall_seconds": 100}})
+    store.approve_target(target["version"])
+    barrier = threading.Barrier(2)
+    results: list[str] = []
+
+    def reserve() -> None:
+        barrier.wait()
+        try:
+            store.reserve_call(component="worker_slice", max_wall_seconds=60)
+            results.append("reserved")
+        except ControlError:
+            results.append("blocked")
+
+    threads = [threading.Thread(target=reserve) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    assert sorted(results) == ["blocked", "reserved"]
+    assert store.budget_state()["reserved_wall_seconds"] == 60
+
+
+def test_reservation_settlement_and_crash_expiry_release_budget(tmp_path: Path):
+    store = _store(tmp_path)
+    target = store.propose_target(_target() | {"budget": {"max_wall_seconds": 100}})
+    store.approve_target(target["version"])
+    first = store.reserve_call(component="verification", max_wall_seconds=60)
+    store.record_cost(component="verification", wall_seconds=10, reservation_id=first["id"])
+    assert store.budget_state()["reserved_wall_seconds"] == 0
+    expired = store.reserve_call(component="authoring", max_wall_seconds=80)
+    with store._tx() as db:
+        db.execute("UPDATE call_reservations SET expires_at_epoch=0 WHERE id=?", (expired["id"],))
+    reopened = ControlStore(store.project)
+    assert reopened.recover_call_reservations() == [expired["id"]]
+    state = reopened.budget_state()
+    assert state["reserved_wall_seconds"] == 0 and state["wall_seconds"] == 10
+
+
+def test_authoring_and_consult_preflight_stop_before_an_over_budget_call(tmp_path: Path):
+    from danus.human_summary import server as summary_server
+    from danus.strategy import cli as strategy_cli
+
+    store = _store(tmp_path)
+    target = store.propose_target(_target() | {"budget": {"max_wall_seconds": 100}})
+    store.approve_target(target["version"])
+    calls = []
+    original = summary_server._drive
+    summary_server._drive = lambda _prompt: (calls.append("summary") or {"status": "ok"})
+    try:
+        summary = summary_server._drive_scoped("prompt", store.project)
+    finally:
+        summary_server._drive = original
+    consult = strategy_cli._consult_scoped(str(store.project), "consult:test", 101, lambda: calls.append("consult"))
+    assert summary["status"] == consult["status"] == "budget_exhausted"
+    assert calls == []
+    assert store.budget_state()["reserved_wall_seconds"] == 0
+
+
+def test_strict_cost_budget_requires_and_reserves_a_per_call_ceiling(tmp_path: Path):
+    store = _store(tmp_path)
+    target = store.propose_target(_target() | {"budget": {"max_cost_usd": 1, "strict_cost_reservations": True, "max_call_cost_usd": .6}})
+    store.approve_target(target["version"])
+    first = store.reserve_call(component="verification", max_wall_seconds=10)
+    assert first["reserved_cost_usd"] == .6
+    try:
+        store.reserve_call(component="authoring", max_wall_seconds=10)
+        assert False, "concurrent reservations must not exceed the strict USD ceiling"
+    except ControlError as exc:
+        assert "cost budget" in str(exc)

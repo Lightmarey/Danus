@@ -116,12 +116,21 @@ worker and restart observes the same values:
 | `max_infra_attempts` | `3` (`2` for timeouts) | consecutive transport attempts before blocking |
 | `max_infra_wall_seconds` | `min(1800, 5% of max_wall_seconds)` | separate outage-loss ceiling |
 | `infra_retry_seconds` | `[30, 120, 600]` | persisted retry cooldowns; a provider `Retry-After` can only increase them |
+| `strict_cost_reservations` | `false` | reject calls whose maximum USD cost cannot be estimated |
+| `max_call_cost_usd` | unset | conservative per-call USD reservation used by strict cost control |
 
 Infrastructure attempts count toward real project wall/cost totals but never
 consume route slices or low-gain checkpoints. Missing provider usage is stored
 as unknown cost, not zero cost. A provider/account hard spending limit remains
 necessary for a strict external USD ceiling because a disconnected request may
 not return a billing receipt.
+
+Before every V2 worker, verifier, consult, or authoring call, SQLite reserves its
+full configured wall timeout in one transaction. Active reservations participate
+in the 70/85/100% thresholds, so concurrent callers cannot all pass a stale
+budget check. Completion atomically replaces the reservation with the real
+`CostEvent`; a crashed process leaves a conservative reservation that expires
+after the hard timeout plus a short cleanup grace period.
 
 ## Rendering & misc
 
