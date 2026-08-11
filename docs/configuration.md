@@ -38,6 +38,8 @@ Use `uv run danus codex login` for ChatGPT authentication and
 | `DANUS_CONSULT_API_KEY` | — | (gpt_pro) key for the OpenAI-compatible Responses API |
 | `DANUS_CONSULT_BASE_URL` | `https://api.openai.com/v1` | (gpt_pro) endpoint |
 | `DANUS_CONSULT_MODEL` | `gpt-5.5-pro` | (gpt_pro) model |
+| `DANUS_CONSULT_BACKGROUND` | `1` | (gpt_pro) send `background=true`; `0` for a gateway that rejects it (per-call: `--background off`) |
+| `DANUS_CONSULT_STORE` | `0` | (gpt_pro) send `store=false`; `1` for a gateway that requires stored responses (per-call: `--store on`) |
 | `DANUS_CONSULT_CLAUDE_CODE_MODEL` | `claude-fable-5` | (claude_code) model via the `claude` CLI |
 | `DANUS_CONSULT_CLAUDE_CODE_BIN` | `claude` | (claude_code) path to the CLI |
 | `DANUS_CONSULT_CLAUDE_CODE_MAX_WALL` | `1800` | (claude_code) hard wall-clock cap per consult (s) |
@@ -59,6 +61,10 @@ Use `uv run danus codex login` for ChatGPT authentication and
   `claude` CLI), web-only tools, and the prompt on stdin (never argv, which is
   world-readable on a shared host). It sees the elaboration and the public web,
   nothing else.
+- Consult effort is selected per call with `--effort`. Accepted values are
+  `minimal`, `low`, `medium`, `high`, `xhigh`, and `max`. All transports support
+  through `max`; a `gpt_pro` `max` request is never silently retried without its
+  requested reasoning effort.
 
 ## Models & reasoning effort
 

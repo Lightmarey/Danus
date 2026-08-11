@@ -351,6 +351,66 @@ def test_authoring_and_consult_preflight_stop_before_an_over_budget_call(tmp_pat
     assert store.budget_state()["reserved_wall_seconds"] == 0
 
 
+def test_correctable_consult_rejection_does_not_open_circuit_or_spend_reservation(tmp_path: Path):
+    from danus.strategy import cli as strategy_cli
+
+    class FakeBadRequestError(Exception):
+        status_code = 400
+
+    store = _store(tmp_path)
+    target = store.propose_target(_target() | {"budget": {
+        "max_wall_seconds": 100, "max_cost_usd": 1,
+        "strict_cost_reservations": True, "max_call_cost_usd": .6,
+    }})
+    store.approve_target(target["version"])
+
+    def reject():
+        raise FakeBadRequestError("background is not permitted")
+
+    failed = strategy_cli._consult_scoped(
+        str(store.project), "consult:test", 10, reject,
+        transport="gpt_pro", model="m", effort="max",
+    )
+    assert failed["status"] == "failed"
+    assert failed["failure_class"] == "request_rejected"
+    assert store.backend_circuits() == []
+    cost = store.events("cost")[-1]
+    assert cost["cost_usd"] == 0 and cost["cost_status"] == "known"
+    assert store.budget_state()["reserved_cost_usd"] == 0
+
+    completed = strategy_cli._consult_scoped(
+        str(store.project), "consult:test", 10,
+        lambda: {"status": "completed", "reply": "ok", "usage": {},
+                 "cost_usd": 0.1, "seconds": .1},
+        transport="gpt_pro", model="m", effort="max",
+    )
+    assert completed["status"] == "completed"
+
+
+def test_unknown_consult_failure_settles_conservative_cost_and_opens_circuit(tmp_path: Path):
+    from danus.strategy import cli as strategy_cli
+
+    store = _store(tmp_path)
+    target = store.propose_target(_target() | {"budget": {
+        "max_wall_seconds": 100, "max_cost_usd": 1,
+        "strict_cost_reservations": True, "max_call_cost_usd": .6,
+        "infra_retry_seconds": [30],
+    }})
+    store.approve_target(target["version"])
+
+    def disconnect():
+        raise ConnectionError("connection reset after request")
+
+    failed = strategy_cli._consult_scoped(
+        str(store.project), "consult:test", 10, disconnect,
+        transport="gpt_pro", model="m", effort="high",
+    )
+    assert failed["status"] == "failed" and failed["cost_usd"] is None
+    cost = store.events("cost")[-1]
+    assert cost["cost_usd"] == .6 and cost["cost_status"] == "estimated_ceiling"
+    assert store.backend_circuits()[0]["state"] == "open"
+
+
 def test_strict_cost_budget_requires_and_reserves_a_per_call_ceiling(tmp_path: Path):
     store = _store(tmp_path)
     target = store.propose_target(_target() | {"budget": {"max_cost_usd": 1, "strict_cost_reservations": True, "max_call_cost_usd": .6}})

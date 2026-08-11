@@ -31,6 +31,40 @@ from .transport import (
 )
 
 
+EFFORT_CHOICES = ("minimal", "low", "medium", "high", "xhigh", "max")
+
+
+def _failure_envelope(transport: str, model: Optional[str], effort: str,
+                      exc: BaseException) -> Dict[str, Any]:
+    """The pinned envelope for a consult that could not run — every attempt was
+    rejected (a strongest-effort request has no effort-dropping fallback, by
+    design) or the transport raised. Callers always get one JSON envelope, never a
+    traceback; ``status="failed"`` plus ``error`` says what went wrong."""
+    status_code = getattr(exc, "status_code", None)
+    if status_code is None:
+        status_code = getattr(getattr(exc, "response", None), "status_code", None)
+    request_rejected = status_code == 400 or "badrequest" in type(exc).__name__.lower()
+    return {
+        "transport": transport,
+        "model": model,
+        "effort": effort,
+        "attempt": "failed",
+        "status": "failed",
+        "seconds": 0.0,
+        "usage": {"input": 0, "output": 0, "reasoning": None},
+        # A validation reject happens before work starts. Other exceptions may
+        # have lost a billable response, so v2 settles their reserved ceiling.
+        "cost_usd": 0.0 if request_rejected else None,
+        "cost_status": "known_zero" if request_rejected else "unknown",
+        "failure_class": "request_rejected" if request_rejected else "provider_error",
+        "http_status": status_code,
+        "tool_calls": [],
+        "reasoning_summary": "",
+        "reply": "",
+        "error": f"{type(exc).__name__}: {exc}",
+    }
+
+
 def _claude_available(binary: str) -> bool:
     """True if the ``claude`` CLI is invokable (on PATH, or an executable path)."""
     if shutil.which(binary):
@@ -39,8 +73,18 @@ def _claude_available(binary: str) -> bool:
 
 
 def _write_out(path: str, res: Dict[str, Any]) -> None:
-    """Human-readable markdown dump (reasoning summary + reply)."""
+    """Human-readable markdown dump (reasoning summary + reply). A failed consult
+    writes its ``error`` instead of an empty reply — this file is what an operator
+    reads (the example strategy loop points ``--out`` at it), so it must never be
+    silently blank."""
     usage = res.get("usage") or {}
+    if res.get("status") == "failed":
+        Path(path).write_text(
+            f"# consult FAILED ({res.get('transport')}, effort={res.get('effort')})\n\n"
+            f"The consult could not run; nothing was recorded as master_guidance.\n\n"
+            f"## error\n\n{res.get('error', '(none reported)')}\n",
+            encoding="utf-8")
+        return
     md = (
         f"# consult ({res.get('model')}, effort={res.get('effort')}, "
         f"transport={res.get('transport')}, {res.get('status')})\n\n"
@@ -53,7 +97,9 @@ def _write_out(path: str, res: Dict[str, Any]) -> None:
     Path(path).write_text(md, encoding="utf-8")
 
 
-def _consult_scoped(project: Optional[str], provider_key: str, max_wall: float, run: Any) -> Dict[str, Any]:
+def _consult_scoped(project: Optional[str], provider_key: str, max_wall: float,
+                    run: Any, *, transport: str = "consult",
+                    model: Optional[str] = None, effort: str = "") -> Dict[str, Any]:
     """Reserve/settle one consult and share its provider circuit with later calls."""
     control = None
     reservation = None
@@ -74,15 +120,26 @@ def _consult_scoped(project: Optional[str], provider_key: str, max_wall: float, 
     started = time.monotonic()
     try:
         result = run()
-    except Exception as exc:
-        result = {"status": "error", "reply": "", "usage": {}, "cost_usd": None, "seconds": time.monotonic() - started, "error": str(exc)}
+    except Exception as exc:  # noqa: BLE001 — the CLI contract is an envelope, never a traceback
+        result = _failure_envelope(transport, model, effort, exc)
+        result["seconds"] = time.monotonic() - started
     if control is not None:
         usage = result.get("usage") or {}
         has_usage = any(usage.get(key) for key in ("input", "output", "reasoning"))
-        cost = result.get("cost_usd") if result.get("status") == "completed" or has_usage else None
+        request_rejected = result.get("failure_class") == "request_rejected"
+        cost = result.get("cost_usd") if result.get("status") == "completed" or has_usage or request_rejected else None
+        control_usage = ({
+            "input_tokens": usage.get("input", 0),
+            "output_tokens": usage.get("output", 0),
+            "reasoning_tokens": usage.get("reasoning"),
+        } if has_usage else {})
         target_version = (reservation.get("scope") or {}).get("target_version") if reservation else control.current_target_version()
-        control.record_cost(component="strategy_consult", provider_key=provider_key, wall_seconds=float(result.get("seconds") or time.monotonic() - started), usage={"input_tokens": usage.get("input", 0), "output_tokens": usage.get("output", 0), "reasoning_tokens": usage.get("reasoning")}, cost_usd=cost, reservation_id=reservation["id"] if reservation else None, target_version=target_version, attempt_status=result.get("status"))
-        if result.get("status") == "completed" or (result.get("status") != "timeout" and not result.get("error")):
+        control.record_cost(component="strategy_consult", provider_key=provider_key, wall_seconds=float(result.get("seconds") or time.monotonic() - started), usage=control_usage, cost_usd=cost, reservation_id=reservation["id"] if reservation else None, target_version=target_version, attempt_status=result.get("status"), failure_class=result.get("failure_class"))
+        if request_rejected:
+            # The caller can change the refused parameter on its next call. This
+            # is not a provider outage and must not lock that corrected call out.
+            control.cancel_backend_probe(provider_key)
+        elif result.get("status") == "completed" or (result.get("status") != "timeout" and not result.get("error")):
             control.record_backend_success(provider_key=provider_key, actor="strategy_consult")
         else:
             from danus import codex
@@ -107,14 +164,21 @@ def _build_parser() -> argparse.ArgumentParser:
     src = ap.add_mutually_exclusive_group(required=True)
     src.add_argument("--file", help="read the elaboration / prompt from this file")
     src.add_argument("--stdin", action="store_true", help="read the prompt from stdin")
-    ap.add_argument("--effort", choices=["minimal", "low", "medium", "high", "xhigh"],
-                    default="high", help="reasoning effort (default high; xhigh = strongest)")
+    ap.add_argument(
+        "--effort",
+        choices=EFFORT_CHOICES,
+        default="high",
+        help="reasoning effort (default high; max = strongest supported level)",
+    )
     ap.add_argument("--tools", choices=["auto", "web", "none"], default="auto",
                     help="tool set for the richest attempts (auto = web_search + code_interpreter)")
     ap.add_argument("--project", help="project dir — append a spend record to "
                     "<project>/spend/consult.jsonl and report project_total_usd")
     ap.add_argument("--out", help="also write the full reply+summary as markdown here")
-    ap.add_argument("--max-output-tokens", type=int, default=100000)
+    ap.add_argument("--max-output-tokens", type=int, default=100000,
+                    help="output-token cap; 0 = no explicit cap (gpt_pro omits the "
+                    "parameter entirely, for a gateway that rejects it; claude_api "
+                    "sends its ceiling)")
     ap.add_argument("--model", default=None,
                     help="override the consult model (api: any OpenAI-compatible id; "
                     "claude_api/claude_code: any Claude model, e.g. claude-fable-5 / claude-opus-4-8)")
@@ -123,6 +187,12 @@ def _build_parser() -> argparse.ArgumentParser:
                     "(paid Anthropic API, BYO key), claude_code (your Claude "
                     "subscription via the Claude Code CLI), or off (no-op short-circuit); "
                     "falls back to $DANUS_CONSULT_TRANSPORT then gpt_pro")
+    ap.add_argument("--background", choices=["on", "off"], default=None,
+                    help="(gpt_pro) send background=true; override for a gateway that "
+                    "rejects it (default: DANUS_CONSULT_BACKGROUND, else on)")
+    ap.add_argument("--store", choices=["on", "off"], default=None,
+                    help="(gpt_pro) send store=true; override for a gateway that requires "
+                    "stored responses (default: DANUS_CONSULT_STORE, else off)")
     ap.add_argument("--quiet", action="store_true", help="suppress the stderr heartbeat")
     return ap
 
@@ -160,7 +230,12 @@ def main(argv: Optional[list] = None) -> int:
                   "or use --transport off)", file=sys.stderr, flush=True)
             return 3
         transport = ClaudeCodeTransport(model, claude_bin=cfg.claude_bin, max_wall=cfg.max_wall, price_in=cfg.price_in, price_out=cfg.price_out)
-        res = _consult_scoped(args.project, "consult:claude_code", cfg.max_wall, lambda: transport.consult(prompt, effort=args.effort, tools=args.tools, max_output_tokens=args.max_output_tokens))
+        res = _consult_scoped(
+            args.project, "consult:claude_code", cfg.max_wall,
+            lambda: transport.consult(prompt, effort=args.effort, tools=args.tools,
+                                      max_output_tokens=args.max_output_tokens),
+            transport="claude_code", model=model, effort=args.effort,
+        )
         if res.get("status") != "completed":
             print(f"[consult] WARNING status={res.get('status')} (claude_code transport did not "
                   "complete; main agent should reason on its own)", file=sys.stderr, flush=True)
@@ -187,7 +262,15 @@ def main(argv: Optional[list] = None) -> int:
                   file=sys.stderr, flush=True)
 
         transport = ClaudeApiTransport(acfg)
-        res = _consult_scoped(args.project, "consult:claude_api", acfg.timeout, lambda: transport.consult(prompt, effort=args.effort, tools=args.tools, max_output_tokens=args.max_output_tokens, on_progress=None if args.quiet else _ahb))
+        res = _consult_scoped(
+            args.project, "consult:claude_api", acfg.timeout,
+            lambda: transport.consult(
+                prompt, effort=args.effort, tools=args.tools,
+                max_output_tokens=args.max_output_tokens,
+                on_progress=None if args.quiet else _ahb,
+            ),
+            transport="claude_api", model=acfg.model, effort=args.effort,
+        )
         if res.get("status") != "completed":
             print(f"[consult] WARNING status={res.get('status')} (claude_api transport "
                   "did not complete; main agent should reason on its own)",
@@ -201,6 +284,12 @@ def main(argv: Optional[list] = None) -> int:
     config = load_config()
     if args.model:
         config = replace(config, model=args.model)
+    # per-call overrides of the transport params: a rejected one is fixed on the
+    # NEXT call by the caller (an agent reading the error), no config edit needed.
+    if args.background is not None:
+        config = replace(config, background=args.background == "on")
+    if args.store is not None:
+        config = replace(config, store=args.store == "on")
     if not config.has_key:
         print("consult API key not set (set DANUS_CONSULT_API_KEY, "
               "or use --transport off)", file=sys.stderr, flush=True)
@@ -210,11 +299,20 @@ def main(argv: Optional[list] = None) -> int:
         print(f"[consult {elapsed:.0f}s status={status} events={n}]", file=sys.stderr, flush=True)
 
     transport = GptProTransport(config)
-    res = _consult_scoped(args.project, "consult:gpt_pro", config.timeout, lambda: transport.consult(prompt, effort=args.effort, tools=args.tools, max_output_tokens=args.max_output_tokens, on_progress=None if args.quiet else _hb))
+    res = _consult_scoped(
+        args.project, "consult:gpt_pro", config.timeout,
+        lambda: transport.consult(
+            prompt, effort=args.effort, tools=args.tools,
+            max_output_tokens=args.max_output_tokens,
+            on_progress=None if args.quiet else _hb,
+        ),
+        transport="gpt_pro", model=config.model, effort=args.effort,
+    )
     if res.get("status") and res["status"] != "completed":
         print(f"[consult] WARNING status={res['status']} (not completed)", file=sys.stderr, flush=True)
     _log_project_spend(args.project, res)
     if args.out:
         _write_out(args.out, res)
     print(json.dumps(res, ensure_ascii=False))
-    return 0
+    # a consult that could not run must not report success
+    return 1 if res.get("status") == "failed" else 0

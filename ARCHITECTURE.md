@@ -133,6 +133,6 @@ Danus/
 | v2 fact binding | legacy arguments plus current `display_title, target_version, obligation_id, route_id, assignment_epoch, claim_role, assumptions_used, closes_obligation` | worker ↔ gateway ↔ v2 control |
 | fact id inputs | `problem_id + sorted(predecessors) + sorted(glossary) + normalized(statement,proof)`; **external_refs EXCLUDED** | `danus.core` ↔ everyone (write-paper reads `external_refs`) |
 | global-memory kinds | the 11 `GLOBAL_KINDS` (incl. `master_guidance`/`elaboration`/`verification`) | `danus.core` ↔ agents · strategy · consult |
-| consult JSON envelope | `{transport,reply,usage,cost_usd,…}` | `danus.strategy` CLI ↔ consult skill |
+| consult JSON envelope | `{transport,reply,usage,cost_usd,…}`; always one envelope — a consult that could not run is `status="failed"` + `error`, never a traceback | `danus.strategy` CLI ↔ consult skill |
 | main assets | one canonical source under `.agents/skills/`; worker/verifier skills stay isolated under `agents/skills/` | Codex main + authoring assemblers ↔ canonical assets |
 | env-var contract | `DANUS_* / CODEX_* / VERIFY_* / CONSULT_*` names; Python loads the non-executable env-file chain and the codex CALL + env (bin/model/effort/PATH/`exec` prefix) is resolved through the shared `danus.codex` launcher | `danus.runtime` + `danus.codex` + `config/` ↔ every codex-exec site (`danus.execution.loop` · `danus.verify.launcher` · `danus.authoring.driver`) |

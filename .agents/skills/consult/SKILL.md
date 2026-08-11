@@ -58,8 +58,10 @@ sides, then start the workers.
      runs the paid OpenAI-compatible endpoint; `claude_api` runs the native Anthropic
      API (per-token, BYO key); `claude_code` runs the consult through the Claude Code
      CLI (`claude -p`); `off` short-circuits (see the `off` path below).
-   - **Effort** (`--effort high|xhigh`, default `high`): `high` is the workhorse,
-     `xhigh` for the hardest forks.
+   - **Effort** (`--effort high|xhigh|max`, default `high`): `high` is the
+     workhorse; reserve stronger levels for the hardest forks. All transports
+     support through `max`; on `gpt_pro`, `max` fails rather than silently running
+     without the requested reasoning effort when an endpoint rejects it.
    - `--project` records the spend: one line per call appended to
      `<project_dir>/spend/consult.jsonl`, and the CLI returns the running
      `project_total_usd`. **Always pass `--project`.**
@@ -69,6 +71,20 @@ sides, then start the workers.
      are owned by `danus/strategy` — read them there; do not re-derive them here.
    - It is a **stateless gateway**: prompt in, reply out. It does **not** write the
      stores — you do, in the next step.
+   - **If the consult could not run**, the envelope comes back `status="failed"`
+     with an `error` and an empty `reply` (exit non-zero) — e.g. the endpoint
+     rejected the requested effort. There is nothing to record: do **not** publish
+     an empty `master_guidance` and do **not** invent direction. Report the `error`
+     to the operator, then either retry at a level the endpoint accepts or reason
+     on your own for this cycle — and say which you did. **If the `error` names a
+     parameter the endpoint refuses, re-run the call with that parameter changed** —
+     the error tells you which: `background` → add `--background off`; `store` →
+     `--store on`; `max_output_tokens` → `--max-output-tokens 0` (omits it entirely,
+     for an endpoint that rejects the parameter rather than the value); the
+     reasoning effort → a level it accepts. Nothing to edit, just
+     the next invocation. If the same override keeps being needed on this
+     deployment, tell the operator to pin it in `config/danus.env`
+     (`DANUS_CONSULT_BACKGROUND` / `DANUS_CONSULT_STORE`) so you stop passing it.
 
 3. **Record the reply as `master_guidance`, VERBATIM.** Take the reply as the
    direction and publish it unedited:
