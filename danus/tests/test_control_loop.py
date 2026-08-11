@@ -8,7 +8,7 @@ from danus.execution import layout as L
 from danus.execution import loop
 
 
-def _worker(tmp: Path, *, budget: dict | None = None) -> tuple[L.WorkerLayout, ControlStore]:
+def _worker(tmp: Path, *, budget: dict | None = None, slice_timeout: int = 5400) -> tuple[L.WorkerLayout, ControlStore]:
     project = tmp / "P"
     wl = L.WorkerLayout(project / "workers" / "high")
     wl.logs.mkdir(parents=True)
@@ -28,7 +28,7 @@ def _worker(tmp: Path, *, budget: dict | None = None) -> tuple[L.WorkerLayout, C
         "id": "r1", "obligation_id": "v0001-root-1",
         "method_family": "direct", "expected_result": "T",
     })
-    store.assign("high", obligation_id="v0001-root-1", route_id="r1", task="prove T")
+    store.assign("high", obligation_id="v0001-root-1", route_id="r1", task="prove T", slice_timeout=slice_timeout)
     return wl, store
 
 
@@ -128,3 +128,14 @@ def test_quota_exhaustion_blocks_without_retry_or_slice_charge(tmp_path: Path):
     assert assignment["status"] == "infra_blocked"
     assert assignment["last_failure_class"] == "quota_exhausted"
     assert assignment["slice_count"] == 0
+
+
+def test_a_call_reservation_at_the_budget_ceiling_does_not_reject_its_own_report(tmp_path: Path):
+    _wl, store = _worker(tmp_path, budget={"max_wall_seconds": 10}, slice_timeout=10)
+    assignment = store.assignment("high")
+    reservation = store.reserve_call(component="worker_slice", max_wall_seconds=10, worker="high", assignment_epoch=assignment["epoch"])
+    result = store.evaluate_work_report("high", _report(), wall_seconds=1, reservation_id=reservation["id"])
+    assert result["decision"] == "continue"
+    assert store.assignment("high")["slice_count"] == 1
+    assert len(store.events("work_checkpoint")) == 1
+    assert store.budget_state()["reserved_wall_seconds"] == 0

@@ -125,7 +125,8 @@ def _record_control_cost(control: Any, reservation: Optional[dict], component: s
     if control is None:
         return
     wall = time.monotonic() - started
-    control.record_cost(component=component, wall_seconds=wall, reservation_id=reservation["id"] if reservation else None, target_version=control.current_target_version(), attempt_status=result.get("status"))
+    target_version = (reservation.get("scope") or {}).get("target_version") if reservation else control.current_target_version()
+    control.record_cost(component=component, wall_seconds=wall, reservation_id=reservation["id"] if reservation else None, target_version=target_version, attempt_status=result.get("status"))
     if result.get("status") == "ok" or result.get("returncode") == 0:
         control.record_backend_success(provider_key="codex", actor=component)
         return

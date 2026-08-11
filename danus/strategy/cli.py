@@ -80,7 +80,8 @@ def _consult_scoped(project: Optional[str], provider_key: str, max_wall: float, 
         usage = result.get("usage") or {}
         has_usage = any(usage.get(key) for key in ("input", "output", "reasoning"))
         cost = result.get("cost_usd") if result.get("status") == "completed" or has_usage else None
-        control.record_cost(component="strategy_consult", provider_key=provider_key, wall_seconds=float(result.get("seconds") or time.monotonic() - started), usage={"input_tokens": usage.get("input", 0), "output_tokens": usage.get("output", 0), "reasoning_tokens": usage.get("reasoning")}, cost_usd=cost, reservation_id=reservation["id"] if reservation else None, target_version=control.current_target_version(), attempt_status=result.get("status"))
+        target_version = (reservation.get("scope") or {}).get("target_version") if reservation else control.current_target_version()
+        control.record_cost(component="strategy_consult", provider_key=provider_key, wall_seconds=float(result.get("seconds") or time.monotonic() - started), usage={"input_tokens": usage.get("input", 0), "output_tokens": usage.get("output", 0), "reasoning_tokens": usage.get("reasoning")}, cost_usd=cost, reservation_id=reservation["id"] if reservation else None, target_version=target_version, attempt_status=result.get("status"))
         if result.get("status") == "completed" or (result.get("status") != "timeout" and not result.get("error")):
             control.record_backend_success(provider_key=provider_key, actor="strategy_consult")
         else:

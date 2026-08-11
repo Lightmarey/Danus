@@ -131,6 +131,9 @@ in the 70/85/100% thresholds, so concurrent callers cannot all pass a stale
 budget check. Completion atomically replaces the reservation with the real
 `CostEvent`; a crashed process leaves a conservative reservation that expires
 after the hard timeout plus a short cleanup grace period.
+If a strict USD reservation was configured but the provider returns no usage or
+cost receipt, settlement consumes the reserved per-call ceiling with
+`cost_status=estimated_ceiling`; it is never released as an invented zero.
 
 ## Rendering & misc
 

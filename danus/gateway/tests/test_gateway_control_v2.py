@@ -161,3 +161,28 @@ def test_verifier_quota_failure_opens_shared_circuit_and_prevents_retry_storm(tm
     assert store.assignment("high")["slice_count"] == 0
     assert store.events("backend_failure")[-1]["failure_class"] == "quota_exhausted"
     assert store.budget_state()["reserved_wall_seconds"] == 0
+
+
+def test_target_change_during_verification_cannot_publish_under_the_stale_epoch(tmp_path: Path):
+    store, assignment = _project(tmp_path)
+    original = server._verify
+
+    def change_target(_statement: str, _proof: str):
+        replacement = store.propose_target({
+            "statement": "Replacement target.",
+            "allowed_assumptions": [], "forbidden_assumptions": [],
+            "required_conclusions": ["Replacement target."], "fallback_candidates": [],
+        })
+        store.approve_target(replacement["version"])
+        return {"verdict": "correct", "verification_report": {"summary": "correct"}}
+
+    server._verify = change_target
+    try:
+        with _env(DANUS_PROJECT_DIR=tmp_path, DANUS_AUTHOR="high", DANUS_VERIFY_URL="mock"):
+            result = server.fact_submit(statement="Late lemma.", proof="Proof.", display_title="Late verified lemma", **_args(assignment))
+    finally:
+        server._verify = original
+    assert result["accepted"] is False and result["verifier_accepted"] is True
+    assert "control state changed" in result["write_error"]
+    assert FactGraph(tmp_path).list() == []
+    assert store.budget_state()["reserved_wall_seconds"] == 0

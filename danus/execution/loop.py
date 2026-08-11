@@ -345,6 +345,9 @@ def _run_v2_loop(wl: L.WorkerLayout, role: dict, control: ControlStore, beat: fl
         if result["decision"] == "completed":
             write_status(wl, state="waiting", control_reason="assignment completed")
             return 0
+        if result["decision"] == "invalidated":
+            write_status(wl, state="waiting", control_reason="assignment invalidated while the slice was running")
+            return 0
         if beat > 0:
             time.sleep(beat)
 

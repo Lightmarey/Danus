@@ -357,6 +357,8 @@ def test_strict_cost_budget_requires_and_reserves_a_per_call_ceiling(tmp_path: P
     store.approve_target(target["version"])
     first = store.reserve_call(component="verification", max_wall_seconds=10)
     assert first["reserved_cost_usd"] == .6
+    event = store.record_cost(component="verification", wall_seconds=1, reservation_id=first["id"])
+    assert event["cost_status"] == "estimated_ceiling" and event["cost_usd"] == .6
     try:
         store.reserve_call(component="authoring", max_wall_seconds=10)
         assert False, "concurrent reservations must not exceed the strict USD ceiling"
@@ -402,3 +404,15 @@ def test_existing_v2_database_adds_resilience_columns_in_place(tmp_path: Path):
     with store._connect() as db:
         columns = {row[1] for row in db.execute("PRAGMA table_info(backend_circuits)")}
     assert "infra_wall_seconds" in columns
+
+
+def test_target_change_during_a_slice_settles_cost_but_discards_research_state(tmp_path: Path):
+    store, assignment = _assigned(tmp_path)
+    reservation = store.reserve_call(component="worker_slice", max_wall_seconds=10, worker="high", assignment_epoch=assignment["epoch"])
+    replacement = store.propose_target(_target("replacement target"))
+    store.approve_target(replacement["version"])
+    result = store.evaluate_work_report("high", _low_report(), wall_seconds=3, reservation_id=reservation["id"])
+    assert result["decision"] == "invalidated" and result["assignment"]["slice_count"] == 0
+    assert store.events("slice_discarded")[-1]["reason"] == "assignment is not runnable: stale"
+    assert store.budget_state()["wall_seconds"] == 3
+    assert store.budget_state()["reserved_wall_seconds"] == 0

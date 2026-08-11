@@ -967,7 +967,23 @@ class SQLiteControlStore:
         return any(any(row.get("id") == reference for row in read_jsonl(path)) for path in (self.project / "global_memory").glob("*.jsonl"))
 
     def evaluate_work_report(self, worker: str, report: dict[str, Any], *, wall_seconds: float, usage: Optional[dict[str, Any]] = None, reservation_id: Optional[str] = None) -> dict[str, Any]:
-        assignment = self.validate_assignment(worker)
+        assignment = self.assignment(worker)
+        invalid_reason = None
+        if not assignment:
+            raise ControlError(f"worker {worker} has no v2 assignment")
+        if assignment.get("status") not in {"assigned", "running", "auditing"}:
+            invalid_reason = f"assignment is not runnable: {assignment.get('status')}"
+        elif assignment["target_version"] != self.current_target_version():
+            invalid_reason = "assignment target is stale"
+        elif int(assignment["slice_count"]) >= int(assignment["max_slices"]):
+            invalid_reason = "route slice budget exhausted"
+        if invalid_reason:
+            with self._tx() as db:
+                self._record_cost(db, component="worker_slice", wall_seconds=wall_seconds, usage=usage, reservation_id=reservation_id, worker=worker, target_version=assignment.get("target_version"), obligation_id=assignment.get("obligation_id"), route_id=assignment.get("route_id"), assignment_epoch=assignment.get("epoch"), attempt_status="discarded")
+                self._event(db, "slice_discarded", worker=worker, assignment_epoch=assignment.get("epoch"), reason=invalid_reason)
+                self._bump(db)
+            self._record_budget_threshold()
+            return {"gain": "none", "decision": "invalidated", "assignment": assignment}
         assignment.update(status="running", slice_count=int(assignment["slice_count"]) + 1, lease_remaining=max(0, int(assignment["lease_remaining"]) - 1), wall_seconds=float(assignment.get("wall_seconds", 0)) + max(0.0, wall_seconds))
         recent = self.events()[int(assignment.get("event_cursor", 0)):]
         linked = [row for row in recent if row.get("event") == "fact_linked" and row.get("assignment_epoch") == assignment["epoch"]]
@@ -1064,14 +1080,16 @@ class SQLiteControlStore:
             db.execute("INSERT INTO call_reservations VALUES (?,?,?,?,?,'active',?,?,?,NULL)", (reservation_id, component, provider_key, wall, estimated, _dump(scope), utc_now(), expires))
             self._event(db, "call_reserved", reservation_id=reservation_id, component=component, provider_key=provider_key, reserved_wall_seconds=wall, reserved_cost_usd=estimated, **scope)
             self._bump(db)
-        return {"id": reservation_id, "component": component, "provider_key": provider_key, "reserved_wall_seconds": wall, "reserved_cost_usd": estimated, "expires_at_epoch": expires}
+        return {"id": reservation_id, "component": component, "provider_key": provider_key, "reserved_wall_seconds": wall, "reserved_cost_usd": estimated, "expires_at_epoch": expires, "scope": scope}
 
-    def _settle_reservation(self, db: sqlite3.Connection, reservation_id: Optional[str]) -> None:
+    def _settle_reservation(self, db: sqlite3.Connection, reservation_id: Optional[str]) -> Optional[float]:
         if not reservation_id:
-            return
+            return None
+        row = db.execute("SELECT reserved_cost_usd FROM call_reservations WHERE id=? AND status='active'", (reservation_id,)).fetchone()
         changed = db.execute("UPDATE call_reservations SET status='settled',settled_at_utc=? WHERE id=? AND status='active'", (utc_now(), reservation_id)).rowcount
         if not changed:
             raise ControlError(f"call reservation is not active: {reservation_id}")
+        return None if row[0] is None else float(row[0])
 
     def cancel_call_reservation(self, reservation_id: str, *, reason: str) -> None:
         self.scaffold()
@@ -1096,14 +1114,17 @@ class SQLiteControlStore:
         return [str(row["id"]) for row in rows]
 
     def _record_cost(self, db: sqlite3.Connection, *, component: str, wall_seconds: float, usage: Optional[dict[str, Any]] = None, cost_usd: Optional[float] = None, reservation_id: Optional[str] = None, **scope: Any) -> dict[str, Any]:
-        self._settle_reservation(db, reservation_id)
+        reserved_cost = self._settle_reservation(db, reservation_id)
         usage = usage or {}
         if cost_usd is None and any(key in usage for key in ("input_tokens", "output_tokens")):
             try:
                 cost_usd = (float(usage.get("input_tokens", 0) or 0) * float(os.environ.get("DANUS_CODEX_PRICE_IN", "")) + float(usage.get("output_tokens", 0) or 0) * float(os.environ.get("DANUS_CODEX_PRICE_OUT", ""))) / 1_000_000
             except ValueError:
                 cost_usd = None
-        return self._event(db, "cost", component=component, wall_seconds=round(max(0.0, wall_seconds), 3), usage=usage, cost_usd=cost_usd, cost_status="known" if cost_usd is not None else "unknown", reservation_id=reservation_id, **scope)
+        cost_status = "known" if cost_usd is not None else "unknown"
+        if cost_usd is None and reserved_cost is not None:
+            cost_usd, cost_status = reserved_cost, "estimated_ceiling"
+        return self._event(db, "cost", component=component, wall_seconds=round(max(0.0, wall_seconds), 3), usage=usage, cost_usd=cost_usd, cost_status=cost_status, reservation_id=reservation_id, **scope)
 
     def record_cost(self, *, component: str, wall_seconds: float, usage: Optional[dict[str, Any]] = None, cost_usd: Optional[float] = None, reservation_id: Optional[str] = None, **scope: Any) -> dict[str, Any]:
         self.scaffold()

@@ -348,12 +348,23 @@ def fact_submit(
                 "undefined_symbols": undefined}
     verdict = result.get("verdict")
     accepted = verdict == "correct"
+    binding_error = None
+    if accepted and control.enabled:
+        try:
+            control.validate_submission(
+                _author(), target_version=target_version or "",
+                obligation_id=obligation_id or "", route_id=route_id or "",
+                assignment_epoch=assignment_epoch or "",
+                assumptions_used=assumptions_used or [],
+            )
+        except ControlError as exc:
+            binding_error = f"control state changed during verification: {exc}"
 
     # 2) Write the fact iff accepted. Catch write failures (e.g. a revoked
     #    predecessor) so they do NOT skip the trace below.
     fact_id = None
     write_error = None
-    if accepted:
+    if accepted and not binding_error:
         try:
             if control.enabled:
                 pending_id = compute_fact_id(
@@ -382,13 +393,13 @@ def fact_submit(
     gm.append(
         "verification",
         claim=statement,
-        evidence="verdict: correct" if accepted else (result.get("repair_hints") or "verdict: wrong"),
+        evidence="verdict: correct" if verdict == "correct" else (result.get("repair_hints") or "verdict: wrong"),
         author=_author(),
         verifiable=False,
         links={"source_id": source_id, "predecessors": predecessors or []},
         verdict=verdict,
         fact_id=fact_id,
-        write_error=write_error,
+        write_error=binding_error or write_error,
         verification_report=result.get("verification_report"),
     )
 
@@ -413,6 +424,9 @@ def fact_submit(
             )
 
     # 4) Return.
+    if binding_error:
+        return {"accepted": False, "verifier_accepted": True, "verdict": verdict,
+                "write_error": binding_error, "undefined_symbols": undefined}
     if not accepted:
         return {
             "accepted": False,
