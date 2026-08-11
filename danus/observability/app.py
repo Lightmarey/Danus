@@ -508,7 +508,13 @@ def main() -> None:
     if not project.is_dir():
         raise SystemExit(f"project dir not found: {project}")
     import uvicorn
-    print(f"danus dashboard: http://{args.host}:{args.port}/#control-token={CONTROL_TOKEN}  (project: {project})")
+    # The detached service manager redirects stdout to a log.  Flush the
+    # capability URL so the platform launchers can read it immediately and
+    # open the dashboard without persisting the token anywhere else.
+    print(
+        f"danus dashboard: http://{args.host}:{args.port}/#control-token={CONTROL_TOKEN}  (project: {project})",
+        flush=True,
+    )
     uvicorn.run(app, host=args.host, port=args.port, log_level="warning")
 
 

@@ -79,6 +79,12 @@ danus control rebuild my-project
 danus services up dashboard my-project
 ```
 
+For a local browser launch that preserves the ephemeral governance capability,
+use `scripts/open-dashboard.ps1 -Project my-project` on Windows or
+`scripts/open-dashboard.sh my-project` on POSIX. Add `-NoOpen` or `--no-open`
+to print the launch URL without opening a browser. Opening only
+`http://127.0.0.1:8099/` intentionally gives no Approve/Withdraw capability.
+
 `control/control.sqlite3` is the transactional authority for targets,
 obligations, routes, assignments, events, and the outbox. Verified Markdown in
 `fact_graph/facts/` remains the mathematical authority. Fact indexes, scopes,

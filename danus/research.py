@@ -252,24 +252,35 @@ class ResearchQuery:
         edges: set[tuple[str, str]] = set()
         queue = deque((item, 0) for item in roots)
         seen = set(roots)
-        omitted = 0
+        omitted: set[str] = set()
         with self.store._connect() as db:
             while queue:
                 current, level = queue.popleft()
                 if depth is not None and level >= depth:
+                    omitted.update(
+                        str(row[0])
+                        for row in db.execute(
+                            "SELECT predecessor_id FROM fact_edges WHERE fact_id=? ORDER BY predecessor_id",
+                            (current,),
+                        )
+                        if str(row[0]) not in seen
+                    )
                     continue
                 for row in db.execute("SELECT predecessor_id FROM fact_edges WHERE fact_id=? ORDER BY predecessor_id", (current,)):
                     pred = str(row[0])
                     edges.add((pred, current))
                     if pred in seen:
+                        omitted.discard(pred)
+                        continue
+                    if len(seen) >= limit:
+                        omitted.add(pred)
                         continue
                     seen.add(pred)
-                    if len(seen) > limit:
-                        omitted += 1
-                        continue
+                    omitted.discard(pred)
                     found.append(pred)
                     queue.append((pred, level + 1))
-        return found, [{"source": a, "target": b} for a, b in sorted(edges) if a in seen and b in seen], omitted
+        omitted.difference_update(seen)
+        return found, [{"source": a, "target": b} for a, b in sorted(edges) if a in seen and b in seen], len(omitted)
 
     def _scoped_facts(self, *, route_id: Optional[str] = None, obligation_id: Optional[str] = None, support_depth: int = 2, limit: int = 300) -> dict[str, Any]:
         where, arg = ("route_id=?", route_id) if route_id else ("obligation_id=?", obligation_id)

@@ -28,10 +28,31 @@ uv run danus services down all
 The POSIX `scripts/services.sh` wrapper remains available for existing
 deployments; new cross-platform automation should use `danus services`.
 
+To start the human dashboard and open its ephemeral control-capability URL in
+the default browser, use the platform shortcut from the repository root:
+
+```powershell
+.\scripts\open-dashboard.ps1 -Project <p>
+# Test or print the URL without opening a browser:
+.\scripts\open-dashboard.ps1 -Project <p> -Port 18099 -NoOpen
+```
+
+```bash
+./scripts/open-dashboard.sh <p>
+# Test or print the URL without opening a browser:
+./scripts/open-dashboard.sh <p> 18099 --no-open
+```
+
+Both launchers delegate process ownership, PID validation, logs, and recovery
+to `danus services`; they do not implement a second service lifecycle. The URL
+fragment is read from the service log and passed directly to the browser. The
+page removes the fragment after launch and keeps the token in browser memory.
+
 - **verify** — `127.0.0.1:8091`. The correctness gate. Must be up before starting
   any workers.
-- **dashboard** — `127.0.0.1:8099`, read-only. View it via an SSH port-forward
-  (do not expose it to a network).
+- **dashboard** — `127.0.0.1:8099`, primarily read-only; v2 target governance
+  exposes guarded Approve/Withdraw actions. View it locally or via an SSH
+  port-forward (do not expose it to a network).
 
 > **Shared-host caveat.** These ports are per-host, not per-deployment. If a second
 > Danus deployment (another user/checkout) is already bound to `8091`, your

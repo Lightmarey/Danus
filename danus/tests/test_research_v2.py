@@ -211,4 +211,5 @@ def test_10k_fact_30k_edge_indexed_payload_and_local_graph_bound(tmp_path: Path)
     elapsed = time.monotonic() - started
     assert len(json.dumps(research_map).encode()) < 500_000
     assert len(route["fact_group"]["facts"]) <= 300
+    assert route["fact_group"]["unexpanded_count"] > 0
     assert len(edges) >= 29_000 and elapsed < 5
