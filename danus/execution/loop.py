@@ -161,6 +161,7 @@ def _parse_last_fact_id(log_path: Path) -> Optional[str]:
         text = log_path.read_text(encoding="utf-8", errors="replace")
     except OSError:
         return None
+    saw_json_event = False
     saw_structured_submission = False
     accepted: Optional[str] = None
     for line in text.splitlines():
@@ -168,6 +169,7 @@ def _parse_last_fact_id(log_path: Path) -> Optional[str]:
             event = json.loads(line)
         except json.JSONDecodeError:
             continue
+        saw_json_event = saw_json_event or isinstance(event, dict)
         item = event.get("item") if isinstance(event, dict) else None
         if not isinstance(item, dict) or item.get("type") != "mcp_tool_call" or item.get("tool") != "fact_submit":
             continue
@@ -178,7 +180,7 @@ def _parse_last_fact_id(log_path: Path) -> Optional[str]:
             fact_id = payload.get("fact_id")
             if isinstance(fact_id, str) and re.fullmatch(r"[0-9a-f]{16}", fact_id):
                 accepted = fact_id
-    if saw_structured_submission:
+    if saw_structured_submission or saw_json_event:
         return accepted
     ids = _FACT_ID_RE.findall(text)
     return ids[-1] if ids else None
@@ -200,13 +202,13 @@ def run_round(wl: L.WorkerLayout, role: dict, prompt: str, log_path: Path,
     missing."""
     wdir = wl.dir
     codex_bin = codex.resolve_bin()
-    structured = []
+    structured = ["--json"]
     if report_path is not None and output_schema is not None:
         report_path.parent.mkdir(parents=True, exist_ok=True)
         report_path.unlink(missing_ok=True)
         structured = [
             "--config", scaffold.worker_gateway_config_arg(wl),
-            "--json", "--output-schema", str(output_schema),
+            "--output-schema", str(output_schema),
             "--output-last-message", str(report_path),
         ]
     cmd = codex.exec_cmd(
@@ -235,7 +237,7 @@ def run_round(wl: L.WorkerLayout, role: dict, prompt: str, log_path: Path,
             logf.write(f"[worker_loop] codex binary not found: {cmd[0]}\n")
             return 127
         try:
-            if not structured:
+            if report_path is None or output_schema is None:
                 return _Child.proc.wait(timeout=hard_timeout if hard_timeout > 0 else None)
             deadline = time.monotonic() + hard_timeout if hard_timeout > 0 else None
             while True:
@@ -332,7 +334,7 @@ def _run_v2_loop(wl: L.WorkerLayout, role: dict, control: ControlStore, beat: fl
             round_started_at=time.time(), target_version=assignment["target_version"],
             obligation_id=assignment["obligation_id"], route_id=assignment["route_id"],
             context_manifest_id=manifest["id"], context_snapshot=manifest["snapshot_generation"],
-            last_rc=None, usage_status=None, control_reason=None,
+            last_rc=None, usage_status=None, control_reason=None, error=None,
         )
         try:
             reservation = control.reserve_call(
@@ -449,6 +451,7 @@ def main(worker_dir: str) -> int:
     write_status(
         wl, state="running", round=0, started_at=time.time(),
         last_rc=None, last_fact_id=None, usage_status=None, control_reason=None,
+        error=None,
     )
     rnd = 0
     consec_fail = 0

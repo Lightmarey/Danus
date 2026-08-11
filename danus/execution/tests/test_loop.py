@@ -100,6 +100,23 @@ def test_run_round_success_rc0(tmp: Path):
     assert rc == 0
 
 
+def test_v1_run_round_requests_json_usage_events(tmp: Path):
+    wl = _mk_worker(tmp)
+    argv = wl.dir / "v1-argv.json"
+    fake = _write_fake_codex(
+        tmp,
+        f"import json, sys\nfrom pathlib import Path\nPath({str(argv)!r}).write_text(json.dumps(sys.argv[1:]), encoding='utf-8')\n",
+    )
+    with _env(DANUS_CODEX_BIN=str(fake)):
+        rc = loop.run_round(
+            wl, {"MODEL": "m", "REASONING_EFFORT": "high"}, "prompt",
+            wl.dir / "round.log", hard_timeout=30,
+        )
+    args = json.loads(argv.read_text(encoding="utf-8"))
+    assert rc == 0 and "--json" in args
+    assert "--output-schema" not in args
+
+
 def test_v2_run_round_injects_the_worker_gateway_config(tmp: Path):
     wl = _mk_worker(tmp)
     argv = wl.dir / "argv.json"
