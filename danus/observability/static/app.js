@@ -189,8 +189,11 @@ function readableFactTitle(fact) {
   const statement = esc(fact.statement).trim();
   const titleIsStatementPrefix = raw.length >= 60 && statement.startsWith(raw.replace(/…$/, ''));
   if (raw && raw.length <= 120 && !titleIsStatementPrefix) return raw;
-  const conclusion = statement.match(/\b(?:Thus|Therefore|Hence)\b[^.!?]{18,140}[.!?]?/i);
-  return conclusion ? conclusion[0] : shortLabel(raw || fact.statement || `Fact ${fact.fact_id || fact.id}`, 96);
+  const conclusion = statement.match(/\b(?:Thus|Therefore|Hence|In particular|Then)\b[^.!?]{18,180}[.!?]?/i);
+  if (conclusion) return shortLabel(conclusion[0], 96);
+  const sentences = statement.split(/(?<=[.!?])\s+/).filter((item) => item.length >= 24);
+  const useful = [...sentences].reverse().find((item) => !/\b(?:does not assert|alone|only)\b/i.test(item));
+  return shortLabel(useful || raw || statement || `Fact ${fact.fact_id || fact.id}`, 96);
 }
 
 function layerFactNodes(facts, edges) {
@@ -305,6 +308,66 @@ function renderFactResearchMap(d) {
   $('#graph-stat').textContent = map.stat;
 }
 
+function renderRouteTheoremGroups(data, surface = 'fact') {
+  const chart = surface === 'fact' ? graphChart : routeChart;
+  const detailSelector = surface === 'fact' ? '#fact-detail' : '#research-detail';
+  const statSelector = surface === 'fact' ? '#graph-stat' : '#route-stat';
+  const facts = data.fact_group.facts || [];
+  const byId = new Map(facts.map((fact) => [fact.fact_id, fact]));
+  const closing = facts.filter((fact) => fact.role === 'closing');
+  const closingIds = new Set(closing.map((fact) => fact.fact_id));
+  let roots = [...new Set((data.fact_group.edges || [])
+    .filter((edge) => closingIds.has(edge.target) && byId.has(edge.source))
+    .map((edge) => edge.source))].map((id) => byId.get(id));
+  if (!roots.length) roots = facts.filter((fact) => fact.role === 'direct' || fact.role === 'input');
+  if (!roots.length) roots = closing;
+  const compact = chart.getWidth() < 650;
+  const routeNode = {
+    id:`route-summary:${data.route.id}`, name:data.obligation.statement, title:data.obligation.statement,
+    kind:'route-summary', closingFactId:closing[0]?.fact_id, x:500, y:35, symbolSize:30,
+    itemStyle:{color:'#0f766e'},
+  };
+  const columns = Math.min(compact ? 2 : chart.getWidth() < 950 ? 3 : 5, Math.max(1, roots.length));
+  const nodes = [routeNode, ...roots.map((fact, index) => ({
+    id:`theorem-group:${fact.fact_id}`, name:fact.fact_id, title:readableFactTitle(fact),
+    kind:'theorem-group', rootFactId:fact.fact_id, factId:fact.fact_id,
+    x:((index % columns) + 1) * 1000 / (columns + 1), y:245 + Math.floor(index / columns) * 180,
+    symbolSize:22, itemStyle:{color:'#6366f1'},
+  }))];
+  const links = roots.map((fact) => ({source:routeNode.id,target:`theorem-group:${fact.fact_id}`}));
+  chart.setOption({
+    tooltip:stableTooltip((p) => p.dataType === 'node'
+      ? `<b>${htmlEsc(p.data.title)}</b><br>${p.data.kind === 'theorem-group' ? 'theorem group · click to open' : 'route conclusion'}` : ''),
+    series:[{type:'graph',layout:'none',roam:true,data:nodes,links,
+      label:{show:true,position:'bottom',distance:8,fontSize:compact?10:12,formatter:(p)=>shortLabel(p.data.title,p.data.kind === 'route-summary' ? (compact?30:42) : (compact?16:28))},
+      lineStyle:{color:'#aeb9c9',width:1.4,opacity:.82},edgeSymbol:['none','arrow'],edgeSymbolSize:[0,6],
+      emphasis:{disabled:true},select:{disabled:true}}]
+  }, true);
+  chart.off('click');
+  chart.on('click', async (p) => {
+    if (p.data.kind === 'theorem-group') await loadTheoremGroup(p.data.rootFactId, surface);
+    if (p.data.kind === 'route-summary' && p.data.closingFactId) await showResearchFact(p.data.closingFactId, detailSelector);
+  });
+  $(statSelector).textContent = `${roots.length} theorem groups · click a group to inspect its facts`;
+  const detail = $(detailSelector); detail.innerHTML = '';
+  const card = el('div', 'route-summary-card');
+  card.appendChild(el('div', 'eyebrow', 'Route conclusion'));
+  card.appendChild(el('h2', 'fact-title', data.obligation.statement));
+  const expected = el('div', 'entry-claim'); mdmath(expected, data.route.expected_result || ''); card.appendChild(expected);
+  card.appendChild(el('div', 'muted', `${roots.length} theorem groups · ${facts.length} indexed facts in the current route view`));
+  detail.appendChild(card);
+}
+
+async function loadTheoremGroup(rootFactId, surface) {
+  const data = await api(`/api/research/facts/${rootFactId}/neighborhood?direction=predecessors&depth=3&limit=300`);
+  const group = {
+    facts:(data.nodes || []).map((fact) => ({...fact, role:fact.fact_id === rootFactId ? 'closing' : 'support', shared:false})),
+    edges:data.edges || [], unexpanded_count:data.truncated ? 1 : 0,
+  };
+  if (surface === 'fact') renderFactGraphGroup(group);
+  else renderFactGraph(group);
+}
+
 function renderFactGraphGroup(group) {
   const facts = group.facts || [];
   const ids = new Set(facts.map((fact) => fact.fact_id));
@@ -328,12 +391,13 @@ function renderFactGraphGroup(group) {
 
 async function selectFactGraphRoute(routeId) {
   const d = await api(`/api/research/routes/${routeId}?snapshot=${controlGeneration}`);
-  renderFactGraphGroup(d.fact_group);
+  renderRouteTheoremGroups(d, 'fact');
 }
 
 async function selectFactGraphObligation(obligationId) {
   const d = await api(`/api/research/obligations/${obligationId}?snapshot=${controlGeneration}`);
-  renderFactGraphGroup(d.fact_group);
+  if (d.routes && d.routes.length === 1) await selectFactGraphRoute(d.routes[0].id);
+  else renderFactGraphGroup(d.fact_group);
 }
 function showFact(id) {
   const f = factById[id]; if (!f) return;
@@ -528,8 +592,8 @@ async function showResearchFact(factId, detailSelector = '#research-detail') {
 async function selectRoute(routeId) {
   try {
     const d = await api(`/api/research/routes/${routeId}?snapshot=${controlGeneration}`);
-    renderFactGraph(d.fact_group);
-    const detail = $('#research-detail'); detail.innerHTML = '';
+    renderRouteTheoremGroups(d, 'control');
+    const detail = $('#research-detail');
     const route = el('div', 'entry'); route.appendChild(el('div', 'entry-author', d.route.method_title));
     route.appendChild(el('div', 'entry-claim', d.route.expected_result || ''));
     route.appendChild(el('div', 'gain-seq', `state ${d.route.state} · gains ${d.checkpoints.map((x)=>x.gain).reverse().join(' → ') || 'none'}`));
@@ -544,7 +608,8 @@ async function selectRoute(routeId) {
 async function selectObligation(obligationId) {
   try {
     const d = await api(`/api/research/obligations/${obligationId}?snapshot=${controlGeneration}`);
-    renderFactGraph(d.fact_group);
+    if (d.routes && d.routes.length === 1) await selectRoute(d.routes[0].id);
+    else renderFactGraph(d.fact_group);
   } catch (e) { connErrorFrom(e); }
 }
 
@@ -580,7 +645,13 @@ async function loadControl() {
     const targets=$('#control-targets'); targets.innerHTML=''; d.targets.forEach((t)=>targets.appendChild(governanceCard(t)));
     const methods=$('#control-methods'); methods.innerHTML='';
     d.methods.forEach((method)=>{ const group=el('div','entry'); group.appendChild(el('div','entry-author',method.method_title)); method.routes.forEach((r)=>{ const row=el('div','entry-evidence clickable',`${r.id} · ${r.state} · ${r.obligation_id}`); row.onclick=()=>selectRoute(r.id); group.appendChild(row); }); methods.appendChild(group); });
-    const obligations=$('#control-obligations'); obligations.innerHTML=''; d.obligations.forEach((o)=>{ const row=el('div','entry clickable'); row.appendChild(el('div','entry-author',o.id)); row.appendChild(el('span','tag',o.state)); row.appendChild(el('div','entry-claim',o.statement)); row.onclick=()=>selectObligation(o.id); obligations.appendChild(row); });
+    const obligations=$('#control-obligations'); obligations.innerHTML='';
+    d.obligations.forEach((o)=>{
+      const row=el('div','entry clickable'); row.appendChild(el('div','entry-author',o.id)); row.appendChild(el('span','tag',o.state));
+      if (o.statement.length <= 240) row.appendChild(el('div','entry-claim',o.statement));
+      else { const statement=factSection('Full obligation statement',o.statement,false); statement.onclick=(event)=>event.stopPropagation(); row.appendChild(statement); }
+      row.onclick=()=>selectObligation(o.id); obligations.appendChild(row);
+    });
     await loadManifests();
     currentResearchMap = d;
     renderResearchMap(d);

@@ -107,6 +107,9 @@ code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0
 .relation-list { display:flex; flex-wrap:wrap; gap:7px; padding:12px; }
 .relation-link { font-family:ui-monospace,monospace; font-size:11px; color:var(--accent-strong); background:var(--accent-bg-soft); }
 .pin-button { width:100%; margin-top:12px; }
+.route-summary-card { background:linear-gradient(145deg,#eef2ff,#f8fafc 58%,#ecfeff); border:1px solid #dbe3f3; border-radius:14px; padding:16px; box-shadow:var(--shadow-sm); }
+.route-summary-card .eyebrow { color:var(--accent-strong); font-size:10px; font-weight:750; letter-spacing:.09em; text-transform:uppercase; margin-bottom:7px; }
+.route-summary-card .muted { margin-top:12px; font-size:11px; }
 
 /* global memory */
 .subtabs { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 14px; }

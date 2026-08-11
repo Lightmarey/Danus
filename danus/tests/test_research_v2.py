@@ -196,7 +196,13 @@ def test_browser_view_state_has_no_persistent_or_write_path():
     assert "focus:'adjacency'" not in script
     assert "function factSection(title, text, open = false)" in script
     assert "el('details', 'fact-section')" in script
-    assert "Show all routes" in (Path(observability_app.__file__).parent / "static" / "index.html").read_text(encoding="utf-8")
+    assert "function renderRouteTheoremGroups(data, surface = 'fact')" in script
+    assert "direction=predecessors&depth=3&limit=300" in script
+    assert "katex.renderToString" in script
+    page = (Path(observability_app.__file__).parent / "static" / "index.html").read_text(encoding="utf-8")
+    assert "Show all routes" in page
+    assert "theorem group" in page
+    assert "katex.min.js" in page
 
 
 def test_10k_fact_30k_edge_indexed_payload_and_local_graph_bound(tmp_path: Path):

@@ -98,7 +98,17 @@ Gateway tools, worker kickoff, write-paper, and the dashboard all use
 stable route facts, dependency closures, open obstacles, recent checkpoints, and
 a bounded set of search candidates. Proof bodies are opt-in through `fact_get`.
 The dashboard reproduces the same snapshot and groups facts as Target → Method →
-Route → Obligation → Fact with closing/direct/input/support/shared roles.
+Route → Theorem Group → Fact. A theorem group is a read-only DAG projection rooted
+at one direct predecessor of the route's closing fact; clicking it expands only
+that root's bounded predecessor neighborhood. This keeps the control model
+unchanged while avoiding an unreadable route-wide fact dump. The underlying fact
+roles remain closing/direct/input/support/shared.
+
+Fact Markdown supports KaTeX delimiters (`$...$`, `$$...$$`, `\(...\)`, and
+`\[...\]`). The renderer never guesses LaTeX from legacy ASCII mathematics.
+Migrated facts therefore keep their authoritative statement/proof unchanged and
+should receive readable presentation titles (and, in a later derived display
+index, optional `display_markdown`) without changing `fact_id`.
 
 Dashboard Pin, filter, expansion, and comparison state exists only in the
 browser's in-memory `Set` and disappears on refresh. The only mutations are
