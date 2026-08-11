@@ -161,6 +161,25 @@ def _parse_last_fact_id(log_path: Path) -> Optional[str]:
         text = log_path.read_text(encoding="utf-8", errors="replace")
     except OSError:
         return None
+    saw_structured_submission = False
+    accepted: Optional[str] = None
+    for line in text.splitlines():
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        item = event.get("item") if isinstance(event, dict) else None
+        if not isinstance(item, dict) or item.get("type") != "mcp_tool_call" or item.get("tool") != "fact_submit":
+            continue
+        saw_structured_submission = True
+        result = item.get("result")
+        payload = result.get("structured_content", {}).get("result") if isinstance(result, dict) else None
+        if isinstance(payload, dict) and payload.get("accepted") is True:
+            fact_id = payload.get("fact_id")
+            if isinstance(fact_id, str) and re.fullmatch(r"[0-9a-f]{16}", fact_id):
+                accepted = fact_id
+    if saw_structured_submission:
+        return accepted
     ids = _FACT_ID_RE.findall(text)
     return ids[-1] if ids else None
 

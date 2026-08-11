@@ -201,6 +201,24 @@ def test_taint_is_append_only_and_pauses_routes_that_depend_on_the_fact(tmp_path
     assert FactGraph(store.project).exists(fact_id) is True  # review marker, not destructive revoke
 
 
+def test_route_input_fact_is_reusable_without_a_fact_link_event(tmp_path: Path):
+    store = _store(tmp_path)
+    target = store.propose_target(_target())
+    store.approve_target(target["version"])
+    fact_id = FactGraph(store.project).add(
+        problem_id="P", author="legacy", statement="Imported route input",
+        proof="Proof",
+    )
+    store.add_route({
+        "id": "route-input", "obligation_id": "v0001-T",
+        "method_family": "reuse", "expected_result": "T",
+        "input_fact_ids": [fact_id],
+    })
+    store.rebuild_read_model()
+    assert store.events("fact_linked") == []
+    assert store.reusable_fact("Imported route input", []) == fact_id
+
+
 def test_only_explicit_v2_metadata_enables_control(tmp_path: Path):
     project = tmp_path / "legacy"
     project.mkdir()
@@ -345,9 +363,11 @@ def test_nested_verification_uses_parent_wall_reservation_without_double_countin
         "worker": "high", "assignment_epoch": "epoch", "target_version": "v0001",
         "obligation_id": "o1", "route_id": "r1",
     }
+    generation = store.generation()
     parent = store.reserve_call(
         component="worker_slice", max_wall_seconds=100, **scope,
     )
+    assert store.generation() == generation
     child = store.reserve_call(
         component="verification", max_wall_seconds=60,
         parent_reservation_id=parent["id"], **scope,

@@ -185,6 +185,22 @@ def test_parse_last_fact_id(tmp: Path):
     log = tmp / "round.log"
     log.write_text('noise\nfact_id=0123456789abcdef\nmore\n"fact_id": "fedcba9876543210"\n')
     assert loop._parse_last_fact_id(log) == "fedcba9876543210"
+    rejected = {
+        "type": "item.completed",
+        "item": {
+            "type": "mcp_tool_call", "tool": "fact_submit",
+            "result": {"structured_content": {"result": {
+                "accepted": False, "fact_id": "0123456789abcdef",
+            }}},
+        },
+    }
+    log.write_text(json.dumps(rejected) + "\n")
+    assert loop._parse_last_fact_id(log) is None
+    rejected["item"]["result"]["structured_content"]["result"] = {
+        "accepted": True, "fact_id": "fedcba9876543210",
+    }
+    log.write_text(json.dumps(rejected) + "\n")
+    assert loop._parse_last_fact_id(log) == "fedcba9876543210"
     log.write_text("no facts here, and DEADBEEF is not 16 hex lower\n")
     assert loop._parse_last_fact_id(log) is None
 

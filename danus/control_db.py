@@ -942,6 +942,16 @@ class SQLiteControlStore:
     def reusable_fact(self, statement: str, assumptions_used: Iterable[str]) -> Optional[str]:
         normalized = " ".join(statement.split())
         assumptions = sorted(str(item) for item in assumptions_used)
+        if not assumptions:
+            with self._connect() as db:
+                row = db.execute(
+                    "SELECT f.fact_id FROM facts f WHERE f.statement=? AND f.status='active' "
+                    "AND EXISTS (SELECT 1 FROM fact_scopes s WHERE s.fact_id=f.fact_id) "
+                    "ORDER BY f.fact_id LIMIT 1",
+                    (statement,),
+                ).fetchone()
+            if row and not self.fact_tainted(str(row[0])):
+                return str(row[0])
         for row in reversed(self.events("fact_linked")):
             fact_id = row.get("fact_id")
             if not fact_id or self.fact_tainted(str(fact_id)) or sorted(row.get("assumptions_used") or []) != assumptions:
@@ -1114,7 +1124,8 @@ class SQLiteControlStore:
             expires = now + wall + 60.0
             db.execute("INSERT INTO call_reservations VALUES (?,?,?,?,?,'active',?,?,?,NULL)", (reservation_id, component, provider_key, reserved_wall, estimated, _dump(scope), utc_now(), expires))
             self._event(db, "call_reserved", reservation_id=reservation_id, component=component, provider_key=provider_key, reserved_wall_seconds=reserved_wall, requested_wall_seconds=wall, reserved_cost_usd=estimated, **scope)
-            self._bump(db)
+            # Operational reservations do not change the mathematical/control
+            # snapshot seen by a running worker.
         return {"id": reservation_id, "component": component, "provider_key": provider_key, "reserved_wall_seconds": reserved_wall, "requested_wall_seconds": wall, "reserved_cost_usd": estimated, "expires_at_epoch": expires, "scope": scope}
 
     def _settle_reservation(self, db: sqlite3.Connection, reservation_id: Optional[str]) -> Optional[dict[str, Any]]:
