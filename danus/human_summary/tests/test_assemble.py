@@ -12,8 +12,11 @@ Runs standalone (``python -m danus.human_summary.tests.test_assemble``) and unde
 
 from __future__ import annotations
 
+import json
+import tempfile
 from pathlib import Path
 
+from danus.control import ControlStore
 from danus.human_summary import assemble
 
 from ._fixtures import SKILL_DIR, env, temp_project
@@ -71,12 +74,13 @@ def test_report_language_directive():
 
 
 def test_empty_fact_graph_bundle_sentinel():
-    # a project whose fact graph has no facts -> the sentinel note (assemble.py:145);
-    # _ordered_load_bearing returns [] on empty (assemble.py:115).
-    with temp_project() as pdir:
-        facts = Path(pdir) / "fact_graph" / "facts"
-        for f in facts.glob("*.md"):
-            f.unlink()
+    with tempfile.TemporaryDirectory() as raw:
+        pdir = Path(raw)
+        (pdir / "project.json").write_text(
+            json.dumps({"name": "empty", "control_version": 2}), encoding="utf-8",
+        )
+        (pdir / "PROBLEM.md").write_text("Prove the empty example.", encoding="utf-8")
+        ControlStore(pdir).scaffold()
         assert assemble.fact_bundle(pdir).strip().startswith("_(no verified results")
         # the empty bundle still yields a well-formed prompt (PROBLEM.md + writer prompt)
         p = assemble.build_prompt(pdir)

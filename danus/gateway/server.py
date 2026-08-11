@@ -37,7 +37,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Literal, Optional, get_args
 
 from danus._mcp import FastMCP
-from danus.control import ControlError, ControlStore
+from danus.control import ControlError, ControlStore, require_v2_project
 from danus.core import FactGraph, GlobalMemory
 from danus.core.schema import compute_fact_id
 from danus.integrations import search as _arxiv_search
@@ -83,10 +83,10 @@ def _project(project: Optional[str] = None) -> Path:
         pdir = Path(agents_root) / project
         if not pdir.is_dir():
             raise RuntimeError(f"no such project: {project!r} (under {agents_root})")
-        return pdir
+        return require_v2_project(pdir)
     if not project_dir:
         raise RuntimeError("DANUS_PROJECT_DIR is not set and no project was given")
-    return Path(project_dir)
+    return require_v2_project(Path(project_dir))
 
 
 def _gm(project: Optional[str] = None) -> GlobalMemory:
@@ -142,7 +142,7 @@ def gm_add(
     workers omit it (pinned to their own project)."""
     project_dir = _project(project)
     control = ControlStore(project_dir)
-    if control.enabled and kind == "master_guidance":
+    if kind == "master_guidance":
         links = links or {}
         missing = [key for key in ("target_version", "route_id", "obligation_id") if not links.get(key)]
         if missing:
@@ -164,10 +164,7 @@ def gm_search(query: str, kinds: Optional[List[str]] = None, limit_per_kind: int
     ``project`` to search a specific project; workers omit it."""
     project_dir = _project(project)
     result = GlobalMemory(project_dir).search(query, kinds=kinds, limit_per_kind=limit_per_kind)
-    if not ControlStore(project_dir).enabled:
-        return result
-
-    # V2 workers use fact_get for deliberate expansion. Keep recall compact so a
+    # Workers use fact_get for deliberate expansion. Keep recall compact so a
     # broad memory search cannot silently consume another large model turn.
     compact: Dict[str, Any] = {"query": query, "results_by_kind": {}, "truncated": False}
     used = len(query)
@@ -275,37 +272,36 @@ def fact_submit(
     gm = _gm()
     problem_id = os.environ.get("DANUS_PROBLEM_ID", Path(_project()).name)
     control = ControlStore(project_dir)
-    if control.enabled:
-        required = {
-            "target_version": target_version, "obligation_id": obligation_id,
-            "route_id": route_id, "assignment_epoch": assignment_epoch,
-            "claim_role": claim_role,
-        }
-        missing = [key for key, value in required.items() if not value]
-        if missing:
-            return {"accepted": False, "verdict": "control_error",
-                    "error": f"Danus v2 fact_submit missing: {', '.join(missing)}"}
-        if claim_role not in CLAIM_ROLES:
-            return {"accepted": False, "verdict": "control_error",
-                    "error": f"invalid claim_role: {claim_role}"}
-        try:
-            control.validate_submission(
-                _author(), target_version=target_version or "",
-                obligation_id=obligation_id or "", route_id=route_id or "",
-                assignment_epoch=assignment_epoch or "",
-                assumptions_used=assumptions_used or [],
-                reservation_id=os.environ.get("DANUS_CALL_RESERVATION_ID"),
-            )
-        except ControlError as exc:
-            return {"accepted": False, "verdict": "control_error", "error": str(exc)}
-        clean_title = " ".join(display_title.split())
-        if "\n" in display_title or "\r" in display_title or not 4 <= len(clean_title) <= 80:
-            return {"accepted": False, "verdict": "control_error",
-                    "error": "Danus v2 display_title must be one line and 4-80 characters"}
-        tainted_predecessors = [fid for fid in (predecessors or []) if control.fact_tainted(fid)]
-        if tainted_predecessors:
-            return {"accepted": False, "verdict": "control_error",
-                    "error": f"submission depends on tainted facts: {', '.join(tainted_predecessors)}"}
+    required = {
+        "target_version": target_version, "obligation_id": obligation_id,
+        "route_id": route_id, "assignment_epoch": assignment_epoch,
+        "claim_role": claim_role,
+    }
+    missing = [key for key, value in required.items() if not value]
+    if missing:
+        return {"accepted": False, "verdict": "control_error",
+                "error": f"fact_submit missing: {', '.join(missing)}"}
+    if claim_role not in CLAIM_ROLES:
+        return {"accepted": False, "verdict": "control_error",
+                "error": f"invalid claim_role: {claim_role}"}
+    try:
+        control.validate_submission(
+            _author(), target_version=target_version or "",
+            obligation_id=obligation_id or "", route_id=route_id or "",
+            assignment_epoch=assignment_epoch or "",
+            assumptions_used=assumptions_used or [],
+            reservation_id=os.environ.get("DANUS_CALL_RESERVATION_ID"),
+        )
+    except ControlError as exc:
+        return {"accepted": False, "verdict": "control_error", "error": str(exc)}
+    clean_title = " ".join(display_title.split())
+    if "\n" in display_title or "\r" in display_title or not 4 <= len(clean_title) <= 80:
+        return {"accepted": False, "verdict": "control_error",
+                "error": "display_title must be one line and 4-80 characters"}
+    tainted_predecessors = [fid for fid in (predecessors or []) if control.fact_tainted(fid)]
+    if tainted_predecessors:
+        return {"accepted": False, "verdict": "control_error",
+                "error": f"submission depends on tainted facts: {', '.join(tainted_predecessors)}"}
 
     # glossary coverage is advisory — never let a heuristic bug block submission
     try:
@@ -316,7 +312,7 @@ def fact_submit(
     except Exception:
         undefined = []
 
-    reused_fact_id = control.reusable_fact(statement, assumptions_used or []) if control.enabled else None
+    reused_fact_id = control.reusable_fact(statement, assumptions_used or [])
     if reused_fact_id:
         control.prepare_fact(reused_fact_id, {"reused": True, "scope": {
             "worker": _author(), "assignment_epoch": assignment_epoch,
@@ -343,70 +339,67 @@ def fact_submit(
     # 1) Verify. If the verify service errors, no verdict exists yet: return a
     #    clean error so the worker retries. Nothing is lost.
     reservation = None
-    if control.enabled:
-        try:
-            reservation = control.reserve_call(
-                component="verification", max_wall_seconds=_verify_timeout(),
-                parent_reservation_id=os.environ.get("DANUS_CALL_RESERVATION_ID"),
-                worker=_author(), target_version=target_version,
-                obligation_id=obligation_id, route_id=route_id,
-                assignment_epoch=assignment_epoch,
-            )
-            gate = control.claim_backend_call("codex")
-            if not gate["allowed"]:
-                control.cancel_call_reservation(reservation["id"], reason="provider circuit is open")
-                return {"accepted": False, "verdict": "error", "error": f"Codex provider circuit is {gate['state']}", "undefined_symbols": undefined}
-        except ControlError as exc:
-            message = str(exc)
-            reason_code = (
-                "wall_budget" if "wall budget" in message
-                else "cost_budget" if "cost budget" in message
-                else "control"
-            )
-            control.append_event(
-                "call_reservation_rejected", component="verification",
-                worker=_author(), target_version=target_version,
-                obligation_id=obligation_id, route_id=route_id,
-                assignment_epoch=assignment_epoch, reason_code=reason_code,
-                reason=message,
-            )
-            return {"accepted": False, "verdict": "control_error", "error": str(exc), "undefined_symbols": undefined}
+    try:
+        reservation = control.reserve_call(
+            component="verification", max_wall_seconds=_verify_timeout(),
+            parent_reservation_id=os.environ.get("DANUS_CALL_RESERVATION_ID"),
+            worker=_author(), target_version=target_version,
+            obligation_id=obligation_id, route_id=route_id,
+            assignment_epoch=assignment_epoch,
+        )
+        gate = control.claim_backend_call("codex")
+        if not gate["allowed"]:
+            control.cancel_call_reservation(reservation["id"], reason="provider circuit is open")
+            return {"accepted": False, "verdict": "error", "error": f"Codex provider circuit is {gate['state']}", "undefined_symbols": undefined}
+    except ControlError as exc:
+        message = str(exc)
+        reason_code = (
+            "wall_budget" if "wall budget" in message
+            else "cost_budget" if "cost budget" in message
+            else "control"
+        )
+        control.append_event(
+            "call_reservation_rejected", component="verification",
+            worker=_author(), target_version=target_version,
+            obligation_id=obligation_id, route_id=route_id,
+            assignment_epoch=assignment_epoch, reason_code=reason_code,
+            reason=message,
+        )
+        return {"accepted": False, "verdict": "control_error", "error": str(exc), "undefined_symbols": undefined}
     try:
         result = _verify(statement, proof)
     except Exception as e:
-        if control.enabled:
-            control.record_cost(
-                component="verification", wall_seconds=time.monotonic() - started,
-                worker=_author(), target_version=target_version, obligation_id=obligation_id,
-                route_id=route_id, assignment_epoch=assignment_epoch,
-                reservation_id=reservation["id"] if reservation else None,
-                attempt_status="failed",
-            )
-            from danus import codex
-            rc = 124 if "timed out" in str(e).lower() or "504" in str(e) else 1
-            control.record_backend_failure(codex.classify_failure(rc, text=str(e)), provider_key="codex", actor="verification", wall_seconds=time.monotonic() - started)
+        control.record_cost(
+            component="verification", wall_seconds=time.monotonic() - started,
+            worker=_author(), target_version=target_version, obligation_id=obligation_id,
+            route_id=route_id, assignment_epoch=assignment_epoch,
+            reservation_id=reservation["id"] if reservation else None,
+            attempt_status="failed",
+        )
+        from danus import codex
+        rc = 124 if "timed out" in str(e).lower() or "504" in str(e) else 1
+        control.record_backend_failure(codex.classify_failure(rc, text=str(e)), provider_key="codex", actor="verification", wall_seconds=time.monotonic() - started)
         return {"accepted": False, "verdict": "error", "error": str(e),
                 "undefined_symbols": undefined}
     # A successful call that returned a non-dict body (e.g. a bare list) would make
     # the .get() below throw uncaught; treat it as a verify error (clean retry
     # envelope, no verdict to store) rather than leaking a stack trace to the worker.
     if not isinstance(result, dict):
-        if control.enabled:
-            control.record_cost(
-                component="verification", wall_seconds=time.monotonic() - started,
-                worker=_author(), target_version=target_version, obligation_id=obligation_id,
-                route_id=route_id, assignment_epoch=assignment_epoch,
-                reservation_id=reservation["id"] if reservation else None,
-                attempt_status="invalid_response",
-            )
-            control.record_backend_failure({"failure_class": "invalid_response", "retryable": False, "retry_after_seconds": 0, "error_signature": "invalid-response"}, provider_key="codex", actor="verification", wall_seconds=time.monotonic() - started)
+        control.record_cost(
+            component="verification", wall_seconds=time.monotonic() - started,
+            worker=_author(), target_version=target_version, obligation_id=obligation_id,
+            route_id=route_id, assignment_epoch=assignment_epoch,
+            reservation_id=reservation["id"] if reservation else None,
+            attempt_status="invalid_response",
+        )
+        control.record_backend_failure({"failure_class": "invalid_response", "retryable": False, "retry_after_seconds": 0, "error_signature": "invalid-response"}, provider_key="codex", actor="verification", wall_seconds=time.monotonic() - started)
         return {"accepted": False, "verdict": "error",
                 "error": f"verify service returned a non-dict body ({type(result).__name__})",
                 "undefined_symbols": undefined}
     verdict = result.get("verdict")
     accepted = verdict == "correct"
     binding_error = None
-    if accepted and control.enabled:
+    if accepted:
         try:
             control.validate_submission(
                 _author(), target_version=target_version or "",
@@ -424,26 +417,24 @@ def fact_submit(
     write_error = None
     if accepted and not binding_error:
         try:
-            if control.enabled:
-                pending_id = compute_fact_id(
-                    problem_id=problem_id, predecessors=predecessors or [],
-                    glossary_introduces=glossary_introduces or {},
-                    statement=statement, proof=proof,
-                )
-                control.prepare_fact(pending_id, {"reused": False, "scope": {
-                    "worker": _author(), "assignment_epoch": assignment_epoch,
-                    "target_version": target_version, "obligation_id": obligation_id,
-                    "route_id": route_id, "claim_role": claim_role,
-                    "assumptions_used": assumptions_used or [],
-                }})
+            pending_id = compute_fact_id(
+                problem_id=problem_id, predecessors=predecessors or [],
+                glossary_introduces=glossary_introduces or {},
+                statement=statement, proof=proof,
+            )
+            control.prepare_fact(pending_id, {"reused": False, "scope": {
+                "worker": _author(), "assignment_epoch": assignment_epoch,
+                "target_version": target_version, "obligation_id": obligation_id,
+                "route_id": route_id, "claim_role": claim_role,
+                "assumptions_used": assumptions_used or [],
+            }})
             fact_id = fg.add(
                 problem_id=problem_id, author=_author(), statement=statement, proof=proof,
                 display_title=display_title,
                 predecessors=predecessors, glossary_introduces=glossary_introduces,
                 intuition=intuition, external_refs=external_refs,
             )
-            if control.enabled:
-                control.finalize_fact(fact_id)
+            control.finalize_fact(fact_id)
         except Exception as e:
             write_error = str(e)
 
@@ -462,24 +453,23 @@ def fact_submit(
     )
 
     closure = None
-    if control.enabled:
-        control.record_cost(
-            component="verification", wall_seconds=time.monotonic() - started,
-            worker=_author(), target_version=target_version, obligation_id=obligation_id,
-            route_id=route_id, assignment_epoch=assignment_epoch,
-            usage=(result.get("usage") if isinstance(result.get("usage"), dict) else {}),
-            cost_usd=result.get("cost_usd"),
-            reservation_id=reservation["id"] if reservation else None,
-            attempt_status="completed",
+    control.record_cost(
+        component="verification", wall_seconds=time.monotonic() - started,
+        worker=_author(), target_version=target_version, obligation_id=obligation_id,
+        route_id=route_id, assignment_epoch=assignment_epoch,
+        usage=(result.get("usage") if isinstance(result.get("usage"), dict) else {}),
+        cost_usd=result.get("cost_usd"),
+        reservation_id=reservation["id"] if reservation else None,
+        attempt_status="completed",
+    )
+    control.record_backend_success(provider_key="codex", actor="verification")
+    if accepted and fact_id:
+        closure = _close_v2_obligation(
+            control, statement=statement, fact_id=fact_id,
+            obligation_id=obligation_id or "", assignment_epoch=assignment_epoch or "",
+            claim_role=claim_role or "", undefined=undefined,
+            requested=closes_obligation,
         )
-        control.record_backend_success(provider_key="codex", actor="verification")
-        if accepted and fact_id:
-            closure = _close_v2_obligation(
-                control, statement=statement, fact_id=fact_id,
-                obligation_id=obligation_id or "", assignment_epoch=assignment_epoch or "",
-                claim_role=claim_role or "", undefined=undefined,
-                requested=closes_obligation,
-            )
 
     # 4) Return.
     if binding_error:
@@ -509,7 +499,7 @@ def fact_search(query: str, limit: int = 10, project: Optional[str] = None) -> D
     project's graph; workers omit it. V2 returns a bounded snippet; use
     ``fact_get`` to expand a selected fact."""
     project_dir = _project(project)
-    results = ResearchQuery(project_dir).fact_search(query, limit=limit) if ControlStore(project_dir).enabled else _fg(project).search(query, limit=limit)
+    results = ResearchQuery(project_dir).fact_search(query, limit=limit)
     return {"query": query, "results": results}
 
 
@@ -549,10 +539,7 @@ def fact_revoke(fact_id: str, reason: str, project: Optional[str] = None) -> Dic
     that owns the fact."""
     project_dir = _project(project)
     control = ControlStore(project_dir)
-    if control.enabled:
-        return {"tainted_pending_review": control.taint_fact(fact_id, reason), "revoked": []}
-    revoked = _fg(project).revoke(fact_id, reason=reason)
-    return {"revoked": revoked}
+    return {"tainted_pending_review": control.taint_fact(fact_id, reason), "revoked": []}
 
 
 # --------------------------------------------------------------------------- #

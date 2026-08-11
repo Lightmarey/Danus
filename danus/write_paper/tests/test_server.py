@@ -18,7 +18,14 @@ from pathlib import Path
 
 from danus.write_paper import server
 
-from ._fixtures import EXAMPLE_PROJECT, env, temp_project, write_ledger, write_main_tex
+from ._fixtures import (
+    EXAMPLE_PROJECT,
+    env,
+    prepare_v2_project,
+    temp_project,
+    write_ledger,
+    write_main_tex,
+)
 
 
 @contextmanager
@@ -543,6 +550,7 @@ def test_project_resolution_by_name():
     with tempfile.TemporaryDirectory() as root:
         proj = Path(root) / "odd_sum"
         shutil.copytree(EXAMPLE_PROJECT, proj)
+        prepare_v2_project(proj)
         write_main_tex(proj)
         write_ledger(proj)
         with env(DANUS_AGENTS_ROOT=root, DANUS_PROJECT_DIR=None):

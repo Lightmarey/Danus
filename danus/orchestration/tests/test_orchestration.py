@@ -19,6 +19,7 @@ from contextlib import contextmanager
 import contextlib
 from pathlib import Path
 
+from danus.control import ControlStore
 from danus.execution import layout as L
 from danus.orchestration import cli
 from danus import runtime
@@ -60,15 +61,44 @@ def _project_env(tmp: Path, **extra):
 
 
 def _fake_codex(d: Path) -> Path:
-    """A stub codex: print a round marker, sleep FAKE_CODEX_SLEEP, exit 0."""
+    """A stub codex that emits one schema-valid, low-gain WorkReport."""
+    report = {
+        "route_status": "no_progress", "summary": "no new evidence",
+        "new_fact_ids": [], "new_evidence_refs": [],
+        "new_or_changed_obligations": [], "unresolved_interfaces": [],
+        "failed_attempt_signatures": ["fixture-repeat"], "novelty_basis": [],
+        "recommended_next_action": "audit route",
+    }
     return write_python_launcher(
         d,
         "fake_codex",
-        'import os, sys, time\n'
-        'sys.stdout.write("fake codex round\\n")\n'
+        'import json, os, pathlib, sys, time\n'
+        f'report = {report!r}\n'
+        'out = sys.argv[sys.argv.index("--output-last-message") + 1]\n'
+        'pathlib.Path(out).write_text(json.dumps(report), encoding="utf-8")\n'
+        'sys.stdout.write("{\\"type\\":\\"turn.completed\\",\\"usage\\":{}}\\n")\n'
         'sys.stdout.flush()\n'
         'time.sleep(float(os.environ.get("FAKE_CODEX_SLEEP", "0")))\n',
     )
+
+
+def _prepare_route(project: str, workers: tuple[str, ...]) -> tuple[str, str]:
+    store = ControlStore(L.project_dir(project))
+    target = store.propose_target({
+        "statement": "Prove T.", "allowed_assumptions": [],
+        "forbidden_assumptions": [], "required_conclusions": ["T"],
+        "fallback_candidates": [],
+    })
+    store.approve_target(target["version"])
+    obligation, route = "v0001-root-1", "test-route"
+    store.add_route({
+        "id": route, "obligation_id": obligation,
+        "method_family": "direct", "expected_result": "T",
+        "input_fact_ids": [],
+    })
+    for worker in workers:
+        store.assign(worker, obligation_id=obligation, route_id=route, task="Prove T")
+    return obligation, route
 
 
 def _wait_until(pred, timeout=15.0, interval=0.05) -> bool:
@@ -122,10 +152,16 @@ def _kill_project(project: str):
 def test_assign_replace_and_rejects(tmp: Path):
     with _project_env(tmp):
         cli.do_new("P", roles="high:1")
-        cli.do_assign("P/high", "explore direction 3: the symplectic-rank route")
+        obligation, route = _prepare_route("P", ())
+        cli.do_assign(
+            "P/high", "explore direction 3: the symplectic-rank route",
+            obligation=obligation, route=route,
+        )
         assert L.WorkerLayout(L.worker_dir("P", "high")).task.read_text() == \
             "explore direction 3: the symplectic-rank route\n"
-        cli.do_assign("P/high", "switch to direction 5")   # replace, not append
+        cli.do_assign(
+            "P/high", "switch to direction 5", obligation=obligation, route=route,
+        )   # replace, not append
         assert L.WorkerLayout(L.worker_dir("P", "high")).task.read_text() == "switch to direction 5\n"
         for bad in ["P", "P/nope"]:
             try:
@@ -158,19 +194,21 @@ def test_list(tmp: Path):
 
 # --- loop integration tests (stubbed codex) -------------------------------- #
 
-def test_loop_runs_rounds_then_exits(tmp: Path):
+def test_loop_stalls_only_after_audited_low_gain(tmp: Path):
     fc = _fake_codex(tmp)
     with _project_env(tmp, DANUS_CODEX_BIN=str(fc), DANUS_ROUND_BEAT="0",
-                      DANUS_MAX_ROUNDS="2", FAKE_CODEX_SLEEP="0"):
+                      FAKE_CODEX_SLEEP="0"):
         cli.do_new("P", roles="high:1")
+        _prepare_route("P", ("high",))
         try:
             res = cli.do_start("P/high")
             assert res[0]["result"] == "started"
-            assert _wait_until(lambda: not _st("P", "high")["alive"]), "loop should exit at backstop"
+            assert _wait_until(lambda: not _st("P", "high")["alive"]), "loop should pause after audit"
             s = _st("P", "high")
-            assert s["state"] == "max_rounds" and s["round"] == 2
+            assert s["state"] == "paused" and s["round"] == 3
             wl = L.WorkerLayout(L.worker_dir("P", "high"))
-            assert (wl.logs / "round_1.log").exists() and (wl.logs / "round_2.log").exists()
+            assert (wl.logs / "slice_1.jsonl").exists()
+            assert (wl.logs / "slice_3.jsonl").exists()
         finally:
             _kill_project("P")
 
@@ -180,6 +218,7 @@ def test_graceful_stop(tmp: Path):
     with _project_env(tmp, DANUS_CODEX_BIN=str(fc), DANUS_ROUND_BEAT="0.1",
                       DANUS_MAX_ROUNDS="0", FAKE_CODEX_SLEEP="0.1"):
         cli.do_new("P", roles="high:1")
+        _prepare_route("P", ("high",))
         try:
             wl = L.WorkerLayout(L.worker_dir("P", "high"))
             cli.do_start("P/high")
@@ -207,6 +246,7 @@ def test_force_stop(tmp: Path):
     with _project_env(tmp, DANUS_CODEX_BIN=str(fc), DANUS_ROUND_BEAT="0",
                       DANUS_MAX_ROUNDS="0", FAKE_CODEX_SLEEP="30"):
         cli.do_new("P", roles="high:1")
+        _prepare_route("P", ("high",))
         try:
             cli.do_start("P/high")
             assert _wait_until(lambda: _st("P", "high")["state"] == "running"), "round should run"
@@ -222,6 +262,7 @@ def test_idempotent_start(tmp: Path):
     with _project_env(tmp, DANUS_CODEX_BIN=str(fc), DANUS_ROUND_BEAT="0",
                       DANUS_MAX_ROUNDS="0", FAKE_CODEX_SLEEP="30"):
         cli.do_new("P", roles="high:1")
+        _prepare_route("P", ("high",))
         try:
             assert cli.do_start("P/high")[0]["result"] == "started"
             assert _wait_until(lambda: _st("P", "high")["alive"])
@@ -235,6 +276,7 @@ def test_project_wide_targets(tmp: Path):
     with _project_env(tmp, DANUS_CODEX_BIN=str(fc), DANUS_ROUND_BEAT="0",
                       DANUS_MAX_ROUNDS="1", FAKE_CODEX_SLEEP="0"):
         cli.do_new("P", roles="high:2")
+        _prepare_route("P", ("high", "high2"))
         try:
             res = cli.do_start("P")              # whole project
             assert {r["worker"] for r in res} == {"high", "high2"}
@@ -246,14 +288,16 @@ def test_project_wide_targets(tmp: Path):
 
 def test_missing_codex_returns_error_state(tmp: Path):
     with _project_env(tmp, DANUS_CODEX_BIN="/nonexistent/codex-bin",
-                      DANUS_ROUND_BEAT="0", DANUS_MAX_ROUNDS="0"):
+                      DANUS_ROUND_BEAT="0"):
         cli.do_new("P", roles="high:1")
+        _prepare_route("P", ("high",))
         try:
             cli.do_start("P/high")
-            # rc 127 => loop must not spin; it errors out immediately
+            # A missing provider binary is infrastructure failure, not research
+            # progress; bounded retry opens the shared circuit and pauses work.
             assert _wait_until(lambda: not _st("P", "high")["alive"]), "loop should exit on missing codex"
             s = _st("P", "high")
-            assert s["state"] == "error"
+            assert s["state"] == "infra_blocked"
         finally:
             _kill_project("P")
 
@@ -262,7 +306,7 @@ def test_missing_codex_returns_error_state(tmp: Path):
 
 def main() -> None:
     fs_tests = [test_assign_replace_and_rejects, test_status_before_start, test_list]
-    loop_tests = [test_loop_runs_rounds_then_exits, test_graceful_stop, test_force_stop,
+    loop_tests = [test_loop_stalls_only_after_audited_low_gain, test_graceful_stop, test_force_stop,
                   test_idempotent_start, test_project_wide_targets,
                   test_missing_codex_returns_error_state]
     for t in fs_tests + loop_tests:

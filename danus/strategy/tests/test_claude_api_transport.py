@@ -27,6 +27,7 @@ from contextlib import contextmanager
 from pathlib import Path
 
 from danus.strategy import cli
+from ._fixtures import prepare_v2_project
 from danus.strategy.config import (
     DEFAULT_CLAUDE_API_FALLBACK, DEFAULT_CLAUDE_API_MODEL,
     load_claude_api_config, resolve_transport,
@@ -397,6 +398,7 @@ def test_cli_success_and_ledger():
              _env(DANUS_CONSULT_CLAUDE_API_KEY="k",
                   DANUS_CONSULT_CLAUDE_API_MODEL=None,
                   DANUS_CONSULT_CLAUDE_API_FALLBACK=None):
+            prepare_v2_project(proj)
             code, res = _run_cli(["--transport", "claude_api", "--quiet",
                                   "--project", proj])
             assert code == 0

@@ -20,6 +20,7 @@ from dataclasses import replace
 from pathlib import Path
 
 from danus.strategy import cli, ledger
+from ._fixtures import prepare_v2_project
 from danus import runtime
 from danus.strategy.config import (
     DEFAULT_CLAUDE_CODE_MODEL, DEFAULT_MODEL, DEFAULT_PRICE_IN, DEFAULT_PRICE_OUT,
@@ -359,6 +360,7 @@ def test_cli_empty_prompt_refused():
 
 def test_cli_off_short_circuit_with_ledger():
     with tempfile.TemporaryDirectory() as tmp:
+        prepare_v2_project(tmp)
         pf = Path(tmp) / "prompt.md"
         pf.write_text("elaborate please")
         with _env(DANUS_CONSULT_TRANSPORT="off"):
@@ -532,6 +534,7 @@ def test_cli_api_success_full_path(capsys):
     GptProTransport.__init__ = patched_init
     try:
         with tempfile.TemporaryDirectory() as tmp:
+            prepare_v2_project(tmp)
             pf = Path(tmp) / "p.md"
             pf.write_text("hello")
             out = Path(tmp) / "out.md"

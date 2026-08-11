@@ -40,9 +40,9 @@ def log_spend(project: str, envelope: Dict[str, Any], *, record_control: bool = 
     with ledger.open("a", encoding="utf-8") as f:
         f.write(json.dumps(rec, ensure_ascii=False) + "\n")
     try:
-        from danus.control import ControlStore
-        control = ControlStore(Path(project))
-        if control.enabled and record_control:
+        if record_control:
+            from danus.control import ControlStore, require_v2_project
+            control = ControlStore(require_v2_project(Path(project)))
             control.record_cost(
                 component="strategy_consult", wall_seconds=float(envelope.get("seconds") or 0),
                 usage={

@@ -132,20 +132,19 @@ def do_finalize(project: str, fact_ids: List[str],
     pdir = L.project_dir(project)
     if not pdir.is_dir():
         raise SystemExit(f"no such project: {project}")
+    try:
+        require_v2_project(pdir)
+    except ControlError as exc:
+        raise SystemExit(str(exc)) from exc
     fg = FactGraph(pdir)
 
     if not fact_ids:
-        control = ControlStore(pdir)
-        if control.enabled:
-            from danus.research import ResearchQuery
-            proof_manifest = ResearchQuery(pdir).target_proof_manifest()
-            return {"project": project, "paper_id": paper_id,
-                    "suggested": proof_manifest["closing_fact_ids"],
-                    "target_version": proof_manifest["target_version"],
-                    "proof_complete": proof_manifest["complete"]}
-        # Legacy suggestion mode remains terminal-fact based.
+        from danus.research import ResearchQuery
+        proof_manifest = ResearchQuery(pdir).target_proof_manifest()
         return {"project": project, "paper_id": paper_id,
-                "suggested": assemble._terminal_facts(fg)}
+                "suggested": proof_manifest["closing_fact_ids"],
+                "target_version": proof_manifest["target_version"],
+                "proof_complete": proof_manifest["complete"]}
 
     unknown = [fid for fid in fact_ids if not fg.exists(fid)]
     if unknown:
@@ -260,8 +259,8 @@ def worker_status(wl: L.WorkerLayout) -> Dict:
         "round": st.get("round", 0), "age_s": round(age, 1) if age is not None else None,
         "last_fact_id": st.get("last_fact_id"), "label": label,
     }
-    control = ControlStore(wl.project_dir)
-    if control.enabled:
+    if is_v2_project(wl.project_dir):
+        control = ControlStore(wl.project_dir)
         assignment = control.assignment(wl.name)
         out["control"] = ({
             "status": assignment.get("status"),
@@ -277,6 +276,8 @@ def worker_status(wl: L.WorkerLayout) -> Dict:
             "last_failure_class": assignment.get("last_failure_class"),
             "next_retry_at_epoch": assignment.get("next_retry_at_epoch"),
         } if assignment else {"status": "unassigned"})
+    else:
+        out["control"] = {"status": "migration_required"}
     return out
 
 
@@ -368,10 +369,11 @@ def _control(project: str) -> ControlStore:
     pdir = L.project_dir(project)
     if not pdir.is_dir():
         raise SystemExit(f"no such project: {project}")
-    store = ControlStore(pdir)
-    if not store.enabled:
-        raise SystemExit(f"project {project} is legacy; v2 control commands are unavailable")
-    return store
+    try:
+        require_v2_project(pdir)
+    except ControlError as exc:
+        raise SystemExit(str(exc)) from exc
+    return ControlStore(pdir)
 
 
 def _json_object(path: str) -> Dict:

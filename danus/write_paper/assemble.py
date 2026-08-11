@@ -305,15 +305,12 @@ def resolve_headline(
     from_target = target_fact_ids(Path(project_dir), paper_id)
     if from_target:
         return from_target, "target"
-    # v2 has an authoritative target closure; authoring and the main agent use
+    # Research control has the authoritative target closure; authoring and the main agent use
     # the same manifest instead of independently guessing terminal facts.
-    from danus.control import ControlStore
-    control = ControlStore(Path(project_dir))
-    if control.enabled:
-        from danus.research import ResearchQuery
-        manifest = ResearchQuery(Path(project_dir)).target_proof_manifest()
-        if manifest["complete"]:
-            return list(manifest["closing_fact_ids"]), "control"
+    from danus.research import ResearchQuery
+    manifest = ResearchQuery(Path(project_dir)).target_proof_manifest()
+    if manifest["complete"]:
+        return list(manifest["closing_fact_ids"]), "control"
     return [], "unset"
 
 

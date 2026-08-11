@@ -107,15 +107,15 @@ def _prepare_control_call(project_dir: Optional[Path], component: str) -> tuple[
     if project_dir is None:
         return None, None, None
     try:
-        from danus.control import ControlStore
+        from danus.control import ControlStore, require_v2_project
+        require_v2_project(project_dir)
         control = ControlStore(project_dir)
-        if control.enabled:
-            reservation = control.reserve_call(component=component, max_wall_seconds=_timeout(), target_version=control.current_target_version())
-            gate = control.claim_backend_call("codex")
-            if not gate["allowed"]:
-                control.cancel_call_reservation(reservation["id"], reason="provider circuit is open")
-                return control, None, {"status": "infra_blocked", "returncode": None, "stdout": "", "stderr_tail": "", "error": f"Codex provider circuit is {gate['state']}"}
-            return control, reservation, None
+        reservation = control.reserve_call(component=component, max_wall_seconds=_timeout(), target_version=control.current_target_version())
+        gate = control.claim_backend_call("codex")
+        if not gate["allowed"]:
+            control.cancel_call_reservation(reservation["id"], reason="provider circuit is open")
+            return control, None, {"status": "infra_blocked", "returncode": None, "stdout": "", "stderr_tail": "", "error": f"Codex provider circuit is {gate['state']}"}
+        return control, reservation, None
     except (OSError, ValueError) as exc:
         return None, None, {"status": "budget_exhausted", "returncode": None, "stdout": "", "stderr_tail": "", "error": str(exc)}
     return None, None, None

@@ -167,12 +167,10 @@ class ResearchQuery:
     ROLE_PRIORITY = {"closing": 0, "direct": 1, "input": 2, "support": 3, "unassigned": 4}
 
     def __init__(self, project: Path) -> None:
-        from danus.control import ControlStore
+        from danus.control import ControlStore, require_v2_project
 
-        self.project = Path(project)
+        self.project = require_v2_project(Path(project))
         self.store = ControlStore(self.project)
-        if not self.store.enabled:
-            raise RuntimeError("ResearchQuery is available only for Danus v2 projects")
         self.store.scaffold()
 
     def _snapshot(self, snapshot: Optional[int]) -> int:

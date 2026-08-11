@@ -136,21 +136,15 @@ def fact_bundle(project_dir: Path) -> str:
     (statement / proof / intuition), id-free, in dependency order. No frontmatter,
     no fact id, no slug — nothing but the mathematics."""
     project_dir = Path(project_dir)
-    from danus.control import is_v2_project
-    if is_v2_project(project_dir):
-        from danus.research import ResearchQuery
-        query = ResearchQuery(project_dir)
-        ids = query.target_research_manifest()["fact_ids"]
-        rows = [query.fact_get(fid, include_proof=True) for fid in ids]
-        blocks = [
-            f"--- Result {n} ---\n## statement\n\n{row['statement']}\n\n"
-            f"## proof\n\n{row.get('proof') or ''}\n\n## intuition\n\n{row.get('intuition') or ''}\n"
-            for n, row in enumerate(rows, start=1)
-        ]
-    else:
-        fg = FactGraph(project_dir)
-        ids = _ordered_load_bearing(fg)
-        blocks = [f"--- Result {n} ---\n{_body_sections(fg.get_raw(fid) or '')}" for n, fid in enumerate(ids, start=1)]
+    from danus.research import ResearchQuery
+    query = ResearchQuery(project_dir)
+    ids = query.target_research_manifest()["fact_ids"]
+    rows = [query.fact_get(fid, include_proof=True) for fid in ids]
+    blocks = [
+        f"--- Result {n} ---\n## statement\n\n{row['statement']}\n\n"
+        f"## proof\n\n{row.get('proof') or ''}\n\n## intuition\n\n{row.get('intuition') or ''}\n"
+        for n, row in enumerate(rows, start=1)
+    ]
     if not blocks:
         return "_(no verified results are available for this project yet)_\n"
     return "\n".join(blocks)

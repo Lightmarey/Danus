@@ -10,8 +10,11 @@ Runs standalone (``python -m danus.write_paper.tests.test_assemble``) and under 
 
 from __future__ import annotations
 
+import json
+import tempfile
 from pathlib import Path
 
+from danus.control import ControlStore
 from danus.write_paper import assemble
 
 from ._fixtures import SKILL_DIR, env, temp_project, write_ledger, write_main_tex
@@ -212,21 +215,13 @@ def test_headline_unknown_fact_id_raises():
 
 
 def test_fact_graph_content_empty_project():
-    # a project whose fact graph has no facts. With the brief's headline_fact_ids
-    # blanked and no TARGET.md, the default resolves to UNSET and refuses (raises
-    # TargetUnsetError) rather than silently embedding all facts. An explicit empty
-    # headline still yields the no-facts sentinel (used for genuinely empty graphs).
-    with temp_project() as pdir:
-        facts = Path(pdir) / "fact_graph" / "facts"
-        for f in facts.glob("*.md"):
-            f.unlink()
-        brief = Path(pdir) / "paper" / "PROJECT_BRIEF.md"
-        brief.write_text(
-            brief.read_text(encoding="utf-8").replace(
-                "headline_fact_ids: fact_odd_sum_main", "headline_fact_ids:"
-            ),
-            encoding="utf-8",
+    # No approved control target means authoring must refuse to guess a result.
+    with tempfile.TemporaryDirectory() as raw:
+        pdir = Path(raw)
+        (pdir / "project.json").write_text(
+            json.dumps({"name": "empty", "control_version": 2}), encoding="utf-8",
         )
+        ControlStore(pdir).scaffold()
         # unset target -> refuse (no guess, no all-facts fallback)
         try:
             assemble.fact_graph_content(pdir)

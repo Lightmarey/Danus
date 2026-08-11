@@ -105,16 +105,14 @@ def _drive_scoped(prompt: str, project_dir: Path) -> Dict[str, Any]:
     control = None
     reservation = None
     try:
-        from danus.control import ControlStore
+        from danus.control import ControlStore, require_v2_project
+        require_v2_project(project_dir)
         control = ControlStore(project_dir)
-        if control.enabled:
-            reservation = control.reserve_call(component="human_summary", max_wall_seconds=_timeout(), target_version=control.current_target_version())
-            gate = control.claim_backend_call("codex")
-            if not gate["allowed"]:
-                control.cancel_call_reservation(reservation["id"], reason="provider circuit is open")
-                return {"status": "infra_blocked", "returncode": None, "stdout": "", "stderr_tail": "", "error": f"Codex provider circuit is {gate['state']}"}
-        else:
-            control = None
+        reservation = control.reserve_call(component="human_summary", max_wall_seconds=_timeout(), target_version=control.current_target_version())
+        gate = control.claim_backend_call("codex")
+        if not gate["allowed"]:
+            control.cancel_call_reservation(reservation["id"], reason="provider circuit is open")
+            return {"status": "infra_blocked", "returncode": None, "stdout": "", "stderr_tail": "", "error": f"Codex provider circuit is {gate['state']}"}
     except (OSError, ValueError) as exc:
         return {"status": "budget_exhausted", "returncode": None, "stdout": "", "stderr_tail": "", "error": str(exc)}
     started = time.monotonic()

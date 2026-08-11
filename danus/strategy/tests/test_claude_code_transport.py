@@ -22,6 +22,7 @@ from contextlib import contextmanager
 from pathlib import Path
 
 from danus.strategy import cli, ledger
+from ._fixtures import prepare_v2_project
 from danus.strategy.config import (
     DEFAULT_CLAUDE_CODE_MODEL, load_claude_code_config, resolve_transport,
 )
@@ -262,6 +263,7 @@ def test_cli_claude_success_model_override_and_ledger():
     climod._claude_available = lambda b: True
     try:
         with tempfile.TemporaryDirectory() as tmp:
+            prepare_v2_project(tmp)
             pf = Path(tmp) / "p.md"
             pf.write_text("elaborate")
             with _env(DANUS_CONSULT_TRANSPORT="claude_code"):

@@ -10,10 +10,12 @@ ledger to embed.
 from __future__ import annotations
 
 import contextlib
+import json
 import os
 import shutil
 from pathlib import Path
 
+from danus.control import ControlStore
 from danus.write_paper import seed_ledger
 
 _REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -62,11 +64,22 @@ def temp_project(with_ledger: bool = True, with_tex: bool = False):
     with tempfile.TemporaryDirectory(prefix="write-paper-test-") as d:
         dst = Path(d) / "project"
         shutil.copytree(EXAMPLE_PROJECT, dst)
+        prepare_v2_project(dst)
         if with_ledger:
             write_ledger(dst)
         if with_tex:
             write_main_tex(dst)
         yield dst
+
+
+def prepare_v2_project(dst: Path) -> None:
+    """Index the copied paper example under the supported control model."""
+    dst = Path(dst)
+    (dst / "project.json").write_text(
+        json.dumps({"name": "odd-sum", "control_version": 2}), encoding="utf-8",
+    )
+    store = ControlStore(dst)
+    store.scaffold()
 
 
 @contextlib.contextmanager

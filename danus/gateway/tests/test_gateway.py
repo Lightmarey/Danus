@@ -9,11 +9,13 @@ Runs standalone (``python -m danus.gateway.tests.test_gateway``) and under pytes
 
 from __future__ import annotations
 
+import json
 import os
 import tempfile
 from contextlib import contextmanager
 from pathlib import Path
 
+from danus.control import ControlStore
 from danus.core import FactGraph, GlobalMemory
 from danus.gateway import build_app, tools_for
 from danus.gateway import server
@@ -56,6 +58,38 @@ def _mock_verify(verdict, repair_hints="", raise_exc=None):
         server._verify = orig
 
 
+def _prepare_v2(path: str | Path, worker: str | None = None) -> dict:
+    project = Path(path)
+    (project / "project.json").write_text(
+        json.dumps({"name": project.name, "control_version": 2}), encoding="utf-8",
+    )
+    store = ControlStore(project)
+    store.scaffold()
+    if worker is None:
+        return {}
+    target = store.propose_target({
+        "statement": "Prove S.", "allowed_assumptions": [],
+        "forbidden_assumptions": [], "required_conclusions": ["S"],
+        "fallback_candidates": [],
+    })
+    store.approve_target(target["version"])
+    obligation, route = "v0001-root-1", "gateway-route"
+    store.add_route({
+        "id": route, "obligation_id": obligation,
+        "method_family": "direct", "expected_result": "S",
+        "input_fact_ids": [],
+    })
+    assignment = store.assign(
+        worker, obligation_id=obligation, route_id=route, task="Prove S",
+    )
+    return {
+        "display_title": "Gateway test fact",
+        "target_version": "v0001", "obligation_id": obligation,
+        "route_id": route, "assignment_epoch": assignment["epoch"],
+        "claim_role": "unconditional", "assumptions_used": [],
+    }
+
+
 def test_role_table():
     # main can never fabricate a fact
     assert "fact_submit" not in tools_for("main")
@@ -79,6 +113,7 @@ def test_gm_and_fact_search_over_temp_project():
     with tempfile.TemporaryDirectory() as d, _env(
         DANUS_PROJECT_DIR=d, DANUS_AGENTS_ROOT=None, DANUS_AUTHOR="tester"
     ):
+        _prepare_v2(d)
         out = server.gm_add("plan", claim="reduce to q>=2", evidence="")
         assert out["kind"] == "plan" and out["id"]
         hits = server.gm_search("reduce")
@@ -92,7 +127,10 @@ def test_fact_submit_accept_writes_fact_and_traces():
         DANUS_PROJECT_DIR=d, DANUS_AGENTS_ROOT=None, DANUS_AUTHOR="worker_high",
         DANUS_VERIFY_URL="http://mock", DANUS_PROBLEM_ID="P",
     ), _mock_verify("correct"):
-        res = server.fact_submit(statement="S(n)=n^2", proof="induction; QED")
+        binding = _prepare_v2(d, "worker_high")
+        res = server.fact_submit(
+            statement="S(n)=n^2", proof="induction; QED", **binding,
+        )
         assert res["accepted"] is True and res["fact_id"]
         # the fact really landed in the graph
         fg = FactGraph(Path(d))
@@ -109,7 +147,8 @@ def test_fact_submit_reject_writes_nothing_but_traces():
         DANUS_PROJECT_DIR=d, DANUS_AGENTS_ROOT=None, DANUS_AUTHOR="worker_high",
         DANUS_VERIFY_URL="http://mock", DANUS_PROBLEM_ID="P",
     ), _mock_verify("wrong", repair_hints="gap in step 2"):
-        res = server.fact_submit(statement="bad", proof="hand-wave")
+        binding = _prepare_v2(d, "worker_high")
+        res = server.fact_submit(statement="bad", proof="hand-wave", **binding)
         assert res["accepted"] is False and res["repair_hints"] == "gap in step 2"
         fg = FactGraph(Path(d))
         assert fg.list() == []  # nothing written
@@ -122,24 +161,27 @@ def test_fact_submit_verify_error_is_clean():
         DANUS_PROJECT_DIR=d, DANUS_AGENTS_ROOT=None, DANUS_AUTHOR="w",
         DANUS_VERIFY_URL="http://mock", DANUS_PROBLEM_ID="P",
     ), _mock_verify("correct", raise_exc=RuntimeError("service down")):
-        res = server.fact_submit(statement="s", proof="p")
+        binding = _prepare_v2(d, "w")
+        res = server.fact_submit(statement="s", proof="p", **binding)
         assert res["accepted"] is False and res["verdict"] == "error"
         assert "service down" in res["error"]
 
 
 def test_fact_submit_accept_but_write_failed_still_traces():
-    # a revoked predecessor makes FactGraph.add raise; the verdict is still traced
+    # A storage failure after verification still records the verifier result.
     with tempfile.TemporaryDirectory() as d, _env(
         DANUS_PROJECT_DIR=d, DANUS_AGENTS_ROOT=None, DANUS_AUTHOR="worker_high",
         DANUS_VERIFY_URL="http://mock", DANUS_PROBLEM_ID="P",
     ), _mock_verify("correct"):
-        fg = FactGraph(Path(d))
-        base = fg.add(problem_id="P", author="w", statement="A holds", proof="pf A")
-        fg.revoke(base, reason="A was wrong")
-        res = server.fact_submit(statement="B from A", proof="uses A", predecessors=[base])
-        assert res["accepted"] is True and res["fact_id"] is None and res["write_error"]
-        # verdict:correct is STILL traced even though the write failed
-        assert GlobalMemory(Path(d)).read("verification")[-1]["verdict"] == "correct"
+        binding = _prepare_v2(d, "worker_high")
+        original = FactGraph.add
+        FactGraph.add = lambda self, **kwargs: (_ for _ in ()).throw(OSError("disk full"))
+        try:
+            res = server.fact_submit(statement="B", proof="proof B", **binding)
+            assert res["accepted"] is True and res["fact_id"] is None and res["write_error"]
+            assert GlobalMemory(Path(d)).read("verification")[-1]["verdict"] == "correct"
+        finally:
+            FactGraph.add = original
 
 
 def test_fact_submit_glossary_check_never_blocks():
@@ -155,7 +197,8 @@ def test_fact_submit_glossary_check_never_blocks():
             DANUS_PROJECT_DIR=d, DANUS_AGENTS_ROOT=None, DANUS_AUTHOR="w",
             DANUS_VERIFY_URL="http://mock", DANUS_PROBLEM_ID="P",
         ), _mock_verify("correct"):
-            res = server.fact_submit(statement="X thing", proof="because")
+            binding = _prepare_v2(d, "w")
+            res = server.fact_submit(statement="X thing", proof="because", **binding)
             assert res["accepted"] is True and res["undefined_symbols"] == []
     finally:
         FactGraph.undefined_symbols = orig
@@ -167,10 +210,11 @@ def test_fact_submit_nondict_verify_body_is_clean():
         DANUS_PROJECT_DIR=d, DANUS_AGENTS_ROOT=None, DANUS_AUTHOR="w",
         DANUS_VERIFY_URL="http://mock", DANUS_PROBLEM_ID="P",
     ):
+        binding = _prepare_v2(d, "w")
         orig = server._verify
         server._verify = lambda statement, proof: ["not", "a", "dict"]
         try:
-            res = server.fact_submit(statement="s", proof="p")
+            res = server.fact_submit(statement="s", proof="p", **binding)
             assert res["accepted"] is False and res["verdict"] == "error"
             assert "non-dict" in res["error"]
             assert FactGraph(Path(d)).list() == []  # nothing written
@@ -242,7 +286,7 @@ def test_verify_http_roundtrip_and_errors():
         srv.shutdown()
 
 
-def test_fact_revoke_cascades():
+def test_fact_revoke_taints_without_deleting_mathematics():
     with tempfile.TemporaryDirectory() as d, _env(
         DANUS_PROJECT_DIR=d, DANUS_AGENTS_ROOT=None, DANUS_AUTHOR="main_agent",
     ):
@@ -250,9 +294,10 @@ def test_fact_revoke_cascades():
         base = fg.add(problem_id="P", author="w", statement="A holds", proof="pf A")
         child = fg.add(problem_id="P", author="w", statement="B from A", proof="uses A",
                        predecessors=[base])
+        _prepare_v2(d)
         out = server.fact_revoke(base, reason="A was wrong")
-        assert set(out["revoked"]) == {base, child}
-        assert not fg.exists(base) and not fg.exists(child)
+        assert set(out["tainted_pending_review"]["event"]["affected_fact_ids"]) == {base, child}
+        assert fg.exists(base) and fg.exists(child)
 
 
 def test_search_arxiv_theorems_delegates(monkeypatch=None):
@@ -271,9 +316,15 @@ def test_search_arxiv_theorems_delegates(monkeypatch=None):
 def test_project_resolution_by_name_and_validation():
     with tempfile.TemporaryDirectory() as root:
         (Path(root) / "proj_a").mkdir()
+        links = _prepare_v2(Path(root) / "proj_a", "main_agent")
         with _env(DANUS_AGENTS_ROOT=root, DANUS_PROJECT_DIR=None, DANUS_AUTHOR="main_agent"):
             # main addresses a project by name
-            out = server.gm_add("master_guidance", claim="try route X", evidence="", project="proj_a")
+            out = server.gm_add(
+                "master_guidance", claim="try route X", evidence="", project="proj_a",
+                links={key: links[key] for key in (
+                    "target_version", "obligation_id", "route_id",
+                )},
+            )
             assert out["id"]
             assert GlobalMemory(Path(root) / "proj_a").read("master_guidance")
             # path-escape / bad names are rejected
@@ -317,8 +368,8 @@ def main() -> None:
     print("  [ok] project-by-name without override uses cwd default")
     test_verify_http_roundtrip_and_errors()
     print("  [ok] _verify HTTP round-trip + unset-URL + bad-timeout fallback")
-    test_fact_revoke_cascades()
-    print("  [ok] fact_revoke cascades to descendants")
+    test_fact_revoke_taints_without_deleting_mathematics()
+    print("  [ok] fact_revoke taints descendants without deleting mathematics")
     test_search_arxiv_theorems_delegates()
     print("  [ok] search_arxiv_theorems delegates to integrations.search")
     test_main_module_builds_and_runs()

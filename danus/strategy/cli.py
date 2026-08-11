@@ -105,16 +105,14 @@ def _consult_scoped(project: Optional[str], provider_key: str, max_wall: float,
     reservation = None
     if project:
         try:
-            from danus.control import ControlStore
-            control = ControlStore(Path(project))
-            if control.enabled:
-                reservation = control.reserve_call(component="strategy_consult", provider_key=provider_key, max_wall_seconds=max_wall, target_version=control.current_target_version())
-                gate = control.claim_backend_call(provider_key)
-                if not gate["allowed"]:
-                    control.cancel_call_reservation(reservation["id"], reason="provider circuit is open")
-                    return {"status": "infra_blocked", "reply": "", "usage": {}, "cost_usd": 0.0, "seconds": 0.0, "error": f"provider circuit is {gate['state']}", "_control_recorded": True}
-            else:
-                control = None
+            from danus.control import ControlStore, require_v2_project
+            project_path = require_v2_project(Path(project))
+            control = ControlStore(project_path)
+            reservation = control.reserve_call(component="strategy_consult", provider_key=provider_key, max_wall_seconds=max_wall, target_version=control.current_target_version())
+            gate = control.claim_backend_call(provider_key)
+            if not gate["allowed"]:
+                control.cancel_call_reservation(reservation["id"], reason="provider circuit is open")
+                return {"status": "infra_blocked", "reply": "", "usage": {}, "cost_usd": 0.0, "seconds": 0.0, "error": f"provider circuit is {gate['state']}", "_control_recorded": True}
         except (OSError, ValueError) as exc:
             return {"status": "budget_exhausted", "reply": "", "usage": {}, "cost_usd": 0.0, "seconds": 0.0, "error": str(exc), "_control_recorded": True}
     started = time.monotonic()

@@ -30,7 +30,6 @@ from .control import (
     _json_bytes,
     _read_json,
     _strings,
-    is_v2_project,
     work_report_schema,
 )
 
@@ -73,10 +72,6 @@ class SQLiteControlStore:
         self.events_file = self.dir / "events.jsonl"
         self._initialized = False
         self._initializing = False
-
-    @property
-    def enabled(self) -> bool:
-        return is_v2_project(self.project)
 
     def _connect(self) -> sqlite3.Connection:
         self.dir.mkdir(parents=True, exist_ok=True)
