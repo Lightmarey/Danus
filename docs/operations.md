@@ -32,13 +32,15 @@ To start the human dashboard and open its ephemeral control-capability URL in
 the default browser, use the platform shortcut from the repository root:
 
 ```powershell
-.\scripts\open-dashboard.ps1 -Project <p>
+.\scripts\open-dashboard.ps1                 # choose a project interactively
+.\scripts\open-dashboard.ps1 -Project <p>    # or select it directly
 # Test or print the URL without opening a browser:
 .\scripts\open-dashboard.ps1 -Project <p> -Port 18099 -NoOpen
 ```
 
 ```bash
-./scripts/open-dashboard.sh <p>
+./scripts/open-dashboard.sh                   # choose a project interactively
+./scripts/open-dashboard.sh <p>               # or select it directly
 # Test or print the URL without opening a browser:
 ./scripts/open-dashboard.sh <p> 18099 --no-open
 ```

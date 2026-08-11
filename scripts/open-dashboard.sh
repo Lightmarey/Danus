@@ -18,8 +18,8 @@ else
   PYTHON="$(command -v python)"
 fi
 
-PROJECT="${1:?usage: open-dashboard.sh PROJECT [PORT] [--no-open]}"
-shift
+PROJECT="${1:-}"
+if [ "$#" -gt 0 ]; then shift; fi
 NO_OPEN=0
 if [ "${1:-}" != "" ] && [ "${1:-}" != "--no-open" ]; then
   DASHBOARD_PORT="$1"
@@ -31,6 +31,27 @@ if [ "${1:-}" = "--no-open" ]; then
   shift
 fi
 [ "$#" -eq 0 ] || { echo "usage: open-dashboard.sh PROJECT [PORT] [--no-open]" >&2; exit 2; }
+
+if [ -z "$PROJECT" ]; then
+  mapfile -t PROJECTS < <("$PYTHON" -c 'from danus.orchestration.cli import do_list; print("\n".join(row["project"] for row in do_list()))')
+  [ "${#PROJECTS[@]}" -gt 0 ] || { echo "no Danus projects were found" >&2; exit 1; }
+  echo "Danus projects:"
+  for i in "${!PROJECTS[@]}"; do printf '  %d) %s\n' "$((i + 1))" "${PROJECTS[$i]}"; done
+  while [ -z "$PROJECT" ]; do
+    read -r -p "Select project [1-${#PROJECTS[@]}] (default 1): " CHOICE || exit 2
+    CHOICE="${CHOICE:-1}"
+    case "$CHOICE" in
+      *[!0-9]*|"") echo "enter one of the displayed numbers" >&2 ;;
+      *)
+        if [ "$CHOICE" -ge 1 ] && [ "$CHOICE" -le "${#PROJECTS[@]}" ]; then
+          PROJECT="${PROJECTS[$((CHOICE - 1))]}"
+        else
+          echo "enter one of the displayed numbers" >&2
+        fi
+        ;;
+    esac
+  done
+fi
 
 case "$PROJECT" in
   ""|*[!A-Za-z0-9._-]*|[-._]*) echo "invalid project name: $PROJECT" >&2; exit 2 ;;

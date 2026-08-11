@@ -1,5 +1,5 @@
 param(
-    [Parameter(Mandatory = $true, Position = 0)]
+    [Parameter(Position = 0)]
     [ValidatePattern('^[A-Za-z0-9][A-Za-z0-9._-]*$')]
     [string]$Project,
 
@@ -29,6 +29,30 @@ if (-not $python) {
 
 Push-Location $repoRoot
 try {
+    if (-not $Project) {
+        $projectJson = & $python -m danus.orchestration list --json
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+        $projects = @(($projectJson | ConvertFrom-Json) | ForEach-Object { $_.project })
+        if ($projects.Count -eq 0) {
+            throw 'No Danus projects were found.'
+        }
+        Write-Host 'Danus projects:'
+        for ($i = 0; $i -lt $projects.Count; $i++) {
+            Write-Host ("  {0}) {1}" -f ($i + 1), $projects[$i])
+        }
+        while (-not $Project) {
+            $answer = Read-Host "Select project [1-$($projects.Count)] (default 1)"
+            if (-not $answer) { $answer = '1' }
+            $number = 0
+            if ([int]::TryParse($answer, [ref]$number) -and $number -ge 1 -and $number -le $projects.Count) {
+                $Project = $projects[$number - 1]
+            }
+            else {
+                Write-Warning 'Enter one of the displayed numbers.'
+            }
+        }
+    }
+
     & $python -m danus.orchestration services up dashboard $Project
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
