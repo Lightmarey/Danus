@@ -136,6 +136,8 @@ def test_fact_title_pending_recovery_scopes_and_manifest_are_deterministic(tmp_p
     assert first == second
     assert first["facts"][0]["title"] == "Readable target theorem"
     assert "assignment_new" in first["facts"][0]["reasons"]
+    assert all("fts_candidate" not in fact["reasons"] for fact in first["facts"])
+    assert len(query.format_context_manifest(first)) < 4000
     manifest = query.target_proof_manifest("v0001")
     assert manifest["complete"] is True and manifest["closing_fact_ids"] == [fact_id]
     research = query.target_research_manifest("v0001")
@@ -161,7 +163,10 @@ def test_same_fact_can_be_shared_by_routes_and_indexed_reads_do_not_open_markdow
     original = Path.read_text
     monkeypatch.setattr(Path, "read_text", lambda self, *a, **k: (_ for _ in ()).throw(AssertionError("Markdown read")) if self.suffix == ".md" else original(self, *a, **k))
     assert query.fact_get(fact_id)["title"] == "Shared supporting lemma"
-    assert query.fact_search("supporting lemma")[0]["fact_id"] == fact_id
+    search_hit = query.fact_search("supporting lemma")[0]
+    assert search_hit["fact_id"] == fact_id
+    assert search_hit["snippet"] == "L"
+    assert "statement" not in search_hit
     from danus.human_summary import assemble as summary_assemble
     assert "Shared supporting lemma" not in summary_assemble.fact_bundle(project)
     assert "## statement\n\nL" in summary_assemble.fact_bundle(project)

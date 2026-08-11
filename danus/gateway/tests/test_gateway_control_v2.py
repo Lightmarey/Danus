@@ -6,7 +6,7 @@ from contextlib import contextmanager
 from pathlib import Path
 
 from danus.control import ControlStore
-from danus.core import FactGraph
+from danus.core import FactGraph, GlobalMemory
 from danus.gateway import server
 
 
@@ -61,12 +61,27 @@ def _args(assignment: dict, **extra):
     }
 
 
+def test_v2_global_memory_search_is_bounded_and_evidence_is_opt_in(tmp_path: Path):
+    _project(tmp_path)
+    GlobalMemory(tmp_path).append(
+        "plan", claim="compact recall target", evidence="e" * 20_000, author="test",
+    )
+    with _env(DANUS_PROJECT_DIR=tmp_path, DANUS_AUTHOR="high"):
+        compact = server.gm_search("compact recall")
+        expanded = server.gm_search("compact recall", include_evidence=True)
+    hit = compact["results_by_kind"]["plan"]["results"][0]["entry"]
+    assert "evidence" not in hit
+    assert len(json.dumps(compact)) < 12_500
+    expanded_hit = expanded["results_by_kind"]["plan"]["results"][0]["entry"]
+    assert len(expanded_hit["evidence"]) == 1200
+
+
 def test_fact_submit_claim_role_schema_matches_worker_contract():
     tool = next(item for item in server.build_app("worker")._tool_manager.list_tools() if item.name == "fact_submit")
     schemas = tool.parameters["properties"]["claim_role"]["anyOf"]
     enum = next(item["enum"] for item in schemas if "enum" in item)
     assert tuple(enum) == server.CLAIM_ROLES
-    contract = (Path(__file__).parents[3] / "agents" / "contracts" / "worker.md").read_text(encoding="utf-8")
+    contract = (Path(__file__).parents[3] / "agents" / "contracts" / "worker_v2.md").read_text(encoding="utf-8")
     assert all(f"`{role}`" in contract for role in server.CLAIM_ROLES)
 
 

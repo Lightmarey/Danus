@@ -404,13 +404,13 @@ class ResearchQuery:
         try:
             with self.store._connect() as db:
                 candidates = [dict(row) for row in db.execute(
-                    "SELECT f.fact_id,f.title,f.statement,f.status,bm25(facts_fts) score FROM facts_fts JOIN facts f ON f.fact_id=facts_fts.fact_id WHERE facts_fts MATCH ? ORDER BY score LIMIT ?",
+                    "SELECT f.fact_id,f.title,substr(f.statement,1,400) snippet,f.status,bm25(facts_fts) score FROM facts_fts JOIN facts f ON f.fact_id=facts_fts.fact_id WHERE facts_fts MATCH ? ORDER BY score LIMIT ?",
                     (match, candidate_limit),
                 )]
         except sqlite3.OperationalError:
             like = f"%{query}%"
             with self.store._connect() as db:
-                candidates = [dict(row) for row in db.execute("SELECT fact_id,title,statement,status,0.0 score FROM facts WHERE title LIKE ? OR statement LIKE ? ORDER BY title LIMIT ?", (like, like, candidate_limit))]
+                candidates = [dict(row) for row in db.execute("SELECT fact_id,title,substr(statement,1,400) snippet,status,0.0 score FROM facts WHERE title LIKE ? OR statement LIKE ? ORDER BY title LIMIT ?", (like, like, candidate_limit))]
 
         scope_filter = target_version or route_id or obligation_id
         distances: dict[str, int] = {}
@@ -451,7 +451,7 @@ class ResearchQuery:
         candidates.sort(key=lambda item: (relation_rank.get(item["scope_role"], 3), item["graph_distance"] if item["graph_distance"] is not None else 1000000, float(item["score"]), item["fact_id"]))
         return candidates[:limit]
 
-    def build_context_manifest(self, worker: str, *, char_budget: int = 24000, max_enriched: int = 30, support_depth: int = 2, search_limit: int = 10) -> dict[str, Any]:
+    def build_context_manifest(self, worker: str, *, char_budget: int = 16000, max_enriched: int = 20, support_depth: int = 2, search_limit: int = 3) -> dict[str, Any]:
         assignment = self.store.validate_assignment(worker)
         snapshot = self.store.generation()
         with self.store._connect() as db:
@@ -482,8 +482,19 @@ class ResearchQuery:
         support, _, omitted = self._support_closure(reasons, support_depth, 300)
         for fact_id in support:
             reasons[fact_id].append("predecessor_support")
+        fixed_facts = self._fact_rows(reasons)
+        obligation_text = " ".join(str(obligation.get("statement") or "").split())
+        already_have_exact_goal = any(
+            " ".join(str(fact.get("statement") or "").split()) == obligation_text
+            for fact in fixed_facts
+        )
         search_query = " ".join([str(route_context["route"].get("expected_result") or ""), str(obligation.get("statement") or ""), *[str(item.get("title") or "") for item in obstacles]])
-        for fact in self.fact_search(search_query, target_version=assignment["target_version"], limit=search_limit) if search_query.strip() else []:
+        search_results = []
+        if search_query.strip() and not already_have_exact_goal:
+            search_results = self.fact_search(
+                search_query, target_version=assignment["target_version"], limit=search_limit,
+            )
+        for fact in search_results:
             reasons[fact["fact_id"]].append("fts_candidate")
         facts = self._fact_rows(reasons)
         priority = {"closing": 0, "input": 1, "assignment_new": 2, "direct": 3, "dependency_closing": 4, "predecessor_support": 5, "fts_candidate": 6}
@@ -493,7 +504,8 @@ class ResearchQuery:
             reason = sorted(set(reasons[fact["fact_id"]]), key=lambda item: priority.get(item, 9))
             full = f"[{fact['fact_id']}] {fact['title']}\n{fact['statement']}"
             title_only = f"[{fact['fact_id']}] {fact['title']}"
-            if enriched < max_enriched and used + len(full) <= char_budget:
+            is_search_only = reason == ["fts_candidate"]
+            if not is_search_only and enriched < max_enriched and used + len(full) <= char_budget:
                 item, mode = {**fact, "reasons": reason}, "title_statement"
                 used += len(full)
                 enriched += 1

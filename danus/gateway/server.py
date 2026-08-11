@@ -158,11 +158,46 @@ def gm_add(
 
 
 def gm_search(query: str, kinds: Optional[List[str]] = None, limit_per_kind: int = 10,
-              project: Optional[str] = None) -> Dict[str, Any]:
+              project: Optional[str] = None, include_evidence: bool = False) -> Dict[str, Any]:
     """BM25 over shared global-memory findings. Use to reuse others' results,
     avoid duplicate work, and learn which paths already died. Main agent: pass
     ``project`` to search a specific project; workers omit it."""
-    return _gm(project).search(query, kinds=kinds, limit_per_kind=limit_per_kind)
+    project_dir = _project(project)
+    result = GlobalMemory(project_dir).search(query, kinds=kinds, limit_per_kind=limit_per_kind)
+    if not ControlStore(project_dir).enabled:
+        return result
+
+    # V2 workers use fact_get for deliberate expansion. Keep recall compact so a
+    # broad memory search cannot silently consume another large model turn.
+    compact: Dict[str, Any] = {"query": query, "results_by_kind": {}, "truncated": False}
+    used = len(query)
+    for kind, group in result["results_by_kind"].items():
+        rows = []
+        for hit in group["results"]:
+            entry = hit["entry"]
+            row = {
+                "score": hit["score"],
+                "entry": {
+                    "id": entry.get("id"),
+                    "kind": entry.get("kind"),
+                    "claim": str(entry.get("claim") or "")[:600],
+                    "status": entry.get("status"),
+                    "fact_id": entry.get("fact_id"),
+                    "links": entry.get("links") or {},
+                },
+            }
+            if include_evidence:
+                row["entry"]["evidence"] = str(entry.get("evidence") or "")[:1200]
+            size = len(json.dumps(row, ensure_ascii=False))
+            if used + size > 12000:
+                compact["truncated"] = True
+                break
+            rows.append(row)
+            used += size
+        compact["results_by_kind"][kind] = {"count": len(rows), "results": rows}
+        if compact["truncated"]:
+            break
+    return compact
 
 
 # --------------------------------------------------------------------------- #
@@ -449,9 +484,9 @@ def fact_search(query: str, limit: int = 10, project: Optional[str] = None) -> D
     the derived fact index rebuilt on demand from the fact files — the fact graph
     stays the single source of truth. Use it **before proving** to check whether a
     fact like yours already exists, and to find the verified facts that bear on
-    your subgoal so you can cite their ``fact_id``. Returns ranked ``{fact_id,
-    score, statement}``. Main agent: pass ``project`` to search a specific
-    project's graph; workers omit it."""
+    your subgoal so you can cite their ``fact_id``. Main agent: pass ``project`` to search a specific
+    project's graph; workers omit it. V2 returns a bounded snippet; use
+    ``fact_get`` to expand a selected fact."""
     project_dir = _project(project)
     results = ResearchQuery(project_dir).fact_search(query, limit=limit) if ControlStore(project_dir).enabled else _fg(project).search(query, limit=limit)
     return {"query": query, "results": results}

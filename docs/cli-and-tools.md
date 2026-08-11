@@ -56,7 +56,7 @@ main agent runs as `role=main`.
 | tool | args | what it does |
 |---|---|---|
 | `gm_add` | `kind, claim, evidence, verifiable?, glossary?, links?, project?` | publish a finding to shared global memory |
-| `gm_search` | `query, kinds?, limit_per_kind?, project?` | search global-memory findings |
+| `gm_search` | `query, kinds?, limit_per_kind?, project?, include_evidence?` | search global-memory findings; v2 returns compact results and evidence is opt-in |
 | `fact_submit` | legacy arguments; v2 additionally requires readable title plus target/obligation/route/epoch/role/assumptions binding | **the write-gate** — validate control scope, verify, then recoverably write/link the fact iff `correct` |
 | `fact_search` | `query, limit?, project?` | indexed FTS5 search for v2; legacy projects keep file-derived BM25 |
 | `research_map`, `route_context`, `obligation_context` | scoped IDs plus optional snapshot | shared target/method/route/obligation read model |
