@@ -69,6 +69,7 @@ cd "$ROOT"
 LOGS="$("$PYTHON" -m danus.orchestration services logs "dashboard-$PROJECT")"
 URL="$(printf '%s\n' "$LOGS" | grep -Eo 'http://127\.0\.0\.1:[0-9]+/#control-token=[^[:space:]]+' | tail -n 1)"
 [ -n "$URL" ] || { echo "dashboard started, but its capability URL was not found in logs for dashboard-$PROJECT" >&2; exit 1; }
+URL="${URL/\/#control-token=/\/?launch=$(date +%s)#control-token=}"
 
 printf '%s\n' "$URL"
 if [ "$NO_OPEN" -eq 0 ]; then

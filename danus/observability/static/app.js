@@ -11,11 +11,18 @@ if (location.hash.startsWith('#control-token=')) {
   history.replaceState(null, '', location.pathname + location.search);
 }
 async function api(path, options = {}) {
-  const r = await fetch(path, options);
-  if (!r.ok) throw new Error(path + ' ' + r.status);
+  let r;
+  try { r = await fetch(path, options); }
+  catch (e) { e.connectionFailure = true; throw e; }
+  if (!r.ok) {
+    const e = new Error(path + ' ' + r.status);
+    e.status = r.status;
+    throw e;
+  }
   return r.json();
 }
 function connError(on) { const b = $('#conn-banner'); if (b) b.hidden = !on; }
+function connErrorFrom(e) { connError(!!(e && e.connectionFailure)); }
 
 // ---- markdown + math ----------------------------------------------------- //
 // elaboration / master_guidance / pro replies are markdown with LaTeX. Render
@@ -109,7 +116,7 @@ async function loadOverview() {
       chips.appendChild(chip);
     }
     vd.appendChild(chips);
-  } catch (e) { connError(true); }
+  } catch (e) { connErrorFrom(e); }
 }
 
 // ---- fact graph (echarts) ------------------------------------------------ //
@@ -157,7 +164,16 @@ async function loadGraph() {
     graphChart.on('click', (p) => { if (p.dataType === 'node') showFact(p.data.id); });
     $('#graph-stat').textContent = `${d.nodes.length} facts · ${d.edges.length} edges · max depth ${d.max_depth}`;
     graphChart.resize();
-  } catch (e) { connError(true); }
+  } catch (e) {
+    connErrorFrom(e);
+    if (e.status === 410) {
+      $('#graph-stat').textContent = 'V2 uses bounded route and obligation graphs.';
+      const graph = $('#graph'); graph.innerHTML = '';
+      graph.appendChild(el('div', 'empty', 'The all-facts graph is disabled for V2. Select a route or obligation in Research Control.'));
+      const open = el('button', '', 'Open Research Control'); open.onclick = () => switchTab('control');
+      graph.appendChild(open);
+    }
+  }
 }
 function showFact(id) {
   const f = factById[id]; if (!f) return;
@@ -194,7 +210,7 @@ async function loadMemory() {
       st.appendChild(b);
     });
     if (d.channels.length) loadChannel(d.channels[0].kind);
-  } catch (e) { connError(true); memInit = false; }
+  } catch (e) { connErrorFrom(e); memInit = false; }
 }
 async function loadChannel(kind) {
   const list = $('#mem-list'); list.innerHTML = '<div class="empty">loading…</div>';
@@ -316,7 +332,7 @@ async function selectRoute(routeId) {
     if (recent && recent.unresolved_interfaces) route.appendChild(el('div', 'entry-evidence', `Unresolved: ${recent.unresolved_interfaces.join(', ')}`));
     if (recent && recent.recommended_next_action) route.appendChild(el('div', 'entry-evidence', `Next: ${recent.recommended_next_action}`));
     detail.appendChild(route);
-  } catch (e) { connError(true); }
+  } catch (e) { connErrorFrom(e); }
 }
 
 async function loadManifests() {
@@ -353,7 +369,7 @@ async function loadControl() {
     d.methods.forEach((method)=>{ const group=el('div','entry'); group.appendChild(el('div','entry-author',method.method_title)); method.routes.forEach((r)=>{ const row=el('div','entry-evidence clickable',`${r.id} · ${r.state} · ${r.obligation_id}`); row.onclick=()=>selectRoute(r.id); group.appendChild(row); }); methods.appendChild(group); });
     const obligations=$('#control-obligations'); obligations.innerHTML=''; d.obligations.forEach((o)=>{ const row=el('div','entry clickable'); row.appendChild(el('div','entry-author',o.id)); row.appendChild(el('span','tag',o.state)); row.appendChild(el('div','entry-claim',o.statement)); row.onclick=async()=>{ const x=await api(`/api/research/obligations/${o.id}?snapshot=${controlGeneration}`); renderFactGraph(x.fact_group); }; obligations.appendChild(row); });
     await loadManifests();
-  } catch (e) { connError(true); }
+  } catch (e) { connErrorFrom(e); }
 }
 $('#clear-pins').onclick = () => { viewPins.clear(); $('#research-detail').innerHTML='<div class="empty">View pins cleared.</div>'; };
 

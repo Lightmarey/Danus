@@ -251,6 +251,8 @@ def test_http_routes_via_testclient():
             # index page served from disk (read-only file serve, no browser)
             r = client.get("/")
             assert r.status_code == 200 and "Danus" in r.text
+            assert r.headers["cache-control"] == "no-store"
+            assert client.get("/static/app.js").headers["cache-control"] == "no-store"
 
 
 def main() -> None:

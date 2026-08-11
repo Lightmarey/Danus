@@ -66,7 +66,8 @@ try {
         throw "Dashboard started, but its capability URL was not found in logs for dashboard-$Project."
     }
 
-    $url = $match.Value
+    $launch = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+    $url = $match.Value -replace '/#control-token=', "/?launch=$launch#control-token="
     Write-Output $url
     if (-not $NoOpen) {
         Start-Process $url

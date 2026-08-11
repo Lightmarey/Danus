@@ -382,6 +382,14 @@ def _control_service(project: Path) -> ControlService:
 app = FastAPI(title="danus-observability", version="0.1.0")
 
 
+@app.middleware("http")
+async def no_store_dashboard_assets(request: Request, call_next):
+    response = await call_next(request)
+    if request.url.path == "/" or request.url.path.startswith("/static/"):
+        response.headers["Cache-Control"] = "no-store"
+    return response
+
+
 @app.get("/api/overview", response_model=Overview)
 def overview() -> JSONResponse:
     return JSONResponse(build_overview())

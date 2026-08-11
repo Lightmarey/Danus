@@ -186,6 +186,9 @@ def test_browser_view_state_has_no_persistent_or_write_path():
     script = (Path(observability_app.__file__).parent / "static" / "app.js").read_text(encoding="utf-8")
     assert "const viewPins = new Set()" in script
     assert "localStorage" not in script
+    assert "e.connectionFailure = true" in script
+    assert "e.status === 410" in script
+    assert "Open Research Control" in script
 
 
 def test_10k_fact_30k_edge_indexed_payload_and_local_graph_bound(tmp_path: Path):
