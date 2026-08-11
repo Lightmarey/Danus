@@ -123,8 +123,11 @@ Transport and provider failures do not consume route slices or low-gain counts.
 They do consume their real wall time and known or reserved cost. Bounded retries
 move an assignment through `waiting_retry`; quota, authentication, configuration,
 or exhausted outage limits move it to `infra_blocked`. A provider-wide circuit
-prevents retry storms and admits at most one half-open probe after cooldown. Once
-the external problem is repaired, an operator can explicitly reopen that path:
+prevents retry storms and admits at most one half-open probe after cooldown.
+Caller-correctable HTTP 400 validation rejects are the exception: they settle at
+known zero monetary cost and do not open the outage circuit, so the next call can
+change `background`, `store`, `max_output_tokens`, effort, tools, or model.
+Once an external outage is repaired, an operator can explicitly reopen that path:
 
 ```console
 danus control retry-backend my-project --provider codex --reason "quota renewed"
