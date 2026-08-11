@@ -24,7 +24,10 @@ Danus builds on the worker–verifier core of our earlier system
 the system, six research-level case studies it resolved, and what we learned
 along the way.
 
-See `ARCHITECTURE.md` for the layered design and the map of every module.
+See `ARCHITECTURE.md` for the layered design and the map of every module. New v2
+projects use versioned research control, bounded provider retries, and atomic call
+budget reservations; see `docs/research-control-v2.md`, `docs/configuration.md`,
+and `docs/operations.md` for the contract, defaults, and recovery workflow.
 
 ## How it works
 

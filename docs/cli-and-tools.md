@@ -28,7 +28,7 @@ project; there is no default project.
 | `target` | `danus target propose\|diff\|approve\|withdraw\|status\|fallback ...` | versioned target lifecycle; fallback is always a draft and withdrawal leaves no active target |
 | `obligation` / `route` | `danus obligation add\|status ...`; `danus route add\|status ...` | create and inspect v2 proof obligations and routes |
 | `assign` | `danus assign <project>/<worker> ... --obligation O --route R` | bind a v2 worker to a finite route lease; legacy projects still replace `TASK.md` only |
-| `control` | `danus control rebuild ...`; `danus control taint ...` | rebuild SQLite/FTS5 or mark a suspect fact pending review |
+| `control` | `danus control rebuild ...`; `danus control taint ...`; `danus control retry-backend <project> --provider codex --reason <text>` | rebuild SQLite/FTS5, mark a suspect fact pending review, or permit one audited provider probe after an external outage is repaired |
 | `finalize` | `danus finalize <project> [--paper <paper_id>] [<fact_id> …]` | record the approved target theorem(s) in the paper's `TARGET.md` (what write-paper reads; default paper → `<project>/TARGET.md`, a non-default `--paper` → `<project>/papers/<paper_id>/TARGET.md`). **With no id:** print candidate terminal facts as suggestions (writes nothing) |
 | `start` | `danus start <project>[/<worker>]` | launch the autonomous worker loop(s) |
 | `status` | `danus status <project>[/<worker>] [--json]` | per-worker liveness + round + last activity (`stuck?` is a soft signal) |

@@ -128,6 +128,8 @@ Danus/
 | verify HTTP | `POST /verify {statement,proof}` → `{verification_report,verdict,repair_hints}`; verdict ⟺ no critical_errors & no gaps | `danus.gateway.fact_submit` ↔ `danus.verify` |
 | v2 control | transactional `control/control.sqlite3` authority (targets, obligations, routes, assignments, events, outbox); verified fact Markdown remains mathematical truth | orchestration · execution · gateway · observability |
 | v2 research reads | one `ResearchQuery` snapshot → bounded `ContextManifest` for agents and layered indexed views for humans | execution · gateway · authoring · observability |
+| v2 call admission | atomically reserve timeout and optional USD ceiling before every expensive call; active reservations count against the budget; settlement emits one `CostEvent`; expired reservations are recovered after crashes | control DB ↔ execution · gateway · strategy · authoring |
+| v2 provider resilience | persistent assignment retry state plus one project-wide provider circuit; bounded failures become `waiting_retry`/`infra_blocked`; only one half-open probe is admitted | control DB ↔ execution · gateway · strategy · authoring · operations |
 | v2 fact binding | legacy arguments plus current `display_title, target_version, obligation_id, route_id, assignment_epoch, claim_role, assumptions_used, closes_obligation` | worker ↔ gateway ↔ v2 control |
 | fact id inputs | `problem_id + sorted(predecessors) + sorted(glossary) + normalized(statement,proof)`; **external_refs EXCLUDED** | `danus.core` ↔ everyone (write-paper reads `external_refs`) |
 | global-memory kinds | the 11 `GLOBAL_KINDS` (incl. `master_guidance`/`elaboration`/`verification`) | `danus.core` ↔ agents · strategy · consult |

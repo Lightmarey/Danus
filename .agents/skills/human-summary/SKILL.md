@@ -19,6 +19,11 @@ the structural guarantee that no internal identifier (`fact_id`, `author`,
 author's window never contains any of it. Your job is to **call the tool, then
 render and deliver the PDF.**
 
+For v2 projects, the tool selects those results from the same snapshot-consistent
+`ResearchQuery.target_research_manifest` used by the other research readers. It
+does not scan Markdown or construct an independent terminal-fact view. Legacy v1
+projects retain the file-backed selection path.
+
 ## Step 1 — generate the clean report.md (the tool does the writing)
 
 Call the MCP tool (server `human-summary`):

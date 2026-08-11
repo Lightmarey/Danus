@@ -109,3 +109,27 @@ Target budgets warn at 70%, force an audit at 85%, and block new slices at 100%.
 Worker, verifier, consult, paper, and human-summary calls write scoped `CostEvent`
 records. If a backend does not expose metered usage, Danus records wall time and
 leaves monetary cost unknown rather than inventing a zero price.
+
+Before an expensive v2 call starts, the controller atomically reserves its full
+configured timeout and, when configured, a conservative USD ceiling. Active
+reservations participate in the budget thresholds, so concurrent calls cannot
+independently spend the same remaining budget. Successful or failed calls settle
+their reservation into one `CostEvent`; reservations left by a crashed process
+expire during recovery. With `strict_cost_reservations` enabled, a call whose
+maximum USD cost cannot be estimated is rejected. If actual usage remains
+unknown, the reserved ceiling is recorded as `estimated_ceiling`, never as zero.
+
+Transport and provider failures do not consume route slices or low-gain counts.
+They do consume their real wall time and known or reserved cost. Bounded retries
+move an assignment through `waiting_retry`; quota, authentication, configuration,
+or exhausted outage limits move it to `infra_blocked`. A provider-wide circuit
+prevents retry storms and admits at most one half-open probe after cooldown. Once
+the external problem is repaired, an operator can explicitly reopen that path:
+
+```console
+danus control retry-backend my-project --provider codex --reason "quota renewed"
+```
+
+This command only resets infrastructure retry state and records the reason. It
+does not change the target, obligations, routes, facts, or mathematical progress.
+See `configuration.md` for limits and `operations.md` for recovery procedures.
