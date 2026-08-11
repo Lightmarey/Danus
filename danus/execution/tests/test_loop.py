@@ -100,6 +100,29 @@ def test_run_round_success_rc0(tmp: Path):
     assert rc == 0
 
 
+def test_v2_run_round_ignores_user_config(tmp: Path):
+    wl = _mk_worker(tmp)
+    argv = wl.dir / "argv.json"
+    fake = _write_fake_codex(
+        tmp,
+        f"import json, sys\nfrom pathlib import Path\nPath({str(argv)!r}).write_text(json.dumps(sys.argv[1:]), encoding='utf-8')\nsys.exit(0)\n",
+    )
+    schema = wl.dir / "report.schema.json"
+    schema.write_text("{}", encoding="utf-8")
+    with _env(DANUS_CODEX_BIN=str(fake)):
+        rc = loop.run_round(
+            wl,
+            {"MODEL": "m", "REASONING_EFFORT": "high"},
+            "prompt",
+            wl.dir / "slice.jsonl",
+            hard_timeout=30,
+            report_path=wl.dir / "report.json",
+            output_schema=schema,
+        )
+    assert rc == 0
+    assert "--ignore-user-config" in json.loads(argv.read_text(encoding="utf-8"))
+
+
 # --- run_round: hard timeout → terminate → 124 ----------------------------- #
 
 def test_run_round_hard_timeout_terminates(tmp: Path):

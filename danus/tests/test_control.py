@@ -169,11 +169,17 @@ def test_assumption_boundary_and_read_model(tmp_path: Path):
 def test_parse_codex_usage_is_version_tolerant(tmp_path: Path):
     log = tmp_path / "events.jsonl"
     log.write_text(
-        '{"type":"turn.completed","usage":{"input_tokens":10,"output_tokens":4}}\n'
-        '{"nested":{"usage":{"input_tokens":12,"reasoning_tokens":3}}}\n',
+        '{"type":"turn.completed","usage":{"input_tokens":12,"cached_input_tokens":7,"output_tokens":4,"reasoning_output_tokens":3}}\n'
+        '{"nested":{"usage":{"input_tokens":10,"reasoning_tokens":2}}}\n',
         encoding="utf-8",
     )
-    assert parse_codex_usage(log) == {"input_tokens": 12, "output_tokens": 4, "reasoning_tokens": 3}
+    assert parse_codex_usage(log) == {
+        "input_tokens": 12,
+        "cached_input_tokens": 7,
+        "fresh_input_tokens": 5,
+        "output_tokens": 4,
+        "reasoning_tokens": 3,
+    }
 
 
 def test_taint_is_append_only_and_pauses_routes_that_depend_on_the_fact(tmp_path: Path):

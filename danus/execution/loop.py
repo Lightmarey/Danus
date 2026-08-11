@@ -179,7 +179,7 @@ def run_round(wl: L.WorkerLayout, role: dict, prompt: str, log_path: Path,
     if report_path is not None and output_schema is not None:
         report_path.parent.mkdir(parents=True, exist_ok=True)
         report_path.unlink(missing_ok=True)
-        structured = ["--json", "--output-schema", str(output_schema),
+        structured = ["--ignore-user-config", "--json", "--output-schema", str(output_schema),
                       "--output-last-message", str(report_path)]
     cmd = codex.exec_cmd(
         codex_bin, role["MODEL"], role["REASONING_EFFORT"],

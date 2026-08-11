@@ -845,6 +845,13 @@ def work_report_valid(report: Any) -> bool:
 def parse_codex_usage(log_path: Path) -> Dict[str, int]:
     """Best-effort extraction from ``codex exec --json`` without assuming one CLI version."""
     best: Dict[str, int] = {}
+    aliases = {
+        "input_tokens": "input_tokens",
+        "cached_input_tokens": "cached_input_tokens",
+        "output_tokens": "output_tokens",
+        "reasoning_tokens": "reasoning_tokens",
+        "reasoning_output_tokens": "reasoning_tokens",
+    }
     try:
         lines = log_path.read_text(encoding="utf-8", errors="replace").splitlines()
     except OSError:
@@ -858,15 +865,19 @@ def parse_codex_usage(log_path: Path) -> Dict[str, int]:
         while stack:
             item = stack.pop()
             if isinstance(item, dict):
-                if any(key in item for key in ("input_tokens", "output_tokens", "reasoning_tokens")):
-                    for key in ("input_tokens", "output_tokens", "reasoning_tokens"):
+                if any(key in item for key in aliases):
+                    for source, target in aliases.items():
                         try:
-                            best[key] = max(best.get(key, 0), int(item.get(key, 0) or 0))
+                            best[target] = max(best.get(target, 0), int(item.get(source, 0) or 0))
                         except (TypeError, ValueError):
                             pass
                 stack.extend(item.values())
             elif isinstance(item, list):
                 stack.extend(item)
+    if "input_tokens" in best:
+        best["fresh_input_tokens"] = max(
+            0, best["input_tokens"] - best.get("cached_input_tokens", 0)
+        )
     return best
 
 
