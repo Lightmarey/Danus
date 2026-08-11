@@ -99,6 +99,11 @@ danus stop   <project> --force  # kill the process group now
   kills a live codex child.
 - `status` shows a `stuck?` soft signal when a running round exceeds ~1.5× the hard
   timeout — investigate (often a flaky backend); decide stop/restart.
+- V2 workers classify transport failures separately from research progress.
+  Retry deadlines and counters survive process restarts, and one project-shared
+  Codex circuit permits only a single half-open probe after an outage. Quota,
+  authentication, and configuration failures enter `infra_blocked` immediately;
+  changing mathematics or restarting repeatedly does not clear that condition.
 
 ## Unattended operation (examples, not core)
 

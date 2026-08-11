@@ -829,6 +829,19 @@ def parse_work_report(path: Path) -> Dict[str, Any]:
         }
 
 
+def work_report_valid(report: Any) -> bool:
+    """Small runtime check for reports recovered after an abnormal process exit."""
+    schema = work_report_schema()
+    if not isinstance(report, dict) or set(report) != set(schema["required"]):
+        return False
+    if report.get("route_status") not in schema["properties"]["route_status"]["enum"]:
+        return False
+    if not isinstance(report.get("summary"), str) or not isinstance(report.get("recommended_next_action"), str):
+        return False
+    array_fields = set(schema["required"]) - {"route_status", "summary", "recommended_next_action"}
+    return all(isinstance(report.get(key), list) and all(isinstance(item, str) for item in report[key]) for key in array_fields)
+
+
 def parse_codex_usage(log_path: Path) -> Dict[str, int]:
     """Best-effort extraction from ``codex exec --json`` without assuming one CLI version."""
     best: Dict[str, int] = {}

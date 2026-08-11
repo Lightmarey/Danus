@@ -39,6 +39,7 @@ from . import scaffold
 from danus import codex, runtime
 from danus.control import (
     ControlError, ControlStore, parse_codex_usage, parse_work_report,
+    work_report_valid,
 )
 from danus.research import ResearchQuery
 
@@ -238,7 +239,6 @@ def refresh_worker_assets(wl: L.WorkerLayout) -> None:
 def _run_v2_loop(wl: L.WorkerLayout, role: dict, control: ControlStore, beat: float) -> int:
     """Run finite, controller-scored exploration slices for one v2 assignment."""
     worker = wl.name
-    infra_failures = 0
     while True:
         if wl.stop.exists():
             wl.stop.unlink(missing_ok=True)
@@ -247,11 +247,31 @@ def _run_v2_loop(wl: L.WorkerLayout, role: dict, control: ControlStore, beat: fl
         if _deadline_passed(wl.project_dir):
             write_status(wl, state="deadline")
             return 0
+        probe_claimed = False
+        raw_assignment = control.assignment(worker)
+        if raw_assignment and raw_assignment.get("status") == "waiting_retry":
+            gate = control.claim_backend_call("codex")
+            if not gate["allowed"]:
+                write_status(wl, state="waiting_retry", failure_class=gate.get("failure_class"), retry_after_seconds=gate.get("wait_seconds"))
+                if gate.get("wait_seconds") is None:
+                    return 0
+                time.sleep(min(float(gate["wait_seconds"]), max(1.0, beat)))
+                continue
+            control.resume_worker_retry(worker)
+            probe_claimed = True
         try:
             assignment = control.validate_assignment(worker)
         except ControlError as exc:
             write_status(wl, state="waiting", control_reason=str(exc))
             return 0
+        if not probe_claimed:
+            gate = control.claim_backend_call("codex")
+            if not gate["allowed"]:
+                write_status(wl, state="waiting_retry", failure_class=gate.get("failure_class"), retry_after_seconds=gate.get("wait_seconds"))
+                if gate.get("wait_seconds") is None:
+                    return 0
+                time.sleep(min(float(gate["wait_seconds"]), max(1.0, beat)))
+                continue
 
         audit = bool(assignment.get("audit_required"))
         slice_no = int(assignment["slice_count"]) + 1
@@ -274,33 +294,25 @@ def _run_v2_loop(wl: L.WorkerLayout, role: dict, control: ControlStore, beat: fl
             report_path=report_path, output_schema=control.work_report_schema,
         )
         wall = time.monotonic() - started
-        if rc == 127:
-            write_status(wl, state="error", error="codex binary not found")
-            return 127
-        if rc not in (0, 124):
-            infra_failures += 1
-            control.append_event(
-                "slice_infra_error", worker=worker, assignment_epoch=assignment["epoch"],
-                target_version=assignment["target_version"], obligation_id=assignment["obligation_id"],
-                route_id=assignment["route_id"], return_code=rc,
+        report = parse_work_report(report_path)
+        complete_report = report_path.is_file() and work_report_valid(report)
+        if rc != 0 and not (rc == 124 and complete_report):
+            outcome = codex.classify_failure(rc, log_path)
+            failure = control.record_worker_infra_failure(
+                worker, outcome, wall_seconds=wall, usage=parse_codex_usage(log_path),
             )
-            control.record_cost(
-                component="worker_slice", worker=worker, assignment_epoch=assignment["epoch"],
-                target_version=assignment["target_version"], obligation_id=assignment["obligation_id"],
-                route_id=assignment["route_id"], wall_seconds=wall,
-                usage=parse_codex_usage(log_path),
+            write_status(
+                wl, state=failure["assignment"]["status"], last_rc=rc,
+                failure_class=outcome["failure_class"],
+                infra_failure_count=failure["assignment"]["infra_failure_count"],
+                retry_after_seconds=failure["wait_seconds"],
             )
-            if infra_failures >= 2:
-                assignment["status"] = "infra_blocked"
-                control.save_assignment(assignment)
-                write_status(wl, state="infra_blocked", error=f"{infra_failures} consecutive infrastructure failures")
-                return 1
-            if beat > 0:
-                time.sleep(beat)
+            if failure["blocked"]:
+                return 127 if rc == 127 else 1
             continue
-        infra_failures = 0
+        control.record_worker_call_success(worker)
         result = control.evaluate_work_report(
-            worker, parse_work_report(report_path), wall_seconds=wall,
+            worker, report, wall_seconds=wall,
             usage=parse_codex_usage(log_path),
         )
         current = result["assignment"]

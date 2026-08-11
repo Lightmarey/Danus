@@ -8,7 +8,7 @@ from danus.execution import layout as L
 from danus.execution import loop
 
 
-def _worker(tmp: Path) -> tuple[L.WorkerLayout, ControlStore]:
+def _worker(tmp: Path, *, budget: dict | None = None) -> tuple[L.WorkerLayout, ControlStore]:
     project = tmp / "P"
     wl = L.WorkerLayout(project / "workers" / "high")
     wl.logs.mkdir(parents=True)
@@ -21,6 +21,7 @@ def _worker(tmp: Path) -> tuple[L.WorkerLayout, ControlStore]:
     target = store.propose_target({
         "statement": "T", "allowed_assumptions": [], "forbidden_assumptions": [],
         "required_conclusions": ["T"], "fallback_candidates": [],
+        "budget": budget or {},
     })
     store.approve_target(target["version"])
     store.add_route({
@@ -82,3 +83,48 @@ def test_reusing_the_same_evidence_does_not_keep_renewing_a_route(tmp_path: Path
     second = store.evaluate_work_report("high", report, wall_seconds=1)
     assert first["gain"] == "medium"
     assert second["gain"] == "low"
+
+
+def test_timeout_without_report_uses_persisted_infra_budget_not_research_slices(tmp_path: Path):
+    wl, store = _worker(tmp_path, budget={"max_infra_attempts": 2, "infra_retry_seconds": [0]})
+    original = loop.run_round
+
+    def timeout(_wl, _role, _prompt, log_path, _timeout, **_kwargs):
+        log_path.write_text("[worker_loop] round hard-timeout\n", encoding="utf-8")
+        return 124
+
+    loop.run_round = timeout
+    try:
+        assert loop._run_v2_loop(wl, {"MODEL": "m", "REASONING_EFFORT": "high"}, store, beat=0) == 1
+    finally:
+        loop.run_round = original
+    assignment = store.assignment("high")
+    assert assignment["status"] == "infra_blocked"
+    assert assignment["infra_failure_count"] == 2
+    assert assignment["slice_count"] == 0
+    assert assignment["consecutive_low"] == 0
+    assert [event["component"] for event in store.events("cost")] == ["worker_infra", "worker_infra"]
+    assert store.events("work_checkpoint") == []
+
+
+def test_quota_exhaustion_blocks_without_retry_or_slice_charge(tmp_path: Path):
+    wl, store = _worker(tmp_path, budget={"infra_retry_seconds": [0]})
+    calls = 0
+    original = loop.run_round
+
+    def quota(_wl, _role, _prompt, log_path, _timeout, **_kwargs):
+        nonlocal calls
+        calls += 1
+        log_path.write_text('{"error":"insufficient_quota: credit balance exhausted"}\n', encoding="utf-8")
+        return 1
+
+    loop.run_round = quota
+    try:
+        assert loop._run_v2_loop(wl, {"MODEL": "m", "REASONING_EFFORT": "high"}, store, beat=0) == 1
+    finally:
+        loop.run_round = original
+    assignment = store.assignment("high")
+    assert calls == 1
+    assert assignment["status"] == "infra_blocked"
+    assert assignment["last_failure_class"] == "quota_exhausted"
+    assert assignment["slice_count"] == 0

@@ -108,6 +108,21 @@ on each structured assignment (`--slice-timeout`, `--max-slices`). Optional
 backend exposes token usage, `DANUS_CODEX_PRICE_IN` and
 `DANUS_CODEX_PRICE_OUT` give per-million-token rates for cost attribution.
 
+V2 resilience defaults also live in the target's `budget` object, so every
+worker and restart observes the same values:
+
+| key | default | meaning |
+|---|---:|---|
+| `max_infra_attempts` | `3` (`2` for timeouts) | consecutive transport attempts before blocking |
+| `max_infra_wall_seconds` | `min(1800, 5% of max_wall_seconds)` | separate outage-loss ceiling |
+| `infra_retry_seconds` | `[30, 120, 600]` | persisted retry cooldowns; a provider `Retry-After` can only increase them |
+
+Infrastructure attempts count toward real project wall/cost totals but never
+consume route slices or low-gain checkpoints. Missing provider usage is stored
+as unknown cost, not zero cost. A provider/account hard spending limit remains
+necessary for a strict external USD ceiling because a disconnected request may
+not return a billing receipt.
+
 ## Rendering & misc
 
 | variable | default | meaning |

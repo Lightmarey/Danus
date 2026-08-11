@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 
 from danus.control import ControlError, ControlStore, is_v2_project, parse_codex_usage
+from danus import codex
 from danus.core import FactGraph, GlobalMemory
 
 
@@ -255,3 +256,32 @@ def test_authoring_call_records_v2_wall_time_without_inventing_token_cost(tmp_pa
     event = store.events("cost")[-1]
     assert event["component"] == "human_summary"
     assert event["cost_usd"] is None
+
+
+def test_failure_classification_and_unknown_billing_are_explicit(tmp_path: Path):
+    log = tmp_path / "codex.jsonl"
+    log.write_text('{"error":"HTTP 429 rate limit","retry-after":17}\n', encoding="utf-8")
+    outcome = codex.classify_failure(1, log)
+    assert outcome["failure_class"] == "rate_limited"
+    assert outcome["retryable"] is True
+    assert outcome["retry_after_seconds"] == 17
+    store, _ = _assigned(tmp_path)
+    event = store.record_cost(component="worker_infra", wall_seconds=2)
+    assert event["cost_status"] == "unknown"
+    assert store.budget_state()["unknown_cost_events"] == 1
+
+
+def test_infra_failure_and_project_circuit_survive_restart(tmp_path: Path):
+    store, _ = _assigned(tmp_path)
+    target = store.current_target()
+    target["budget"] = {"infra_retry_seconds": [0], "max_infra_attempts": 3}
+    with store._tx() as db:
+        db.execute("UPDATE targets SET payload=? WHERE version=?", (json.dumps(target), target["version"]))
+    outcome = {"failure_class": "transient_network", "retryable": True, "retry_after_seconds": 0, "error_signature": "network", "return_code": 1}
+    store.record_worker_infra_failure("high", outcome, wall_seconds=1)
+    reopened = ControlStore(store.project)
+    assignment = reopened.assignment("high")
+    assert assignment["infra_failure_count"] == 1
+    assert assignment["status"] == "waiting_retry"
+    assert reopened.claim_backend_call()["allowed"] is True
+    assert reopened.claim_backend_call()["allowed"] is False  # only one half-open probe

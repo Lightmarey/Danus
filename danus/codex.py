@@ -24,9 +24,11 @@ service passes ``DANUS_VERIFY_MODEL``; the renderers pass
 from __future__ import annotations
 
 import os
+import hashlib
+import re
 import shutil
 from pathlib import Path
-from typing import Dict, List
+from typing import Any, Dict, List, Optional
 
 # danus/codex.py → repo root is one parent up; the deployment's bin/codex wrapper
 # lives at <repo>/bin/codex.
@@ -34,6 +36,48 @@ _REPO_ROOT = Path(__file__).resolve().parents[1]
 
 DEFAULT_MODEL = "gpt-5.5"
 DEFAULT_EFFORT = "xhigh"
+
+_FAILURE_PATTERNS = (
+    ("quota_exhausted", False, ("insufficient_quota", "quota exceeded", "credit balance", "billing hard limit", "usage limit reached")),
+    ("rate_limited", True, ("rate limit", "too many requests", "status 429", "http 429")),
+    ("auth_or_config", False, ("unauthorized", "invalid api key", "authentication", "status 401", "http 401", "status 403", "http 403")),
+    ("transient_network", True, ("connection reset", "connection refused", "connection error", "network is unreachable", "name resolution", "timed out connecting", "dns")),
+    ("provider_5xx", True, ("status 500", "http 500", "status 502", "http 502", "status 503", "http 503", "status 504", "http 504")),
+    ("invalid_request", False, ("invalid request", "bad request", "status 400", "http 400", "model not found")),
+)
+
+
+def classify_failure(return_code: int, log_path: Optional[Path] = None) -> Dict[str, Any]:
+    """Classify a failed Codex subprocess without storing its potentially sensitive log."""
+    if return_code == 0:
+        return {"failure_class": "success", "retryable": False, "retry_after_seconds": 0, "error_signature": ""}
+    if return_code == 124:
+        failure_class, retryable, text = "timeout", True, ""
+    elif return_code == 127:
+        failure_class, retryable, text = "auth_or_config", False, "codex binary not found"
+    else:
+        try:
+            text = (log_path.read_text(encoding="utf-8", errors="replace")[-200_000:] if log_path else "")
+        except OSError:
+            text = ""
+        lowered = text.lower()
+        failure_class, retryable = "unknown_infra", True
+        for category, can_retry, needles in _FAILURE_PATTERNS:
+            if any(needle in lowered for needle in needles):
+                failure_class, retryable = category, can_retry
+                break
+    retry_after = 0
+    match = re.search(r"retry[- ]after[^0-9]{0,20}(\d+)", text.lower())
+    if match:
+        retry_after = int(match.group(1))
+    signature_input = f"{failure_class}:{return_code}:" + " ".join(text.lower().split())[-2000:]
+    return {
+        "failure_class": failure_class,
+        "retryable": retryable,
+        "retry_after_seconds": retry_after,
+        "error_signature": hashlib.sha256(signature_input.encode()).hexdigest()[:16],
+        "return_code": return_code,
+    }
 
 
 def _repo_wrapper() -> Path:

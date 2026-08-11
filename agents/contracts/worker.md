@@ -193,7 +193,10 @@ the glossary check, calls the verifier, writes the fact **iff accepted**, and
 **always records the verdict to global memory** (kind `verification`), so an
 outcome is never lost. The verifier is the sole authority on correctness; no
 peer/LLM opinion substitutes for it. Two edge cases to handle from the return
-value: `verdict="error"` means the verify service was unavailable — just retry;
+value: `verdict="error"` means the verify service was unavailable — do not loop
+inside the slice. Preserve the claim and error once, then let the V2 controller
+apply its persisted retry/circuit policy (legacy workers retry only after a
+bounded delay);
 an accepted submission with `write_error` (e.g. a predecessor was revoked) means
 the fact was not written — re-prove or avoid that predecessor. If a submission
 does not pass:

@@ -12,6 +12,7 @@ import json
 import os
 import re
 import sqlite3
+import time
 import uuid
 from contextlib import contextmanager
 from pathlib import Path
@@ -192,6 +193,11 @@ class SQLiteControlStore:
                 CREATE TABLE IF NOT EXISTS context_manifests(
                     id TEXT PRIMARY KEY, worker TEXT NOT NULL, assignment_epoch TEXT NOT NULL,
                     snapshot_generation INTEGER NOT NULL, payload TEXT NOT NULL, created_at_utc TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS backend_circuits(
+                    provider_key TEXT PRIMARY KEY, state TEXT NOT NULL,
+                    consecutive_failures INTEGER NOT NULL, opened_until REAL,
+                    failure_class TEXT, updated_at_utc TEXT NOT NULL
                 );
                 """
                 )
@@ -652,7 +658,7 @@ class SQLiteControlStore:
             raise ControlError("obligation or route is not bound to the current target")
         if not task.strip():
             raise ControlError("assignment task is required")
-        payload = {"worker": _id(worker, "worker"), "epoch": uuid.uuid4().hex, "target_version": target_version, "obligation_id": obligation_id, "route_id": route_id, "task": task.strip(), "status": "assigned", "slice_count": 0, "lease_remaining": INITIAL_SLICES, "max_slices": max(3, int(max_slices)), "slice_timeout": max(1, int(slice_timeout)), "consecutive_low": 0, "audit_required": False, "wall_seconds": 0.0, "last_unresolved_interfaces": None, "credited_evidence_refs": [], "event_cursor": len(self.events()), "context_cursor": self.generation(), "assigned_at_utc": utc_now()}
+        payload = {"worker": _id(worker, "worker"), "epoch": uuid.uuid4().hex, "target_version": target_version, "obligation_id": obligation_id, "route_id": route_id, "task": task.strip(), "status": "assigned", "slice_count": 0, "lease_remaining": INITIAL_SLICES, "max_slices": max(3, int(max_slices)), "slice_timeout": max(1, int(slice_timeout)), "consecutive_low": 0, "audit_required": False, "wall_seconds": 0.0, "infra_failure_count": 0, "infra_wall_seconds": 0.0, "next_retry_at_epoch": None, "last_failure_class": None, "last_error_signature": None, "last_unresolved_interfaces": None, "credited_evidence_refs": [], "event_cursor": len(self.events()), "context_cursor": self.generation(), "assigned_at_utc": utc_now()}
         with self._tx() as db:
             db.execute("INSERT OR REPLACE INTO assignments VALUES (?,?,?,?,?,?,?)", (payload["worker"], payload["epoch"], payload["status"], target_version, obligation_id, route_id, _dump(payload)))
             self._set_route_state(db, route_id, "active", actor="assignment")
@@ -693,6 +699,103 @@ class SQLiteControlStore:
             assignment.update(audit_required=True, status="auditing")
             self.save_assignment(assignment)
         return assignment
+
+    def claim_backend_call(self, provider_key: str = "codex") -> dict[str, Any]:
+        """Atomically admit normal calls or one half-open probe after a cooldown."""
+        self.scaffold()
+        now = time.time()
+        with self._tx() as db:
+            row = db.execute("SELECT * FROM backend_circuits WHERE provider_key=?", (provider_key,)).fetchone()
+            if not row or row["state"] == "closed":
+                return {"allowed": True, "state": "closed", "wait_seconds": 0}
+            if row["state"] == "blocked":
+                return {"allowed": False, "state": "blocked", "wait_seconds": None, "failure_class": row["failure_class"]}
+            opened_until = float(row["opened_until"] or 0)
+            if row["state"] == "open" and opened_until <= now:
+                db.execute("UPDATE backend_circuits SET state='half_open',updated_at_utc=? WHERE provider_key=?", (utc_now(), provider_key))
+                self._bump(db)
+                return {"allowed": True, "state": "half_open", "wait_seconds": 0}
+            wait = max(1, int(opened_until - now)) if opened_until else 1
+            return {"allowed": False, "state": str(row["state"]), "wait_seconds": wait, "failure_class": row["failure_class"]}
+
+    def _infra_policy(self, failure_class: str) -> tuple[int, float, list[int]]:
+        budget = (self.current_target() or {}).get("budget") or {}
+        attempts = max(1, int(budget.get("max_infra_attempts", 3)))
+        if failure_class == "timeout":
+            attempts = min(attempts, 2)
+        if budget.get("max_infra_wall_seconds") is not None:
+            wall_limit = max(1.0, float(budget["max_infra_wall_seconds"]))
+        else:
+            try:
+                wall_limit = min(1800.0, max(1.0, float(budget.get("max_wall_seconds")) * .05))
+            except (TypeError, ValueError):
+                wall_limit = 1800.0
+        raw = budget.get("infra_retry_seconds") or [30, 120, 600]
+        retry = [max(0, int(value)) for value in raw] if isinstance(raw, list) and raw else [30, 120, 600]
+        return attempts, wall_limit, retry
+
+    def record_worker_infra_failure(self, worker: str, outcome: dict[str, Any], *, wall_seconds: float, usage: Optional[dict[str, Any]] = None, provider_key: str = "codex") -> dict[str, Any]:
+        """Persist retry/circuit state and actual cost without consuming a research slice."""
+        self.scaffold()
+        with self._tx() as db:
+            row = db.execute("SELECT payload FROM assignments WHERE worker=?", (_id(worker, "worker"),)).fetchone()
+            if not row:
+                raise ControlError(f"worker {worker} has no v2 assignment")
+            assignment = _load(row[0], {})
+            failure_class = str(outcome.get("failure_class") or "unknown_infra")
+            attempts_limit, wall_limit, retry_schedule = self._infra_policy(failure_class)
+            attempts = int(assignment.get("infra_failure_count") or 0) + 1
+            infra_wall = float(assignment.get("infra_wall_seconds") or 0) + max(0.0, wall_seconds)
+            retryable = bool(outcome.get("retryable"))
+            blocked = not retryable or attempts >= attempts_limit or infra_wall >= wall_limit
+            requested_wait = max(0, int(outcome.get("retry_after_seconds") or 0))
+            wait = max(requested_wait, retry_schedule[min(attempts - 1, len(retry_schedule) - 1)])
+            next_retry = None if blocked else time.time() + wait
+            assignment.update(
+                status="infra_blocked" if blocked else "waiting_retry",
+                infra_failure_count=attempts,
+                infra_wall_seconds=infra_wall,
+                next_retry_at_epoch=next_retry,
+                last_failure_class=failure_class,
+                last_error_signature=outcome.get("error_signature"),
+            )
+            db.execute("UPDATE assignments SET status=?,payload=? WHERE worker=?", (assignment["status"], _dump(assignment), worker))
+            circuit_state = "blocked" if blocked else "open"
+            db.execute(
+                "INSERT INTO backend_circuits VALUES (?,?,?,?,?,?) ON CONFLICT(provider_key) DO UPDATE SET state=excluded.state,consecutive_failures=backend_circuits.consecutive_failures+1,opened_until=excluded.opened_until,failure_class=excluded.failure_class,updated_at_utc=excluded.updated_at_utc",
+                (provider_key, circuit_state, 1, next_retry, failure_class, utc_now()),
+            )
+            event = self._event(db, "slice_infra_error", worker=worker, assignment_epoch=assignment["epoch"], target_version=assignment["target_version"], obligation_id=assignment["obligation_id"], route_id=assignment["route_id"], failure_class=failure_class, retryable=retryable, retry_at_epoch=next_retry, error_signature=outcome.get("error_signature"), return_code=outcome.get("return_code"), blocked=blocked)
+            self._record_cost(db, component="worker_infra", wall_seconds=wall_seconds, usage=usage, worker=worker, assignment_epoch=assignment["epoch"], target_version=assignment["target_version"], obligation_id=assignment["obligation_id"], route_id=assignment["route_id"], failure_class=failure_class, attempt_status="failed")
+            self._bump(db)
+        self._record_budget_threshold()
+        return {"assignment": assignment, "event": event, "blocked": blocked, "wait_seconds": None if blocked else wait}
+
+    def resume_worker_retry(self, worker: str) -> dict[str, Any]:
+        assignment = self.assignment(worker)
+        if not assignment or assignment.get("status") != "waiting_retry":
+            raise ControlError(f"worker {worker} is not waiting for retry")
+        assignment["status"] = "running"
+        self.save_assignment(assignment)
+        return assignment
+
+    def record_worker_call_success(self, worker: str, provider_key: str = "codex") -> None:
+        self.scaffold()
+        with self._tx() as db:
+            row = db.execute("SELECT payload FROM assignments WHERE worker=?", (_id(worker, "worker"),)).fetchone()
+            circuit = db.execute("SELECT state FROM backend_circuits WHERE provider_key=?", (provider_key,)).fetchone()
+            if row:
+                current = _load(row[0], {})
+                if not current.get("infra_failure_count") and (not circuit or circuit["state"] == "closed"):
+                    return
+            if row:
+                assignment = current
+                assignment.update(infra_failure_count=0, next_retry_at_epoch=None, last_failure_class=None, last_error_signature=None)
+                db.execute("UPDATE assignments SET payload=? WHERE worker=?", (_dump(assignment), worker))
+            db.execute("INSERT INTO backend_circuits VALUES (?, 'closed', 0, NULL, NULL, ?) ON CONFLICT(provider_key) DO UPDATE SET state='closed',consecutive_failures=0,opened_until=NULL,failure_class=NULL,updated_at_utc=excluded.updated_at_utc", (provider_key, utc_now()))
+            if circuit and circuit["state"] != "closed":
+                self._event(db, "backend_recovered", provider_key=provider_key, worker=worker)
+            self._bump(db)
 
     def validate_submission(self, worker: str, *, target_version: str, obligation_id: str, route_id: str, assignment_epoch: str, assumptions_used: Iterable[str]) -> dict[str, Any]:
         assignment = self.validate_assignment(worker)
@@ -851,7 +954,7 @@ class SQLiteControlStore:
                 cost_usd = (float(usage.get("input_tokens", 0) or 0) * float(os.environ.get("DANUS_CODEX_PRICE_IN", "")) + float(usage.get("output_tokens", 0) or 0) * float(os.environ.get("DANUS_CODEX_PRICE_OUT", ""))) / 1_000_000
             except ValueError:
                 cost_usd = None
-        return self._event(db, "cost", component=component, wall_seconds=round(max(0.0, wall_seconds), 3), usage=usage, cost_usd=cost_usd, **scope)
+        return self._event(db, "cost", component=component, wall_seconds=round(max(0.0, wall_seconds), 3), usage=usage, cost_usd=cost_usd, cost_status="known" if cost_usd is not None else "unknown", **scope)
 
     def record_cost(self, *, component: str, wall_seconds: float, usage: Optional[dict[str, Any]] = None, cost_usd: Optional[float] = None, **scope: Any) -> dict[str, Any]:
         self.scaffold()
@@ -877,7 +980,7 @@ class SQLiteControlStore:
                 pass
         ratio = max(ratios, default=0.0)
         stage = "exhausted" if ratio >= 1 else "audit" if ratio >= .85 else "warn" if ratio >= .70 else "normal"
-        return {"stage": stage, "ratio": ratio, "wall_seconds": wall, "cost_usd": cost, "budget": budget}
+        return {"stage": stage, "ratio": ratio, "wall_seconds": wall, "cost_usd": cost, "unknown_cost_events": sum(row.get("cost_usd") is None for row in costs), "infra_wall_seconds": sum(float(row.get("wall_seconds") or 0) for row in costs if row.get("component") == "worker_infra"), "budget": budget}
 
     def _record_budget_threshold(self) -> None:
         state = self.budget_state()
