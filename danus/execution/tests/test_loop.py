@@ -1,13 +1,12 @@
 """Offline tests for danus.execution.loop + __main__ (no real codex, no network).
 
-Covers the round driver end-to-end without ever launching a real codex:
+Covers the slice driver end-to-end without ever launching a real codex:
 
   - ``run_round`` against a FIXED fake-codex stub script: a chosen exit code, a
     hard-timeout (terminate → 124), and a missing binary (→ 127). These drive the
     real ``subprocess.Popen`` path in loop.py.
-  - the ``main`` outer loop: stop-flag / deadline / max-rounds / consecutive-
-    failure caps, the codex-missing (127) short-circuit, and the ``ok``/``error``
-    status writes. ``run_round`` is monkeypatched so no subprocess spawns.
+  - the ``main`` outer loop: V2 gate, stop flag, deadline, SIGTERM handling, and
+    atomic status writes.
   - the SIGTERM handler (_on_term): terminates the in-flight child, writes
     ``terminated`` status, and exits 0.
   - __main__: ``runpy.run_module("danus.execution", run_name="__main__")`` with the
@@ -31,6 +30,7 @@ from contextlib import contextmanager
 from pathlib import Path
 
 from danus import runtime
+from danus.control import ControlStore
 from danus.execution import layout as L
 from danus.execution import loop, scaffold
 from danus.tests.portable import write_python_launcher
@@ -71,9 +71,24 @@ def _mk_worker(tmp: Path, name: str = "high") -> L.WorkerLayout:
     return wl
 
 
+def _enable_v2(wl: L.WorkerLayout) -> ControlStore:
+    (wl.project_dir / "project.json").write_text(
+        json.dumps({"name": wl.project, "control_version": 2}), encoding="utf-8",
+    )
+    store = ControlStore(wl.project_dir)
+    store.scaffold()
+    return store
+
+
 def _write_fake_codex(tmp: Path, body: str) -> Path:
     script = "from __future__ import annotations\n" + body
     return write_python_launcher(tmp, "fake_codex", script)
+
+
+def _slice_files(wl: L.WorkerLayout) -> dict:
+    schema = wl.dir / "report.schema.json"
+    schema.write_text("{}", encoding="utf-8")
+    return {"report_path": wl.dir / "report.json", "output_schema": schema}
 
 
 # --- run_round: chosen exit code ------------------------------------------- #
@@ -84,7 +99,7 @@ def test_run_round_returns_codex_rc(tmp: Path):
     log = wl.dir / "round.log"
     with _env(DANUS_CODEX_BIN=str(fake)):
         rc = loop.run_round(wl, {"MODEL": "m", "REASONING_EFFORT": "high"},
-                            "prompt", log, hard_timeout=30)
+                            "prompt", log, hard_timeout=30, **_slice_files(wl))
     assert rc == 3
     assert "hello from codex" in log.read_text()
     assert loop._Child.proc is None            # cleared in finally
@@ -96,28 +111,12 @@ def test_run_round_success_rc0(tmp: Path):
     log = wl.dir / "round.log"
     with _env(DANUS_CODEX_BIN=str(fake)):
         rc = loop.run_round(wl, {"MODEL": "m", "REASONING_EFFORT": "high"},
-                            "prompt", log, hard_timeout=0)   # 0 => no timeout (wait forever)
+                            "prompt", log, hard_timeout=0,
+                            **_slice_files(wl))   # 0 => no timeout (wait forever)
     assert rc == 0
 
 
-def test_v1_run_round_requests_json_usage_events(tmp: Path):
-    wl = _mk_worker(tmp)
-    argv = wl.dir / "v1-argv.json"
-    fake = _write_fake_codex(
-        tmp,
-        f"import json, sys\nfrom pathlib import Path\nPath({str(argv)!r}).write_text(json.dumps(sys.argv[1:]), encoding='utf-8')\n",
-    )
-    with _env(DANUS_CODEX_BIN=str(fake)):
-        rc = loop.run_round(
-            wl, {"MODEL": "m", "REASONING_EFFORT": "high"}, "prompt",
-            wl.dir / "round.log", hard_timeout=30,
-        )
-    args = json.loads(argv.read_text(encoding="utf-8"))
-    assert rc == 0 and "--json" in args
-    assert "--output-schema" not in args
-
-
-def test_v2_run_round_injects_the_worker_gateway_config(tmp: Path):
+def test_run_round_injects_the_worker_gateway_config(tmp: Path):
     wl = _mk_worker(tmp)
     argv = wl.dir / "argv.json"
     reservation = wl.dir / "reservation.txt"
@@ -147,7 +146,7 @@ def test_v2_run_round_injects_the_worker_gateway_config(tmp: Path):
     assert reservation.read_text(encoding="utf-8") == "reservation-1"
 
 
-def test_v2_run_round_interrupts_an_active_child_on_stop_request(tmp: Path):
+def test_run_round_interrupts_an_active_child_on_stop_request(tmp: Path):
     wl = _mk_worker(tmp)
     fake = _write_fake_codex(tmp, "import time\ntime.sleep(30)\n")
     schema = wl.dir / "report.schema.json"
@@ -179,7 +178,7 @@ def test_run_round_hard_timeout_terminates(tmp: Path):
     log = wl.dir / "round.log"
     with _env(DANUS_CODEX_BIN=str(fake)):
         rc = loop.run_round(wl, {"MODEL": "m", "REASONING_EFFORT": "high"},
-                            "prompt", log, hard_timeout=1)
+                            "prompt", log, hard_timeout=1, **_slice_files(wl))
     child_pid = int(pid_file.read_text(encoding="utf-8"))
     assert rc == 124
     assert "hard-timeout after 1s" in log.read_text()
@@ -202,7 +201,7 @@ def test_run_round_missing_binary_returns_127(tmp: Path):
     log = wl.dir / "round.log"
     with _env(DANUS_CODEX_BIN=str(missing)):
         rc = loop.run_round(wl, {"MODEL": "m", "REASONING_EFFORT": "high"},
-                            "prompt", log, hard_timeout=30)
+                            "prompt", log, hard_timeout=30, **_slice_files(wl))
     assert rc == 127
     assert "codex binary not found" in log.read_text()
 
@@ -223,8 +222,7 @@ def test_run_round_timeout_then_kill(tmp: Path):
 
         def wait(self, timeout=None):
             self._waits += 1
-            # 1st wait = the hard-timeout expiry; 2nd wait = the 10s grace expiry.
-            if self._waits <= 2:
+            if self.returncode is None:
                 raise subprocess.TimeoutExpired(cmd="codex", timeout=timeout)
             return self.returncode
 
@@ -246,7 +244,7 @@ def test_run_round_timeout_then_kill(tmp: Path):
     try:
         with _env(DANUS_CODEX_BIN=str(tmp / "anything")):
             rc = loop.run_round(wl, {"MODEL": "m", "REASONING_EFFORT": "high"},
-                                "prompt", log, hard_timeout=1)
+                                "prompt", log, hard_timeout=1, **_slice_files(wl))
     finally:
         runtime.spawn_process = orig_spawn
         runtime.stop_process = orig_stop
@@ -261,6 +259,7 @@ def test_run_round_timeout_then_kill(tmp: Path):
 
 def test_main_stops_on_stop_flag(tmp: Path):
     wl = _mk_worker(tmp)
+    _enable_v2(wl)
     wl.codex_config.parent.mkdir()
     wl.codex_config.write_text("stale", encoding="utf-8")
     wl.stop.touch()          # stop before the first round
@@ -268,11 +267,7 @@ def test_main_stops_on_stop_flag(tmp: Path):
     with _restore_sigterm(), _env(
         DANUS_ROUND_BEAT="0", DANUS_PYTHON_BIN=configured,
     ):
-        _patch_run_round(lambda *a, **k: 0)
-        try:
-            rc = loop.main(str(wl.dir))
-        finally:
-            _unpatch_run_round()
+        rc = loop.main(str(wl.dir))
     assert rc == 0
     assert not wl.stop.exists()                       # consumed
     assert json.loads(wl.status.read_text())["state"] == "stopped"
@@ -284,85 +279,12 @@ def test_main_stops_on_stop_flag(tmp: Path):
 
 def test_main_stops_on_deadline(tmp: Path):
     wl = _mk_worker(tmp)
+    _enable_v2(wl)
     (wl.project_dir / L.DEADLINE_FILE).write_text("1")   # epoch 1 = long past
     with _restore_sigterm(), _env(DANUS_ROUND_BEAT="0"):
-        _patch_run_round(lambda *a, **k: 0)
-        try:
-            rc = loop.main(str(wl.dir))
-        finally:
-            _unpatch_run_round()
+        rc = loop.main(str(wl.dir))
     assert rc == 0
     assert json.loads(wl.status.read_text())["state"] == "deadline"
-
-
-# --- main loop: max-rounds cap --------------------------------------------- #
-
-def test_main_max_rounds_cap(tmp: Path):
-    wl = _mk_worker(tmp)
-    calls = []
-    with _restore_sigterm(), _env(DANUS_ROUND_BEAT="0", DANUS_MAX_ROUNDS="2",
-                                  DANUS_MAX_CONSEC_FAILURES="0"):
-        _patch_run_round(lambda *a, **k: (calls.append(1) or 0))
-        try:
-            rc = loop.main(str(wl.dir))
-        finally:
-            _unpatch_run_round()
-    assert rc == 0
-    assert len(calls) == 2                              # exactly max_rounds rounds ran
-    st = json.loads(wl.status.read_text())
-    assert st["state"] == "max_rounds"
-    assert st["round"] == 2 and st["last_rc"] == 0
-
-
-# --- main loop: consecutive-failure cap → error / rc 1 --------------------- #
-
-def test_main_consecutive_failure_cap(tmp: Path):
-    wl = _mk_worker(tmp)
-    with _restore_sigterm(), _env(DANUS_ROUND_BEAT="0", DANUS_MAX_CONSEC_FAILURES="2",
-                                  DANUS_MAX_ROUNDS="0"):
-        def _fail(w, role, prompt, log_path, ht):
-            log_path.write_text('"fact_id": "0123456789abcdef"\n')
-            return 5                                    # a failing rc (not 0/124)
-        _patch_run_round(_fail)
-        try:
-            rc = loop.main(str(wl.dir))
-        finally:
-            _unpatch_run_round()
-    assert rc == 1
-    st = json.loads(wl.status.read_text())
-    assert st["state"] == "error" and "consecutive failed rounds" in st["error"]
-    # last idle status carried the parsed fact id
-    assert st.get("last_fact_id") == "0123456789abcdef" or st["last_rc"] == 5
-
-
-def test_main_timeout_rc124_does_not_count_as_failure(tmp: Path):
-    """rc 124 (hard-timeout) resets the consecutive-failure counter, so a run of
-    124s never trips the failure cap — it must stop via max_rounds instead."""
-    wl = _mk_worker(tmp)
-    with _restore_sigterm(), _env(DANUS_ROUND_BEAT="0", DANUS_MAX_CONSEC_FAILURES="2",
-                                  DANUS_MAX_ROUNDS="3"):
-        _patch_run_round(lambda *a, **k: 124)
-        try:
-            rc = loop.main(str(wl.dir))
-        finally:
-            _unpatch_run_round()
-    assert rc == 0
-    assert json.loads(wl.status.read_text())["state"] == "max_rounds"
-
-
-# --- main loop: codex missing (127) short-circuits ------------------------- #
-
-def test_main_codex_missing_127(tmp: Path):
-    wl = _mk_worker(tmp)
-    with _restore_sigterm(), _env(DANUS_ROUND_BEAT="0"):
-        _patch_run_round(lambda *a, **k: 127)
-        try:
-            rc = loop.main(str(wl.dir))
-        finally:
-            _unpatch_run_round()
-    assert rc == 127
-    st = json.loads(wl.status.read_text())
-    assert st["state"] == "error" and st["error"] == "codex binary not found"
 
 
 # --- main: bad worker dir → rc 2 ------------------------------------------- #
@@ -376,6 +298,7 @@ def test_main_missing_worker_dir(tmp: Path):
 
 def test_main_sigterm_handler(tmp: Path):
     wl = _mk_worker(tmp)
+    _enable_v2(wl)
 
     class _FakeProc:
         def __init__(self):
@@ -384,16 +307,17 @@ def test_main_sigterm_handler(tmp: Path):
     fake_proc = _FakeProc()
     orig_stop = runtime.stop_process
 
-    # run_round: install a live child then deliver SIGTERM to ourselves so the
-    # loop's own handler fires (covers _on_term end to end).
-    def _round(w, role, prompt, log_path, ht):
+    # Install a live child then deliver SIGTERM to ourselves so the loop's own
+    # handler fires (covers _on_term end to end).
+    def _controlled_loop(*_args, **_kwargs):
         loop._Child.proc = fake_proc
         signal.raise_signal(signal.SIGTERM)
         return 0
 
+    original_loop = loop._run_loop
     with _restore_sigterm(), _env(DANUS_ROUND_BEAT="0"):
         runtime.stop_process = lambda proc, *, wait_seconds=5.0, force=False: setattr(proc, "stopped", True) or 0
-        _patch_run_round(_round)
+        loop._run_loop = _controlled_loop
         try:
             try:
                 loop.main(str(wl.dir))
@@ -401,7 +325,7 @@ def test_main_sigterm_handler(tmp: Path):
             except SystemExit as e:
                 assert e.code == 0
         finally:
-            _unpatch_run_round()
+            loop._run_loop = original_loop
             loop._Child.proc = None
             runtime.stop_process = orig_stop
     assert fake_proc.stopped
@@ -448,42 +372,9 @@ def test_cleanup_pid_swallows_oserror(tmp: Path):
     assert wl.pid.exists()
 
 
-# --- main loop: positive beat sleeps between rounds ------------------------ #
-
-def test_main_beat_sleep_between_rounds(tmp: Path):
-    """A positive DANUS_ROUND_BEAT makes the loop sleep between rounds; we stub
-    time.sleep so no real wall-clock time passes and record it fired."""
-    wl = _mk_worker(tmp)
-    slept = []
-    orig_sleep = time.sleep
-
-    def _one_then_stop(*a, **k):
-        wl.stop.touch()          # stop after the first round completes
-        return 0
-
-    time.sleep = lambda s: slept.append(s)
-    try:
-        with _restore_sigterm(), _env(DANUS_ROUND_BEAT="7", DANUS_MAX_ROUNDS="0",
-                                      DANUS_MAX_CONSEC_FAILURES="0"):
-            _patch_run_round(_one_then_stop)
-            try:
-                rc = loop.main(str(wl.dir))
-            finally:
-                _unpatch_run_round()
-    finally:
-        time.sleep = orig_sleep
-    assert rc == 0
-    assert 7 in slept                          # the beat sleep fired once
-
-
 # --- kickoff prompt -------------------------------------------------------- #
 
-def test_kickoff_mentions_worker_and_project():
-    p = loop.kickoff("ProjX", "wkrY")
-    assert "wkrY" in p and "ProjX" in p and "TASK.md" in p
-
-
-def test_v2_kickoff_is_scoped_without_full_assignment_dump():
+def test_kickoff_is_scoped_without_full_assignment_dump():
     assignment = {
         "target_version": "v0001",
         "obligation_id": "O",
@@ -493,7 +384,7 @@ def test_v2_kickoff_is_scoped_without_full_assignment_dump():
         "task": "Prove the assigned lemma.",
         "credited_evidence_refs": ["should-not-be-embedded"],
     }
-    prompt = loop.kickoff_v2("P", "high", assignment, audit=False, context="CTX")
+    prompt = loop.kickoff("P", "high", assignment, audit=False, context="CTX")
     assert all(value in prompt for value in ("v0001", "O", "R", "E", "CTX"))
     assert "Prove the assigned lemma." in prompt
     assert "should-not-be-embedded" not in prompt
@@ -585,35 +476,21 @@ def test_symlink_swallows_oserror(tmp: Path):
 
 # --- runner ---------------------------------------------------------------- #
 
-# run_round monkeypatch helpers (so the standalone runner works without pytest's
-# monkeypatch fixture): swap loop.run_round for the duration of a test.
-_ORIG_RUN_ROUND = loop.run_round
-
-
-def _patch_run_round(fn):
-    loop.run_round = fn
-
-
-def _unpatch_run_round():
-    loop.run_round = _ORIG_RUN_ROUND
-
-
-_NO_TMP = {test_kickoff_mentions_worker_and_project, test_dunder_main_usage_guard}
+_NO_TMP = {test_kickoff_is_scoped_without_full_assignment_dump,
+           test_dunder_main_usage_guard}
 
 
 def main() -> None:
     tests = [
         test_run_round_returns_codex_rc,
         test_run_round_success_rc0,
+        test_run_round_injects_the_worker_gateway_config,
+        test_run_round_interrupts_an_active_child_on_stop_request,
         test_run_round_hard_timeout_terminates,
         test_run_round_missing_binary_returns_127,
         test_run_round_timeout_then_kill,
         test_main_stops_on_stop_flag,
         test_main_stops_on_deadline,
-        test_main_max_rounds_cap,
-        test_main_consecutive_failure_cap,
-        test_main_timeout_rc124_does_not_count_as_failure,
-        test_main_codex_missing_127,
         test_main_missing_worker_dir,
         test_main_sigterm_handler,
         test_write_status_corrupt_existing_recovers,
@@ -621,8 +498,7 @@ def main() -> None:
         test_cleanup_pid_removes_own,
         test_cleanup_pid_keeps_foreign,
         test_cleanup_pid_swallows_oserror,
-        test_main_beat_sleep_between_rounds,
-        test_kickoff_mentions_worker_and_project,
+        test_kickoff_is_scoped_without_full_assignment_dump,
         test_dunder_main_dispatches,
         test_dunder_main_usage_guard,
         test_layout_defaults_and_empties,

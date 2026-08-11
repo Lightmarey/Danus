@@ -56,7 +56,7 @@ def test_v2_loop_runs_two_exploration_slices_then_independent_audit(tmp_path: Pa
 
     loop.run_round = fake
     try:
-        assert loop._run_v2_loop(
+        assert loop._run_loop(
             wl, {"MODEL": "m", "REASONING_EFFORT": "high"}, store, beat=0,
         ) == 0
     finally:
@@ -120,7 +120,7 @@ def test_timeout_without_report_uses_persisted_infra_budget_not_research_slices(
 
     loop.run_round = timeout
     try:
-        assert loop._run_v2_loop(wl, {"MODEL": "m", "REASONING_EFFORT": "high"}, store, beat=0) == 1
+        assert loop._run_loop(wl, {"MODEL": "m", "REASONING_EFFORT": "high"}, store, beat=0) == 1
     finally:
         loop.run_round = original
     assignment = store.assignment("high")
@@ -145,7 +145,7 @@ def test_quota_exhaustion_blocks_without_retry_or_slice_charge(tmp_path: Path):
 
     loop.run_round = quota
     try:
-        assert loop._run_v2_loop(wl, {"MODEL": "m", "REASONING_EFFORT": "high"}, store, beat=0) == 1
+        assert loop._run_loop(wl, {"MODEL": "m", "REASONING_EFFORT": "high"}, store, beat=0) == 1
     finally:
         loop.run_round = original
     assignment = store.assignment("high")
@@ -169,7 +169,7 @@ def test_operator_stop_records_partial_usage_without_consuming_a_slice(tmp_path:
 
     loop.run_round = interrupted
     try:
-        assert loop._run_v2_loop(
+        assert loop._run_loop(
             wl, {"MODEL": "m", "REASONING_EFFORT": "high"}, store, beat=0,
         ) == 0
     finally:

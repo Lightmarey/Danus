@@ -214,7 +214,6 @@ def test_clean_wheel_provisions_worker_and_verifier_agent_assets(tmp_path):
         archive.extractall(install)
     required = {
         "danus/_agent_assets/contracts/worker.md",
-        "danus/_agent_assets/contracts/worker_v2.md",
         "danus/_agent_assets/contracts/verifier.md",
         "danus/_agent_assets/skills/worker/check_conformance.py",
         "danus/_agent_assets/skills/worker/direct-proving/SKILL.md",
@@ -229,7 +228,7 @@ def test_clean_wheel_provisions_worker_and_verifier_agent_assets(tmp_path):
     }
     assert all(
         name in {
-            "contracts/worker.md", "contracts/worker_v2.md", "contracts/verifier.md",
+            "contracts/worker.md", "contracts/verifier.md",
             "skills/worker/check_conformance.py",
             "skills/verify/test_verification_schema.py",
         }
@@ -292,7 +291,6 @@ def test_sdist_can_build_the_same_clean_authoring_wheel(tmp_path):
         "danus/_authoring_assets/write-paper/templates/PROJECT_BRIEF.md.template",
         "danus/_authoring_assets/write-paper/templates/REVISION_LOG.md.template",
         "danus/_agent_assets/contracts/worker.md",
-        "danus/_agent_assets/contracts/worker_v2.md",
         "danus/_agent_assets/contracts/verifier.md",
         "danus/_agent_assets/skills/worker/direct-proving/SKILL.md",
         "danus/_agent_assets/skills/verify/verify-sequential-statements/SKILL.md",

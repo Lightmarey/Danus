@@ -1,13 +1,10 @@
-"""The per-worker autonomous outer loop — the round driver.
+"""The per-worker bounded exploration-slice driver.
 
 Launched detached by ``danus start`` (``python -m danus.execution <worker_dir>``).
-Self-contained. Each round runs ONE ``codex exec`` session
-whose internal control loop (worker.md + the worker skills) drives toward a full
-verified result — a round is *continue solving from persisted memory*, NOT one
-increment. The round ends when codex's session ends (its stopping rule, the
-per-round hard timeout, or it bails); the loop then relaunches a fresh session
-that resumes from memory. Stops on the ``.stop`` flag (graceful, at a round
-boundary), the project deadline, or a round backstop.
+Self-contained. Each slice runs one ``codex exec`` session bound to an approved
+target, obligation, route, assignment epoch, and finite lease. The controller
+scores its structured WorkReport and decides whether to renew, audit, fall back,
+pause, or complete.
 
 Config:
   - codex binary resolved via the shared ``danus.codex`` launcher
@@ -17,9 +14,6 @@ Config:
 Env (all optional; tests inject these):
   DANUS_CODEX_BIN            codex binary (default "codex")
   DANUS_ROUND_BEAT           seconds to sleep between rounds (default 5)
-  DANUS_ROUND_HARD_TIMEOUT   per-round hard timeout, seconds (default 14400 = 4h)
-  DANUS_MAX_ROUNDS           round backstop, 0 = unlimited (default 0)
-  DANUS_MAX_CONSEC_FAILURES  bail after this many consecutive failed rounds (default 5)
 """
 
 from __future__ import annotations
@@ -39,34 +33,17 @@ from . import scaffold
 from danus import codex, runtime
 from danus.control import (
     ControlError, ControlStore, parse_codex_usage, parse_work_report,
-    work_report_valid,
+    require_v2_project, work_report_valid,
 )
 from danus.research import ResearchQuery
 
 _FACT_ID_RE = re.compile(r'"?fact_id"?\s*[:=]\s*"?([0-9a-f]{16})"?')
 
 
-# --- the per-round prompt (continuation semantics; see worker.md) ----------- #
+# --- the slice prompt ------------------------------------------------------ #
 
-def kickoff(project: str, worker: str) -> str:
-    return (
-        f"You are worker '{worker}' on project '{project}'. Continue solving the "
-        f"problem (this is a continuation round, not a fresh start).\n"
-        f"1. Read TASK.md — your current assignment (which direction/subgoal is yours).\n"
-        f"2. Follow AGENTS.md (worker.md) exactly — your standing contract (the adaptive "
-        f"control loop, memory discipline, the fact_submit gate). Drive toward a full "
-        f"verified result.\n"
-        f"3. Resume from state: gm_search relevant findings + dead ends, read the fact "
-        f"graph and the latest master_guidance — DO NOT restart from zero; build on what "
-        f"is already there.\n"
-        f"4. Keep going: assess -> pick skills adaptively -> act -> persist, repeatedly. "
-        f"An open problem is not a reason to stop. Do NOT finalize prematurely.\n"
-        f"5. Persist as you go: rough progress to local memory; shareable findings via "
-        f"gm_add; any verified result via fact_submit."
-    )
-
-
-def kickoff_v2(project: str, worker: str, assignment: dict, *, audit: bool, context: str = "") -> str:
+def kickoff(project: str, worker: str, assignment: dict, *, audit: bool,
+            context: str = "") -> str:
     mode = (
         "This slice is an independent route audit. Do not repeat the route. Compare its "
         "failed signatures and evidence with the obligation, identify a genuinely new route "
@@ -194,23 +171,19 @@ class _Child:
 
 
 def run_round(wl: L.WorkerLayout, role: dict, prompt: str, log_path: Path,
-              hard_timeout: int, *, report_path: Optional[Path] = None,
-              output_schema: Optional[Path] = None,
+              hard_timeout: int, *, report_path: Path,
+              output_schema: Path,
               reservation_id: Optional[str] = None) -> int:
-    """Exec one ``codex exec`` continuation session. Returns codex's rc, 124 on
-    hard-timeout (terminate → wait 10s → kill), or 127 if the codex binary is
-    missing."""
+    """Exec one structured slice; return rc, timeout 124, or missing-bin 127."""
     wdir = wl.dir
     codex_bin = codex.resolve_bin()
-    structured = ["--json"]
-    if report_path is not None and output_schema is not None:
-        report_path.parent.mkdir(parents=True, exist_ok=True)
-        report_path.unlink(missing_ok=True)
-        structured = [
-            "--config", scaffold.worker_gateway_config_arg(wl),
-            "--output-schema", str(output_schema),
-            "--output-last-message", str(report_path),
-        ]
+    report_path.parent.mkdir(parents=True, exist_ok=True)
+    report_path.unlink(missing_ok=True)
+    structured = [
+        "--config", scaffold.worker_gateway_config_arg(wl),
+        "--output-schema", str(output_schema),
+        "--output-last-message", str(report_path),
+    ]
     cmd = codex.exec_cmd(
         codex_bin, role["MODEL"], role["REASONING_EFFORT"],
         "-C", str(wdir),
@@ -237,8 +210,6 @@ def run_round(wl: L.WorkerLayout, role: dict, prompt: str, log_path: Path,
             logf.write(f"[worker_loop] codex binary not found: {cmd[0]}\n")
             return 127
         try:
-            if report_path is None or output_schema is None:
-                return _Child.proc.wait(timeout=hard_timeout if hard_timeout > 0 else None)
             deadline = time.monotonic() + hard_timeout if hard_timeout > 0 else None
             while True:
                 wait_for = .5 if deadline is None else min(.5, max(.01, deadline - time.monotonic()))
@@ -275,16 +246,15 @@ def _cleanup_pid(wl: L.WorkerLayout) -> None:
         pass
 
 
-def refresh_worker_assets(wl: L.WorkerLayout, *, v2: bool = False) -> None:
-    contract = L.worker_v2_md() if v2 else L.worker_md()
-    runtime.sync_symlink_or_copy(contract, wl.dir / "AGENTS.md")
+def refresh_worker_assets(wl: L.WorkerLayout) -> None:
+    runtime.sync_symlink_or_copy(L.worker_md(), wl.dir / "AGENTS.md")
     runtime.sync_symlink_or_copy(
         L.worker_skills_dir(), wl.dir / ".agents" / "skills",
     )
 
 
-def _run_v2_loop(wl: L.WorkerLayout, role: dict, control: ControlStore, beat: float) -> int:
-    """Run finite, controller-scored exploration slices for one v2 assignment."""
+def _run_loop(wl: L.WorkerLayout, role: dict, control: ControlStore, beat: float) -> int:
+    """Run finite, controller-scored exploration slices for one assignment."""
     worker = wl.name
     while True:
         if wl.stop.exists():
@@ -323,7 +293,7 @@ def _run_v2_loop(wl: L.WorkerLayout, role: dict, control: ControlStore, beat: fl
         audit = bool(assignment.get("audit_required"))
         slice_no = int(assignment["slice_count"]) + 1
         manifest = ResearchQuery(wl.project_dir).build_context_manifest(worker)
-        prompt = kickoff_v2(
+        prompt = kickoff(
             wl.project, worker, assignment, audit=audit,
             context=ResearchQuery.format_context_manifest(manifest),
         )
@@ -421,22 +391,21 @@ def main(worker_dir: str) -> int:
         return 2
     wl = L.WorkerLayout(wdir)
     project_dir = wl.project_dir
-    project = wl.project
-    worker = wl.name
+    try:
+        require_v2_project(project_dir)
+    except ControlError as exc:
+        write_status(wl, state="error", control_reason=str(exc), error=str(exc))
+        return 2
     role = _read_role(wl)
     control = ControlStore(project_dir)
-    refresh_worker_assets(wl, v2=control.enabled)
+    refresh_worker_assets(wl)
 
     # Refresh the worker gateway command from the shared runtime resolver on every
     # start, so a moved/rebuilt or explicitly configured interpreter is picked up.
     scaffold.write_codex_config(wl)
 
     beat = float(os.environ.get("DANUS_ROUND_BEAT", "5"))
-    hard_timeout = int(os.environ.get("DANUS_ROUND_HARD_TIMEOUT", "14400"))
-    max_rounds = int(os.environ.get("DANUS_MAX_ROUNDS", "0"))
-    max_fail = int(os.environ.get("DANUS_MAX_CONSEC_FAILURES", "5"))
     wl.logs.mkdir(parents=True, exist_ok=True)
-    prompt = kickoff(project, worker)
 
     def _on_term(signum, _frame):
         if _Child.proc is not None:
@@ -453,42 +422,7 @@ def main(worker_dir: str) -> int:
         last_rc=None, last_fact_id=None, usage_status=None, control_reason=None,
         error=None,
     )
-    rnd = 0
-    consec_fail = 0
     try:
-        if control.enabled:
-            return _run_v2_loop(wl, role, control, beat)
-        while True:
-            if wl.stop.exists():
-                wl.stop.unlink(missing_ok=True)
-                write_status(wl, state="stopped")
-                break
-            if _deadline_passed(project_dir):
-                write_status(wl, state="deadline")
-                break
-            if max_rounds and rnd >= max_rounds:
-                write_status(wl, state="max_rounds")
-                break
-
-            rnd += 1
-            log_path = wl.logs / f"round_{rnd}.log"
-            write_status(wl, state="running", round=rnd, round_started_at=time.time())
-            rc = run_round(wl, role, prompt, log_path, hard_timeout)
-            write_status(
-                wl, state="idle", round=rnd, last_round_at=time.time(),
-                last_rc=rc, last_fact_id=_parse_last_fact_id(log_path),
-            )
-
-            if rc == 127:                    # codex missing — do not spin
-                write_status(wl, state="error", error="codex binary not found")
-                return 127
-            consec_fail = consec_fail + 1 if rc not in (0, 124) else 0
-            if max_fail and consec_fail >= max_fail:
-                write_status(wl, state="error", error=f"{consec_fail} consecutive failed rounds")
-                return 1
-
-            if beat > 0:
-                time.sleep(beat)
+        return _run_loop(wl, role, control, beat)
     finally:
         _cleanup_pid(wl)
-    return 0

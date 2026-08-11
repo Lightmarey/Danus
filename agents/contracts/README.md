@@ -7,8 +7,7 @@ the binding operating protocol, distinct from the on-demand skills under
 | File | Tier | Reads / writes |
 | --- | --- | --- |
 | `main_agent.md` | Codex main agent | reads global memory + fact graph; writes `master_guidance` / `elaboration` (`gm_add`); `fact_revoke`; high-autonomy orchestration. NO `fact_submit`. |
-| `worker.md` | legacy codex worker | local memory (private) · global memory (`gm_add` / `gm_search`) · fact graph (`fact_submit`); the autonomous adaptive proving loop. |
-| `worker_v2.md` | controlled v2 worker | compact assignment-bound contract; uses the supplied ContextManifest and expands facts only on demand. |
+| `worker.md` | controlled worker | compact assignment-bound contract; uses the supplied ContextManifest and expands facts only on demand. |
 | `verifier.md` | codex verifier (verify service) | judges `{statement, proof}` → strict verdict; called by `fact_submit`; read-only (only `search_arxiv_theorems`); writes its verdict JSON directly to results/{run_id}/verification.json. |
 
 Codex auto-loads the condensed repo guidance from root `AGENTS.md`;
@@ -37,8 +36,7 @@ Consistent across all three tiers:
 - `danus/verify` — `verifier.md` **is** the verify service's system prompt; its
   P1/P3/P5/P6 prohibitions pair with the server's single-line prechecks (and are
   the sole enforcement wherever those prechecks are off).
-- `danus/execution` — links the worker home's `AGENTS.md` to `worker.md` for
-  legacy projects or `worker_v2.md` for transactional v2 projects.
+- `danus/execution` — links every worker home's `AGENTS.md` to the single
+  assignment-bound `worker.md` contract.
 - `agents/skills/worker` & `agents/skills/verify` — the contracts reference `$…`
-  skills by name; the reconciliation note in `worker.md` tells inherited skills to
-  defer to this data model.
+  skills by name; inherited skills defer to this data model.

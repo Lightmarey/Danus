@@ -1,7 +1,7 @@
-# danus/execution — the worker swarm (round loop + scaffolding + layout)
+# danus/execution — the worker swarm (slice loop + scaffolding + layout)
 
 Where `codex` workers actually prove. This module owns the on-disk
-**layout**, project/worker **scaffolding**, and the per-worker **round loop**. The
+**layout**, project/worker **scaffolding**, and the per-worker **slice loop**. The
 `danus` CLI (`danus/orchestration`) is a thin UX layer over this; the real lifecycle
 lives here.
 
@@ -9,7 +9,7 @@ lives here.
 danus/execution/
   layout.py     paths + names; WorkerLayout; parse_roles("high:3,xhigh:4")
   scaffold.py   do_new (project + worker dirs, .codex config, symlinks), spawn_loop
-  loop.py       the round loop: kickoff prompt, run_round, stop conditions, status
+  loop.py       bounded slice loop: context, WorkReport, stop conditions, status
   __main__.py   `python -m danus.execution <worker_dir>` → loop.main
   tests/{test_execution.py, test_loop.py}
 ```
@@ -24,26 +24,24 @@ danus/execution/
 control files (`.status.json` `.pid` `.stop` `logs/`). `agents_root` =
 `DANUS_AGENTS_ROOT` (default `runtime/projects`).
 
-## The round loop (`loop.py`)
+## The slice loop (`loop.py`)
 
-A **round = one `codex exec` continuation session** that resumes from persisted
-memory (NOT one increment). Launched detached in its **own process group**
+A **slice = one structured `codex exec` session** bound to an approved target,
+obligation, route, assignment epoch, and finite lease. It is launched detached in
+its **own process group**
 (`start_new_session`), so it survives your shell and `stop --force` can `killpg` the
-loop + its codex child. Stop conditions checked at the round boundary: `.stop` flag,
-`.run_deadline`, `DANUS_MAX_ROUNDS` (0 = unlimited), `DANUS_MAX_CONSEC_FAILURES`
-(5). Config read at call time (`DANUS_ROUND_HARD_TIMEOUT` 4h, `DANUS_ROUND_BEAT` 5s).
-`.status.json` is written atomically. **Resumability is continuity in the stores**,
-not process state — a fresh `start` rebuilds context from memory + the fact graph.
+loop + its codex child. The assignment supplies the slice timeout and route cap;
+`.stop` and `.run_deadline` remain hard stops. The controller scores each
+WorkReport and decides whether to renew, audit, fall back, pause, or complete.
+`.status.json` is written atomically. Resumability comes from SQLite control state
+and the verified fact graph, not process state.
 
 ## Connects to
 
-Legacy projects read `TASK.md` + `master_guidance` and retain the autonomous
-round loop. V2 projects instead require an approved target and a structured
-assignment, run one JSON-schema-constrained exploration slice at a time, and let
-the controller renew, audit, fall back, or pause the route. Both write facts
-only via a worker's `fact_submit` (gateway → verify). The loop itself never writes
-the truth stores — it only scrapes the resulting `fact_id` from the round log for
-status.
+Projects require an approved target and a structured assignment before they can
+start. Unmigrated projects are rejected with `danus migrate <project>`. Workers
+write facts only through `fact_submit` (gateway → verifier); the loop itself never
+writes mathematical truth.
 
 ## Tests
 

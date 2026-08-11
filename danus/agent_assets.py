@@ -6,7 +6,7 @@ from pathlib import Path
 _SOURCE_ROOT = Path(__file__).resolve().parent.parent / "agents"
 _PACKAGED_ROOT = Path(__file__).resolve().parent / "_agent_assets"
 _CHECKOUT_ROOT = _SOURCE_ROOT.parent
-_ROLES = {"worker", "worker_v2", "verifier"}
+_ROLES = {"worker", "verifier"}
 
 
 def _resolve(relative: Path) -> Path:

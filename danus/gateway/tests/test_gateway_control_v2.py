@@ -81,7 +81,7 @@ def test_fact_submit_claim_role_schema_matches_worker_contract():
     schemas = tool.parameters["properties"]["claim_role"]["anyOf"]
     enum = next(item["enum"] for item in schemas if "enum" in item)
     assert tuple(enum) == server.CLAIM_ROLES
-    contract = (Path(__file__).parents[3] / "agents" / "contracts" / "worker_v2.md").read_text(encoding="utf-8")
+    contract = (Path(__file__).parents[3] / "agents" / "contracts" / "worker.md").read_text(encoding="utf-8")
     assert all(f"`{role}`" in contract for role in server.CLAIM_ROLES)
 
 
