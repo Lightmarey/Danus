@@ -8,7 +8,7 @@
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-Apache%202.0-4c1" alt="Apache 2.0 license"></a>
 </p>
 
-Danus orchestrates mathematical reasoning agents with fact-graph memory. A main
+Danus orchestrates mathematical reasoning agents with fact-graph memory. A
 Codex main agent steers a swarm of autonomous Codex workers that prove; a
 cold-start verifier is the sole authority on correctness: a result becomes real
 only once it passes. Verified results accumulate in a content-addressed fact
@@ -51,14 +51,13 @@ Every claim enters truth through one cycle:
 <p align="center"><img src="docs/assets/verify-loop.png" width="820" alt="The submit–verify–repair cycle: a worker submits a statement and proof citing existing facts; a fresh verifier instance accepts it into the fact graph or rejects it with repair hints"></p>
 
 A worker typically focuses on one claim at a time — a lemma, a counterexample, a
-toy example — rather than an entire proof. It repeatedly submits the claim with a
-supporting proof and revises it under the verifier's feedback until it passes, at
-which point the claim enters the fact graph as a fact, with the facts its proof
-depends on as its incoming edges. The verifier is stateless: a fresh instance
-judges each submission and retains nothing afterwards. Because each worker draws
-on only the facts it needs for its current claim and submits one fact at a time,
-the working context stays small even as the proof grows to many pages — and many
-workers' contributions accumulate into one shared structure.
+toy example — rather than an entire proof. Candidates are staged durably before
+verification. The verifier can judge one candidate or a semantic theorem group of
+up to six in one cold Codex process; every candidate still receives its own verdict
+and fact identity, and accepted siblings do not make rejected ones true. A worker
+then repairs only the rejected claims. Because workers receive a bounded database
+snapshot rather than every earlier proof, the working context stays small even as
+many workers' contributions accumulate into one shared structure.
 
 The graph below is the fact graph of a real research run: **3,157 verified facts
 and 8,616 dependency edges**, in dependency chains up to 54 facts deep (nodes
@@ -69,6 +68,32 @@ that the final proof never cites, and an independent re-derivation of one of its
 bounds.
 
 <p align="center"><img src="docs/assets/fact-graph.png" width="440" alt="The fact graph of a real run: 3,157 verified facts and 8,616 dependency edges, nodes darkening and growing with dependency depth"></p>
+
+## V2 engineering: stable long runs with bounded context
+
+V2 treats agent processes as disposable and mathematical state as durable. The
+fact graph remains the correctness source; SQLite is the transactional control and
+query layer around it.
+
+| Goal | Engineering implementation | Result |
+|---|---|---|
+| **Recover safely** | `control/control.sqlite3` stores versioned targets, obligations, routes, assignment epochs, checkpoints, obstacles, events, call reservations, and provider-circuit state. Pending candidates are staged in global memory before verification; verifier requests use content-derived IDs and replay completed results after a lost response. | A crash, forced stop, timeout, or disconnect does not turn process state into mathematical truth or require rediscovering queued work. Stale workers cannot write into a newer assignment. |
+| **Make large runs visible** | Accepted Markdown facts are indexed into rebuildable SQLite fact, edge, scope, checkpoint, obstacle, and FTS5 tables. One snapshot-aware `ResearchQuery` serves MCP reads, the dashboard, authoring, and worker context. | Visualization and route inspection query indexed graph slices instead of reparsing thousands of Markdown files. Every view refers to one database generation, so facts, edges, routes, and failures stay consistent. |
+| **Spend fewer input tokens** | A `ContextManifest` follows database edges from the current obligation and route, enriches only a bounded number of relevant facts with statements, leaves the rest title-only, and expands proofs only on request. The database supplies predecessor, scope, distance, and search relations rather than asking the LLM to rediscover them. | Long proofs grow in storage without being copied into every round. Workers see the local support closure and a few FTS candidates, not the whole fact graph. |
+| **Amortize verification** | Candidates with the same durable `verification_goal` can be sent through `fact_submit_batch` as a 1–6 fact theorem group. One cold verifier reads the shared context once, then returns ordered per-fact reports; partial acceptance, per-fact persistence, and fail-closed schema validation remain mandatory. | Closely related lemmas share verifier input and startup cost without weakening the fact-level correctness boundary. The bound is a safety cap, not a fixed wait threshold. |
+| **Control failure** | Provider errors use persistent bounded retry and a shared circuit breaker without consuming a mathematical round. Repeated low-information rounds trigger an independent audit; continued failure stalls or activates an already-approved fallback route. Rejected facts become durable obstacles with repair hints. Target fallback is drafted for human approval. | The system neither loops forever nor silently changes the theorem. It resumes useful work, avoids known dead ends, and reports the best verified state when progress is exhausted. |
+
+Expensive calls reserve wall-time and optional cost before they start, then settle
+against measured Codex usage. A round timeout lets an in-flight verifier finish its
+fact commit and accounting; an explicit operator stop cancels immediately. This
+keeps concurrency available while preventing orphaned verifier results or invisible
+token spend.
+
+Writing uses the same indexed graph rather than loading the entire proof corpus. The
+database computes the target's predecessor closure and returns a compact skeleton;
+the main agent selects the load-bearing facts, and the writer receives those facts
+in full plus the direct predecessor statements it must cite. The assembled paper is
+then verified again as one document.
 
 ## Layout
 
@@ -143,8 +168,8 @@ remain available but are not required by the core path.
 
 - Three memory tiers, one correctness boundary: only the verifier-gated fact graph
   is truth; global memory is awareness.
-- Permission is enforced by the MCP role table (main cannot `fact_submit`; the
-  verifier is read-only).
+- Permission is enforced by the MCP role table (main has no fact-submission tools;
+  the verifier is read-only).
 - Content-addressed, cascade-revocable facts; the verifier is the sole write-gate.
 - The finished paper is itself re-verified as written (a dedicated paper-math
   verifier reads the whole document) before delivery, on top of the per-fact
