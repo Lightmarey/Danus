@@ -176,7 +176,7 @@ def test_terminate_process_tree_waits_for_windows_descendants():
         runtime._wait_for_dead_pids = real_wait  # type: ignore[assignment]
         runtime._taskkill_windows_pid = real_taskkill  # type: ignore[assignment]
         runtime._terminate_windows_pid = real_terminate  # type: ignore[assignment]
-    assert calls == [(101, True), (100, True)]  # descendants first; no pre-kill wait
+    assert calls == [(100, True)]  # one native tree kill; no per-PID process startup
     assert terminated == [101]
     assert waits == []
 

@@ -66,12 +66,21 @@ separate slice or lease abstraction.
 
 ## Fact binding and recovery
 
-A worker's `fact_submit` must include the current
-`target_version`, `obligation_id`, `route_id`, `assignment_epoch`, `claim_role`,
-`assumptions_used`, `closes_obligation`, and a one-line 4-80 character
-`display_title`. The title is stored in Markdown but is not part of `fact_id`;
+A worker stages `claim_role`, `assumptions_used`, `closes_obligation`, and a
+one-line 4-80 character `display_title`, then calls `fact_submit_batch`. The
+gateway stamps and checks the current assignment scope. The title is stored in
+Markdown but is not part of `fact_id`;
 the first accepted title wins for duplicate mathematical content. Stale assignments, forbidden or
 undeclared assumptions, and tainted predecessors are rejected before verification.
+
+Before adaptive batching, each candidate is a verifiable global-memory entry; the
+gateway stamps its current assignment scope alongside a semantic
+`verification_goal`. This is durable non-truth,
+not a fact. `fact_submit_batch` loads 1-6 such `source_id`s. The bound is only a
+safety cap: a semantic group flushes when complete or at round end, including a
+singleton. Verdicts, source statuses, fact IDs, traces, and partial rejection
+remain per candidate; in-batch predecessor references are forbidden. After an
+interruption, pending IDs reappear in `ContextManifest.pending_verification`.
 
 `claim_role` is an MCP-schema enum: `unconditional`, `conditional`,
 `counterexample`, or `literature_import`. Ordinary positive lemmas and theorems
@@ -157,12 +166,27 @@ unknown, the reserved ceiling is recorded as `estimated_ceiling`, never as zero.
 
 A verifier call made inside a worker round is a child reservation: its wall time
 is recorded as `nested_wall_seconds` and is not counted a second time against the
-project wall budget, while its token and monetary cost remain separate. A real
+project wall budget, while its token and monetary cost remain separate. A round
+deadline stops new exploration but drains an already-running child through the
+verdict, fact commit, and settlement; the child's own timeout remains the bound.
+A real
 wall/cost reservation rejection is a typed control event, forces `gain=none`, and
 cannot be reframed as medium progress using old evidence. An operator stop
 interrupts an active v2 child promptly, settles the reservation, records partial
 usage when the provider emitted it (otherwise `usage_status=unavailable`), and
 does not consume a research round.
+
+Forced stop and dead-worker restart also run an idempotent reconciliation: live
+nested verifier reservations are cancelled before the parent round reservation
+is settled, the assignment becomes runnable again, and no research round is
+charged. If reservation expiry already ran, persisted active-round status still
+records unavailable usage and elapsed wall time. Completed-round idle time is
+distinguished by `last_round_at`, so it is not mischarged as an interruption.
+
+Verifier HTTP requests are content-addressed. A dropped connection may put the
+assignment into bounded transport retry, but the staged source remains durable;
+the same retry request waits for or replays the existing verifier artifact and
+token usage rather than launching a duplicate verifier.
 
 Transport and provider failures do not consume route rounds or low-gain counts.
 They do consume their real wall time and known or reserved cost. Bounded retries

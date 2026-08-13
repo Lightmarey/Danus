@@ -122,6 +122,11 @@ def test_do_new_scaffolds_project(tmp: Path):
             assert "(unassigned" in wl.task.read_text()
             assert json.loads(wl.status.read_text())["state"] == "created"
 
+        inline = scaffold.worker_gateway_config_arg(
+            L.WorkerLayout(L.worker_dir("P", "high")), "parent-reservation",
+        )
+        assert 'DANUS_CALL_RESERVATION_ID="parent-reservation"' in inline
+
 
 def test_do_new_refuses_existing(tmp: Path):
     with _project_env(tmp):
@@ -186,6 +191,17 @@ def test_parse_last_fact_id(tmp: Path):
     assert loop._parse_last_fact_id(log) is None
     rejected["item"]["result"]["structured_content"]["result"] = {
         "accepted": True, "fact_id": "fedcba9876543210",
+    }
+    log.write_text(json.dumps(rejected) + "\n")
+    assert loop._parse_last_fact_id(log) == "fedcba9876543210"
+    rejected["item"]["tool"] = "fact_submit_batch"
+    rejected["item"]["result"]["structured_content"]["result"] = {
+        "accepted": False,
+        "results": [
+            {"accepted": True, "fact_id": "0123456789abcdef"},
+            {"accepted": False},
+            {"accepted": True, "fact_id": "fedcba9876543210"},
+        ],
     }
     log.write_text(json.dumps(rejected) + "\n")
     assert loop._parse_last_fact_id(log) == "fedcba9876543210"

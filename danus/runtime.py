@@ -454,11 +454,10 @@ def terminate_process_tree(pid: int, *, force: bool, wait_seconds: float = 5.0) 
     if is_windows():
         tracked_pids = [pid, *_windows_descendant_pids(pid)]
         if force:
-            # Kill the snapshot immediately. Waiting for a dead wrapper PID
-            # before touching its live descendants turns a 1s timeout into a
-            # multi-stage 20-30s stall and leaves inherited pipes open.
-            for target in reversed(tracked_pids):
-                _taskkill_windows_pid(target, force=True)
+            # One native tree kill covers descendants without spawning one
+            # ``taskkill`` process per PID.  Directly killing only the snapshot
+            # can miss descendants created while termination is in progress.
+            _taskkill_windows_pid(pid, force=True)
             survivors = _wait_for_dead_pids(
                 tracked_pids, timeout_seconds=wait_seconds,
             )

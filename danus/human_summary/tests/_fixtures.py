@@ -60,13 +60,13 @@ def prepare_v2_project(dst: Path) -> None:
         "input_fact_ids": [],
     })
     for fid in fact_ids:
-        store.prepare_fact(fid, {"reused": True, "scope": {
+        submission_id = store.prepare_fact(fid, {"reused": True, "scope": {
             "worker": "fixture", "assignment_epoch": "fixture-epoch",
             "target_version": "v0001", "obligation_id": obligation,
             "route_id": "summary-route", "claim_role": "unconditional",
             "assumptions_used": [],
         }})
-        store.finalize_fact(fid)
+        store.finalize_fact(fid, submission_id)
     store.set_obligation_state(
         obligation, "closed", actor="fixture", fact_id=closing,
         assignment_epoch="fixture-epoch",

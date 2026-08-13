@@ -92,12 +92,116 @@ def test_verify_accept_contract():
     assert "repair_hints" in body
 
 
+def test_verify_forwards_timeout_and_cancel_path():
+    captured = {}
+
+    def fake(run_id, statement, proof, timeout_seconds=None, cancel_path=None):
+        captured["timeout_seconds"] = timeout_seconds
+        captured["cancel_path"] = cancel_path
+        return _CANNED_OK
+
+    with _fake_run(fake):
+        resp = _client().post(
+            "/verify", json={
+                "statement": _STMT, "proof": _PROOF,
+                "timeout_seconds": 17, "cancel_path": "C:/tmp/worker.stop",
+            },
+        )
+    assert resp.status_code == 200
+    assert captured["timeout_seconds"] == 17
+    assert captured["cancel_path"] == "C:/tmp/worker.stop"
+
+
+def test_verify_batch_contract_and_single_launch():
+    calls = []
+    original = service.run_codex_batch_verification
+
+    def fake(run_id, verification_goal, candidates, timeout_seconds=None, cancel_path=None):
+        calls.append((run_id, verification_goal, candidates, timeout_seconds, cancel_path))
+        return {
+            "verifications": [
+                dict(_CANNED_OK, candidate_id=candidate["candidate_id"])
+                for candidate in candidates
+            ],
+            "usage": {"input_tokens": 100},
+        }
+
+    service.run_codex_batch_verification = fake
+    try:
+        response = _client().post("/verify-batch", json={
+            "verification_goal": "Integer identities",
+            "candidates": [
+                {"candidate_id": "a", "statement": _STMT, "proof": _PROOF},
+                {"candidate_id": "b", "statement": _STMT + " Again.", "proof": _PROOF},
+            ],
+            "timeout_seconds": 17,
+        })
+    finally:
+        service.run_codex_batch_verification = original
+    assert response.status_code == 200
+    assert len(calls) == 1 and calls[0][1] == "Integer identities" and calls[0][3] == 17
+    assert [item["candidate_id"] for item in response.json()["verifications"]] == ["a", "b"]
+
+
+def test_verify_batch_precheck_rejects_only_bad_candidate():
+    original = service.run_codex_batch_verification
+    calls = []
+
+    def fake(run_id, goal, candidates, **kwargs):
+        calls.append(candidates)
+        return {
+            "verifications": [dict(_CANNED_OK, candidate_id=candidates[0]["candidate_id"])],
+            "usage": {"input_tokens": 50},
+        }
+
+    service.run_codex_batch_verification = fake
+    try:
+        response = _client().post("/verify-batch", json={
+            "verification_goal": "Integer identities", "candidates": [
+            {"candidate_id": "a", "statement": _STMT, "proof": _PROOF},
+            {"candidate_id": "b", "statement": _STMT, "proof": "QED"},
+        ]})
+    finally:
+        service.run_codex_batch_verification = original
+    assert response.status_code == 200 and len(calls) == 1
+    assert [item["candidate_id"] for item in calls[0]] == ["a"]
+    assert [item["verdict"] for item in response.json()["verifications"]] == ["correct", "wrong"]
+
+
+def test_verify_batch_all_precheck_rejected_starts_no_codex():
+    original = service.run_codex_batch_verification
+    service.run_codex_batch_verification = _must_not_run
+    try:
+        response = _client().post("/verify-batch", json={
+            "verification_goal": "Integer identities", "candidates": [
+                {"candidate_id": "a", "statement": _STMT, "proof": "QED"},
+            ],
+        })
+    finally:
+        service.run_codex_batch_verification = original
+    assert response.status_code == 200
+    assert response.json()["verifications"][0]["verdict"] == "wrong"
+    assert response.json()["usage"] == {}
+
+
 def test_verify_reject_verdict_still_200():
     # a "wrong" verdict is a normal 200 response (the verdict is the payload).
-    canned = dict(_CANNED_OK, verdict="wrong", repair_hints="fix the gap")
+    canned = dict(
+        _CANNED_OK, verdict="wrong", repair_hints="fix the gap",
+        verification_report={
+            "summary": "gap", "critical_errors": [],
+            "gaps": [{"location": "proof", "issue": "missing step"}],
+        },
+    )
     with _fake_run(lambda run_id, statement, proof: canned):
         resp = _client().post("/verify", json={"statement": _STMT, "proof": _PROOF})
     assert resp.status_code == 200 and resp.json()["verdict"] == "wrong"
+
+
+def test_verify_malformed_correct_verdict_is_500():
+    with _fake_run(lambda run_id, statement, proof: {"verdict": "correct"}):
+        resp = _client().post("/verify", json={"statement": _STMT, "proof": _PROOF})
+    assert resp.status_code == 500 and "invalid verifier output" in resp.json()["detail"]
 
 
 # --------------------------------------------------------------------------- #

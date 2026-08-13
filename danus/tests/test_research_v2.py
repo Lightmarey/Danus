@@ -8,7 +8,7 @@ from pathlib import Path
 from fastapi.testclient import TestClient
 
 from danus.control import ControlError, ControlStore
-from danus.core import FactGraph
+from danus.core import FactGraph, GlobalMemory
 from danus.research import ResearchQuery
 
 observability_app = importlib.import_module("danus.observability.app")
@@ -139,6 +139,8 @@ def test_fact_title_pending_recovery_scopes_and_manifest_are_deterministic(tmp_p
     first = query.build_context_manifest("high")
     second = query.build_context_manifest("high")
     assert first == second
+    formatted = query.format_context_manifest(first)
+    assert 'Allowed assumptions (copy exact list entries into assumptions_used): []' in formatted
     assert first["facts"][0]["title"] == "Readable target theorem"
     assert "assignment_new" in first["facts"][0]["reasons"]
     assert all("fts_candidate" not in fact["reasons"] for fact in first["facts"])
@@ -154,6 +156,56 @@ def test_fact_title_pending_recovery_scopes_and_manifest_are_deterministic(tmp_p
     assert query.target_proof_manifest("v0001")["complete"] is False
 
 
+def test_context_manifest_recovers_pending_verification_sources_without_generation_change(tmp_path: Path):
+    project, store, target = _project(tmp_path)
+    store.approve_target(target["version"])
+    store.add_route({"id": "r1", "obligation_id": "v0001-T", "method_title": "Direct", "expected_result": "T"})
+    assignment = store.assign("high", obligation_id="v0001-T", route_id="r1", task="prove T")
+    query = ResearchQuery(project)
+    assert query.build_context_manifest("high")["pending_verification"] == []
+    source_id = GlobalMemory(project).append(
+        "proof_attempt", claim="A durable candidate", evidence="A complete proof",
+        author="high", verifiable=True,
+        links={
+            "target_version": "v0001", "obligation_id": "v0001-T", "route_id": "r1",
+            "assignment_epoch": assignment["epoch"], "verification_goal": "T theorem group",
+        },
+    )
+    recovered = query.build_context_manifest("high")["pending_verification"]
+    assert recovered == [{
+        "source_id": source_id, "kind": "proof_attempt", "status": "unverified",
+        "verification_goal": "T theorem group", "title": "A durable candidate",
+    }]
+    assert "Resume or submit these staged sources before re-deriving them." in query.format_context_manifest(
+        query.build_context_manifest("high")
+    )
+    GlobalMemory(project).set_status(source_id, "verified", fact_id="0123456789abcdef")
+    assert query.build_context_manifest("high")["pending_verification"] == []
+    obstacle_id = GlobalMemory(project).append(
+        "obstacle", claim="Verifier rejected: durable candidate",
+        evidence=json.dumps({"repair_hints": "Fix the missing endpoint case."}),
+        author="high", verifiable=False,
+        links={
+            "source_id": source_id, "verification_goal": "T theorem group",
+            "target_version": "v0001", "obligation_id": "v0001-T", "route_id": "r1",
+            "assignment_epoch": assignment["epoch"],
+        },
+    )
+    obstacles = query.build_context_manifest("high")["verification_obstacles"]
+    assert obstacles == [{
+        "id": obstacle_id, "source_id": source_id,
+        "verification_goal": "T theorem group",
+        "assignment_epoch": assignment["epoch"],
+        "title": "Verifier rejected: durable candidate",
+        "repair_hints": "Fix the missing endpoint case.",
+    }]
+    replacement = store.assign(
+        "high", obligation_id="v0001-T", route_id="r1", task="repair T",
+    )
+    assert replacement["epoch"] != assignment["epoch"]
+    assert query.build_context_manifest("high")["verification_obstacles"][0]["id"] == obstacle_id
+
+
 def test_same_fact_can_be_shared_by_routes_and_indexed_reads_do_not_open_markdown(tmp_path: Path, monkeypatch):
     project, store, target = _project(tmp_path)
     store.approve_target(target["version"])
@@ -161,8 +213,8 @@ def test_same_fact_can_be_shared_by_routes_and_indexed_reads_do_not_open_markdow
     store.add_route({"id": "r2", "obligation_id": "v0001-T", "method_title": "Method B", "expected_result": "T", "novelty_basis": ["different method"]})
     fact_id = FactGraph(project).add(problem_id="P", author="high", display_title="Shared supporting lemma", statement="L", proof="proof")
     for route in ("r1", "r2"):
-        store.prepare_fact(fact_id, {"reused": route == "r2", "scope": {"worker": "high", "target_version": "v0001", "obligation_id": "v0001-T", "route_id": route, "assignment_epoch": route, "claim_role": "unconditional", "assumptions_used": []}})
-        store.finalize_fact(fact_id)
+        submission_id = store.prepare_fact(fact_id, {"reused": route == "r2", "scope": {"worker": "high", "target_version": "v0001", "obligation_id": "v0001-T", "route_id": route, "assignment_epoch": route, "claim_role": "unconditional", "assumptions_used": []}})
+        store.finalize_fact(fact_id, submission_id)
     query = ResearchQuery(project)
     assert query.route_context("r1")["fact_group"]["facts"][0]["shared"] is True
     original = Path.read_text
@@ -175,6 +227,34 @@ def test_same_fact_can_be_shared_by_routes_and_indexed_reads_do_not_open_markdow
     from danus.human_summary import assemble as summary_assemble
     assert "Shared supporting lemma" not in summary_assemble.fact_bundle(project)
     assert "## statement\n\nL" in summary_assemble.fact_bundle(project)
+
+
+def test_interleaved_identical_fact_submissions_preserve_each_scope(tmp_path: Path):
+    project, store, target = _project(tmp_path)
+    store.approve_target(target["version"])
+    store.add_route({"id": "r1", "obligation_id": "v0001-T", "method_title": "Method A", "expected_result": "T"})
+    fact_id = FactGraph(project).add(
+        problem_id="P", author="high", display_title="Concurrent lemma",
+        statement="L", proof="proof",
+    )
+    submissions = []
+    for worker, epoch in (("high", "epoch-1"), ("high2", "epoch-2")):
+        submissions.append(store.prepare_fact(fact_id, {"reused": False, "scope": {
+            "worker": worker, "target_version": "v0001", "obligation_id": "v0001-T",
+            "route_id": "r1", "assignment_epoch": epoch,
+            "claim_role": "unconditional", "assumptions_used": [],
+        }}))
+
+    for submission_id in submissions:
+        store.finalize_fact(fact_id, submission_id)
+
+    assert [event["worker"] for event in store.events("fact_linked")[-2:]] == ["high", "high2"]
+    with store._connect() as db:
+        epochs = [row[0] for row in db.execute(
+            "SELECT assignment_epoch FROM fact_scopes WHERE fact_id=? AND relation='direct' ORDER BY assignment_epoch",
+            (fact_id,),
+        )]
+    assert epochs == ["epoch-1", "epoch-2"]
 
 
 def test_control_http_requires_capability_origin_and_generation(tmp_path: Path, monkeypatch):
@@ -198,6 +278,8 @@ def test_browser_view_state_has_no_persistent_or_write_path():
     assert "localStorage" not in script
     assert "e.connectionFailure = true" in script
     assert "/api/research/map" in script
+    assert "state.enabled" not in script
+    assert "Legacy project — v2 research control is not enabled." not in script
     assert "/api/factgraph" not in script
     assert "function renderFactResearchMap(d)" in script
     assert "selectFactGraphRoute" in script

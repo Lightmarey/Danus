@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import time
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -134,3 +135,82 @@ def test_target_change_stales_assignment_and_fallback_remains_draft(tmp_path: Pa
         approved = cli.do_target("P", "approve", version=fallback["version"])
         assert approved["stale_workers"] == []
         assert store.assignment("high")["status"] == "stale"
+
+
+def test_start_recovers_crashed_round_before_spawning(tmp_path: Path, monkeypatch):
+    with _env(tmp_path):
+        result = cli.do_new("P", roles="high:1")
+        project = Path(result["project_dir"])
+        store = ControlStore(project)
+        target = store.propose_target({
+            "statement": "T", "allowed_assumptions": [], "forbidden_assumptions": [],
+            "required_conclusions": ["T"], "fallback_candidates": [],
+        })
+        store.approve_target(target["version"])
+        store.add_route({
+            "id": "r1", "obligation_id": "v0001-root-1",
+            "method_family": "direct", "expected_result": "T",
+        })
+        assignment = store.assign(
+            "high", obligation_id="v0001-root-1", route_id="r1", task="T",
+        )
+        assignment["status"] = "running"
+        store.save_assignment(assignment)
+        scope = {
+            "worker": "high", "assignment_epoch": assignment["epoch"],
+            "target_version": assignment["target_version"],
+            "obligation_id": assignment["obligation_id"],
+            "route_id": assignment["route_id"],
+        }
+        parent = store.reserve_call(
+            component="worker_round", max_wall_seconds=30, **scope,
+        )
+        store.reserve_call(
+            component="verification", max_wall_seconds=30,
+            parent_reservation_id=parent["id"], **scope,
+        )
+        worker = project / "workers" / "high"
+        (worker / ".pid").write_text("99999999", encoding="utf-8")
+        (worker / ".status.json").write_text(json.dumps({
+            "state": "running", "round_started_at": time.time() - 5,
+        }), encoding="utf-8")
+        monkeypatch.setattr(cli, "spawn_loop", lambda _worker_dir: 4321)
+
+        assert cli.do_start("P/high")[0]["result"] == "started"
+        assert store.assignment("high")["status"] == "assigned"
+        assert store.assignment("high")["rounds_used"] == 0
+        assert store.active_call_reservations() == []
+        assert store.events("round_interrupted")[-1]["reason"] == "restart_after_dead_worker"
+
+
+def test_dead_idle_worker_resets_control_without_fake_interruption(tmp_path: Path):
+    with _env(tmp_path):
+        result = cli.do_new("P", roles="high:1")
+        project = Path(result["project_dir"])
+        store = ControlStore(project)
+        target = store.propose_target({
+            "statement": "T", "allowed_assumptions": [], "forbidden_assumptions": [],
+            "required_conclusions": ["T"], "fallback_candidates": [],
+        })
+        store.approve_target(target["version"])
+        store.add_route({
+            "id": "r1", "obligation_id": "v0001-root-1",
+            "method_family": "direct", "expected_result": "T",
+        })
+        assignment = store.assign(
+            "high", obligation_id="v0001-root-1", route_id="r1", task="T",
+        )
+        assignment["status"] = "running"
+        store.save_assignment(assignment)
+        worker = project / "workers" / "high"
+        (worker / ".status.json").write_text(json.dumps({
+            "state": "running", "round_started_at": 10, "last_round_at": 20,
+        }), encoding="utf-8")
+
+        recovered = cli._recover_dead_worker(
+            cli.L.WorkerLayout(worker), reason="test_idle_stop",
+        )
+
+        assert recovered["reset_idle_assignment"] is True
+        assert store.assignment("high")["status"] == "assigned"
+        assert store.events("round_interrupted") == []

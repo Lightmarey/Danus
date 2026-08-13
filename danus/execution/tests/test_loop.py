@@ -139,6 +139,7 @@ def test_run_round_injects_the_worker_gateway_config(tmp: Path):
         )
     assert rc == 0
     args = json.loads(argv.read_text(encoding="utf-8"))
+    assert "--json" in args
     assert "--ignore-user-config" not in args
     inline = next(arg for arg in args if "mcp_servers.danus=" in arg)
     assert "mcp_servers.danus=" in inline
@@ -191,6 +192,39 @@ def test_run_round_hard_timeout_terminates(tmp: Path):
     log.unlink()
     assert not log.exists()
     assert loop._Child.proc is None
+
+
+def test_run_round_drains_verification_before_timeout_kill(tmp: Path):
+    wl = _mk_worker(tmp)
+    fake = _write_fake_codex(tmp, "import time\ntime.sleep(60)\n")
+    log = wl.dir / "round.log"
+
+    class _Store:
+        checks = 0
+
+        def __init__(self, _project):
+            pass
+
+        def active_nested_call(self, _parent):
+            type(self).checks += 1
+            if type(self).checks == 1:
+                return {"expires_at_epoch": time.time() + 5}
+            return None
+
+    original = loop.ControlStore
+    loop.ControlStore = _Store  # type: ignore[assignment]
+    try:
+        with _env(DANUS_CODEX_BIN=str(fake)):
+            rc = loop.run_round(
+                wl, {"MODEL": "m", "REASONING_EFFORT": "high"}, "prompt",
+                log, hard_timeout=1, reservation_id="parent", **_round_files(wl),
+            )
+    finally:
+        loop.ControlStore = original
+    text = log.read_text()
+    assert rc == 124
+    assert "draining in-flight verification" in text
+    assert "verification committed" in text
 
 
 # --- run_round: missing binary → 127 --------------------------------------- #
@@ -389,6 +423,15 @@ def test_kickoff_is_scoped_without_full_assignment_dump():
     assert "Prove the assigned lemma." in prompt
     assert "should-not-be-embedded" not in prompt
     assert "Do not reopen" in prompt
+    assert "at least three materially different" in prompt
+    assert "literature/applicability route" in prompt
+    assert "Reopen the survey after a repeated failure signature" in prompt
+    assert "verify a load-bearing claim before using it downstream" in prompt
+    assert "Repair ordinary tool validation errors" in prompt
+    assert "do not finalize early" in prompt
+    assert "accepted intermediate fact or progress synthesis is not completion" in prompt
+    assert "next unresolved interface or an independent sub-strategy" in prompt
+    assert "terminal scope, budget, provider" in prompt
 
 
 # --- __main__ entry -------------------------------------------------------- #

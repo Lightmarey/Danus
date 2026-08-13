@@ -71,7 +71,7 @@ local memory or as a follow-up `plan` finding.
 
 - `gm_add` (publish the proof-attempt finding)
 - `gm_search` (recall examples, counterexamples, dead-ends, and verified facts)
-- `fact_submit` (verify any self-contained partial result before building on it; see `$verify-proof`)
+- `gm_add` + `fact_submit_batch` (durably stage and verify any self-contained partial result before building on it; see `$verify-proof`)
 - `search_arxiv_theorems`
 
 ## Failure Logging

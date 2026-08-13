@@ -16,6 +16,7 @@ from typing import Any, Iterable, Optional
 
 from danus.core._util import utc_now
 from danus.core.factgraph import FactGraph, parse_frontmatter, statement_of
+from danus.core.global_memory import GlobalMemory
 
 
 def _dump(value: Any) -> str:
@@ -451,6 +452,52 @@ class ResearchQuery:
 
     def build_context_manifest(self, worker: str, *, char_budget: int = 16000, max_enriched: int = 20, support_depth: int = 2, search_limit: int = 3) -> dict[str, Any]:
         assignment = self.store.validate_assignment(worker)
+        pending_verification = []
+        global_memory = GlobalMemory(self.project)
+        for kind in ("conclusion", "example", "counterexample", "proof_attempt"):
+            for entry in global_memory.read(kind):
+                links = entry.get("links") or {}
+                if (
+                    entry.get("author") == worker
+                    and entry.get("status") in {"unverified", "verifying"}
+                    and links.get("target_version") == assignment["target_version"]
+                    and links.get("obligation_id") == assignment["obligation_id"]
+                    and links.get("route_id") == assignment["route_id"]
+                    and links.get("assignment_epoch") == assignment["epoch"]
+                    and isinstance(links.get("verification_goal"), str)
+                    and bool(links["verification_goal"].strip())
+                ):
+                    pending_verification.append({
+                        "source_id": entry["id"], "kind": kind,
+                        "status": entry["status"],
+                        "verification_goal": links.get("verification_goal"),
+                        "title": " ".join(str(
+                            links.get("display_title") or entry.get("claim") or ""
+                        ).split())[:80],
+                    })
+        pending_verification.sort(key=lambda item: (str(item["verification_goal"]), item["source_id"]))
+        verification_obstacles = []
+        for entry in global_memory.read("obstacle"):
+            links = entry.get("links") or {}
+            if (
+                links.get("source_id")
+                and links.get("target_version") == assignment["target_version"]
+                and links.get("obligation_id") == assignment["obligation_id"]
+                and links.get("route_id") == assignment["route_id"]
+            ):
+                try:
+                    payload = json.loads(str(entry.get("evidence") or "{}"))
+                    repair = str(payload.get("repair_hints") or "")
+                except (TypeError, ValueError):
+                    repair = ""
+                verification_obstacles.append({
+                    "id": entry["id"], "source_id": links["source_id"],
+                    "verification_goal": links.get("verification_goal"),
+                    "assignment_epoch": links.get("assignment_epoch"),
+                    "title": " ".join(str(entry.get("claim") or "").split())[:120],
+                    "repair_hints": " ".join(repair.split())[:300],
+                })
+        verification_obstacles = verification_obstacles[-10:]
         snapshot = self.store.generation()
         with self.store._connect() as db:
             prior = db.execute(
@@ -460,7 +507,13 @@ class ResearchQuery:
         if prior:
             cached = _load(prior[0], {})
             expected = {"char_budget": char_budget, "max_enriched_facts": max_enriched, "support_depth": support_depth, "search_limit": search_limit}
-            if all(cached.get("compression", {}).get(key) == value for key, value in expected.items()):
+            if (
+                all(cached.get("compression", {}).get(key) == value for key, value in expected.items())
+                and [item["source_id"] for item in cached.get("pending_verification", [])]
+                == [item["source_id"] for item in pending_verification]
+                and [item["id"] for item in cached.get("verification_obstacles", [])]
+                == [item["id"] for item in verification_obstacles]
+            ):
                 return cached
         target = self.store.target(assignment["target_version"])
         route_context = self.route_context(assignment["route_id"], snapshot=snapshot)
@@ -512,7 +565,7 @@ class ResearchQuery:
                 used += len(title_only)
             item["mode"] = mode
             rendered.append(item)
-        manifest = {"id": uuid.uuid4().hex, "worker": worker, "assignment_epoch": assignment["epoch"], "snapshot_generation": snapshot, "target": target, "obligation": obligation, "route": route_context["route"], "facts": rendered, "checkpoints": checkpoints, "obstacles": obstacles, "compression": {"char_budget": char_budget, "used_chars": used, "max_enriched_facts": max_enriched, "support_depth": support_depth, "search_limit": search_limit, "unexpanded_count": omitted, "title_only_count": sum(item["mode"] == "title_only" for item in rendered)}, "created_at_utc": utc_now()}
+        manifest = {"id": uuid.uuid4().hex, "worker": worker, "assignment_epoch": assignment["epoch"], "snapshot_generation": snapshot, "target": target, "obligation": obligation, "route": route_context["route"], "facts": rendered, "pending_verification": pending_verification, "verification_obstacles": verification_obstacles, "checkpoints": checkpoints, "obstacles": obstacles, "compression": {"char_budget": char_budget, "used_chars": used, "max_enriched_facts": max_enriched, "support_depth": support_depth, "search_limit": search_limit, "unexpanded_count": omitted, "title_only_count": sum(item["mode"] == "title_only" for item in rendered)}, "created_at_utc": utc_now()}
         with self.store._tx() as db:
             db.execute("INSERT INTO context_manifests VALUES (?,?,?,?,?,?)", (manifest["id"], worker, assignment["epoch"], snapshot, _dump(manifest), manifest["created_at_utc"]))
             assignment["context_cursor"] = snapshot
@@ -541,6 +594,8 @@ class ResearchQuery:
         lines = [
             f"# Research context snapshot {manifest['snapshot_generation']}",
             f"Target {manifest['target']['version']}: {manifest['target']['statement']}",
+            "Allowed assumptions (copy exact list entries into assumptions_used): "
+            + json.dumps(manifest["target"].get("allowed_assumptions") or [], ensure_ascii=False),
             f"Obligation {manifest['obligation']['id']}: {manifest['obligation']['statement']}",
             f"Route {manifest['route']['id']} ({manifest['route']['method_title']}): {manifest['route'].get('expected_result', '')}",
             "", "## Included verified facts",
@@ -549,6 +604,19 @@ class ResearchQuery:
             lines.append(f"- [{fact['fact_id']}] {fact['title']} ({', '.join(fact['reasons'])})")
             if fact["mode"] == "title_statement":
                 lines.append(f"  {fact['statement']}")
+        if manifest.get("pending_verification"):
+            lines += ["", "## Durable pending verification",
+                      "Resume or submit these staged sources before re-deriving them."]
+            lines += [
+                f"- [{item['source_id']}] {item['verification_goal']}: {item['title']} ({item['status']})"
+                for item in manifest["pending_verification"]
+            ]
+        if manifest.get("verification_obstacles"):
+            lines += ["", "## Verification obstacles"]
+            lines += [
+                f"- [{item['source_id']}] {item['title']}: {item['repair_hints']}"
+                for item in manifest["verification_obstacles"]
+            ]
         if manifest["obstacles"]:
             lines += ["", "## Open obstacles"] + [f"- {item['title']}" for item in manifest["obstacles"]]
         lines += ["", "Proof bodies are omitted. Call fact_get(fact_id, include_proof=true) only when needed."]

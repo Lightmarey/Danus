@@ -585,8 +585,6 @@ async function loadManifests() {
 
 async function loadControl() {
   try {
-    const state = await api('/api/control');
-    if (!state.enabled) { $('#control-summary').innerHTML='<div class="empty">Legacy project — v2 research control is not enabled.</div>'; return; }
     const d = await api('/api/research/map'); connError(false);
     const summary = $('#control-summary'); summary.innerHTML = '';
     controlGeneration = d.generation;

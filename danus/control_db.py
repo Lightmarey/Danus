@@ -34,6 +34,8 @@ from .control import (
 )
 
 _METHOD_KEY = re.compile(r"[^a-z0-9]+")
+_RESERVATION_GRACE_SECONDS = 60.0
+_NESTED_CALL_CLEANUP_SECONDS = 15.0
 
 
 class _Connection(sqlite3.Connection):
@@ -154,8 +156,10 @@ class SQLiteControlStore:
                     request_id TEXT PRIMARY KEY, action TEXT NOT NULL, result TEXT NOT NULL
                 );
                 CREATE TABLE IF NOT EXISTS pending_facts(
-                    fact_id TEXT PRIMARY KEY, payload TEXT NOT NULL, status TEXT NOT NULL
+                    submission_id TEXT PRIMARY KEY, fact_id TEXT NOT NULL,
+                    payload TEXT NOT NULL, status TEXT NOT NULL
                 );
+                CREATE INDEX IF NOT EXISTS pending_facts_fact ON pending_facts(fact_id, status);
                 CREATE TABLE IF NOT EXISTS facts(
                     fact_id TEXT PRIMARY KEY, title TEXT NOT NULL, statement TEXT NOT NULL,
                     proof TEXT NOT NULL, intuition TEXT NOT NULL, author TEXT NOT NULL,
@@ -170,7 +174,7 @@ class SQLiteControlStore:
                     fact_id TEXT NOT NULL, target_version TEXT NOT NULL, obligation_id TEXT NOT NULL,
                     route_id TEXT NOT NULL, assignment_epoch TEXT NOT NULL, claim_role TEXT NOT NULL,
                     relation TEXT NOT NULL, event_seq INTEGER,
-                    PRIMARY KEY(fact_id, target_version, obligation_id, route_id, relation)
+                    PRIMARY KEY(fact_id, target_version, obligation_id, route_id, assignment_epoch, relation)
                 );
                 CREATE INDEX IF NOT EXISTS fact_scopes_route ON fact_scopes(route_id, relation);
                 CREATE INDEX IF NOT EXISTS fact_scopes_obligation ON fact_scopes(obligation_id, relation);
@@ -216,8 +220,9 @@ class SQLiteControlStore:
                 except sqlite3.OperationalError:
                     db.execute("CREATE TABLE IF NOT EXISTS facts_fts(fact_id TEXT PRIMARY KEY, title TEXT, statement TEXT, proof TEXT)")
                 self._migrate_round_vocabulary(db)
-                db.execute("INSERT OR IGNORE INTO meta VALUES ('schema_version','3')")
-                db.execute("UPDATE meta SET value='3' WHERE key='schema_version'")
+                self._migrate_fact_submission_schema(db)
+                db.execute("INSERT OR IGNORE INTO meta VALUES ('schema_version','4')")
+                db.execute("UPDATE meta SET value='4' WHERE key='schema_version'")
                 db.execute("INSERT OR IGNORE INTO meta VALUES ('generation','0')")
                 db.commit()
             finally:
@@ -264,6 +269,31 @@ class SQLiteControlStore:
         for old, new in event_names.items():
             db.execute("UPDATE events SET event=? WHERE event=?", (new, old))
         db.execute("UPDATE call_reservations SET component='worker_round' WHERE component='worker_slice'")
+
+    def _migrate_fact_submission_schema(self, db: sqlite3.Connection) -> None:
+        if "submission_id" not in {row[1] for row in db.execute("PRAGMA table_info(pending_facts)")}:
+            db.executescript("""
+                ALTER TABLE pending_facts RENAME TO pending_facts_v3;
+                CREATE TABLE pending_facts(
+                    submission_id TEXT PRIMARY KEY, fact_id TEXT NOT NULL,
+                    payload TEXT NOT NULL, status TEXT NOT NULL);
+                INSERT INTO pending_facts SELECT fact_id,fact_id,payload,status FROM pending_facts_v3;
+                DROP TABLE pending_facts_v3;
+                CREATE INDEX pending_facts_fact ON pending_facts(fact_id, status);
+            """)
+        if not any(row[1] == "assignment_epoch" and row[5] for row in db.execute("PRAGMA table_info(fact_scopes)")):
+            db.executescript("""
+                ALTER TABLE fact_scopes RENAME TO fact_scopes_v3;
+                CREATE TABLE fact_scopes(
+                    fact_id TEXT NOT NULL, target_version TEXT NOT NULL, obligation_id TEXT NOT NULL,
+                    route_id TEXT NOT NULL, assignment_epoch TEXT NOT NULL, claim_role TEXT NOT NULL,
+                    relation TEXT NOT NULL, event_seq INTEGER,
+                    PRIMARY KEY(fact_id,target_version,obligation_id,route_id,assignment_epoch,relation));
+                INSERT INTO fact_scopes SELECT * FROM fact_scopes_v3;
+                DROP TABLE fact_scopes_v3;
+                CREATE INDEX fact_scopes_route ON fact_scopes(route_id, relation);
+                CREATE INDEX fact_scopes_obligation ON fact_scopes(obligation_id, relation);
+            """)
 
     def _migrate_files_once(self) -> None:
         db = self._connect()
@@ -920,6 +950,101 @@ class SQLiteControlStore:
         self._record_budget_threshold()
         return {"assignment": assignment, "event": event}
 
+    def recover_worker_interruption(self, worker: str, *, wall_seconds: float = 0.0,
+                                    reason: str = "dead_worker",
+                                    round_was_active: bool = False) -> dict[str, Any]:
+        """Idempotently reconcile a round whose worker process disappeared.
+
+        The worker-round reservation is the durable indication that a call was
+        in flight.  Nested verifier reservations are cancelled first, then the
+        parent is settled without consuming a research round.  If reservation
+        expiry already ran, a ``running`` assignment is still made runnable.
+        """
+        self.scaffold()
+        with self._tx() as db:
+            row = db.execute(
+                "SELECT payload FROM assignments WHERE worker=?", (_id(worker, "worker"),)
+            ).fetchone()
+            if not row:
+                return {"recovered": False, "reason": "unassigned"}
+            assignment = _load(row[0], {})
+            reservations = db.execute(
+                "SELECT * FROM call_reservations WHERE status='active' ORDER BY created_at_utc"
+            ).fetchall()
+            parents = []
+            for reservation in reservations:
+                scope = _load(reservation["scope"], {})
+                if (
+                    reservation["component"] == "worker_round"
+                    and scope.get("worker") == worker
+                    and scope.get("assignment_epoch") == assignment.get("epoch")
+                ):
+                    parents.append(reservation)
+            parent_ids = {str(item["id"]) for item in parents}
+            children = [
+                item for item in reservations
+                if _load(item["scope"], {}).get("parent_reservation_id") in parent_ids
+            ]
+            was_active = bool(
+                round_was_active
+                and assignment.get("status") in {"assigned", "running", "auditing"}
+            )
+            if not parents and not children and not was_active:
+                return {"recovered": False, "assignment": assignment}
+
+            for child in children:
+                db.execute(
+                    "UPDATE call_reservations SET status='cancelled',settled_at_utc=? "
+                    "WHERE id=? AND status='active'",
+                    (utc_now(), child["id"]),
+                )
+                self._event(
+                    db, "call_reservation_cancelled", reservation_id=child["id"],
+                    reason=f"{reason}: parent worker disappeared",
+                )
+
+            for index, parent in enumerate(parents):
+                self._record_cost(
+                    db, component="worker_round",
+                    wall_seconds=max(0.0, wall_seconds) if index == 0 else 0.0,
+                    usage=None, reservation_id=str(parent["id"]), worker=worker,
+                    assignment_epoch=assignment["epoch"],
+                    target_version=assignment["target_version"],
+                    obligation_id=assignment["obligation_id"],
+                    route_id=assignment["route_id"], attempt_status="interrupted",
+                    usage_status="unavailable",
+                )
+            if not parents and was_active:
+                self._record_cost(
+                    db, component="worker_round", wall_seconds=max(0.0, wall_seconds),
+                    usage=None, reservation_id=None, worker=worker,
+                    assignment_epoch=assignment["epoch"],
+                    target_version=assignment["target_version"],
+                    obligation_id=assignment["obligation_id"],
+                    route_id=assignment["route_id"], attempt_status="interrupted",
+                    usage_status="unavailable", reservation_status="expired_or_missing",
+                )
+
+            if assignment.get("status") in {"assigned", "running", "auditing"}:
+                assignment["status"] = "assigned"
+                db.execute(
+                    "UPDATE assignments SET status=?,payload=? WHERE worker=?",
+                    (assignment["status"], _dump(assignment), worker),
+                )
+            event = self._event(
+                db, "round_interrupted", worker=worker,
+                assignment_epoch=assignment["epoch"],
+                target_version=assignment["target_version"],
+                obligation_id=assignment["obligation_id"],
+                route_id=assignment["route_id"], reason=reason,
+                usage_status="unavailable", recovered=True,
+                cancelled_nested_reservations=[str(item["id"]) for item in children],
+                settled_round_reservations=[str(item["id"]) for item in parents],
+            )
+            self._bump(db)
+        self._record_budget_threshold()
+        return {"recovered": True, "assignment": assignment, "event": event}
+
     def record_backend_failure(self, outcome: dict[str, Any], *, provider_key: str, actor: str, wall_seconds: float = 0.0) -> dict[str, Any]:
         """Open the shared circuit for non-worker Codex/provider calls."""
         self.scaffold()
@@ -980,30 +1105,43 @@ class SQLiteControlStore:
             raise ControlError("submission uses forbidden assumptions")
         outside = used - set(target["allowed_assumptions"])
         if outside:
-            raise ControlError(f"submission uses assumptions outside the target: {sorted(outside)}")
+            raise ControlError(
+                f"submission uses assumptions outside the target: {sorted(outside)}; "
+                f"use exact allowed_assumptions entries: {target['allowed_assumptions']}"
+            )
         return assignment
 
     # --------------------------------------------------------------- facts
-    def prepare_fact(self, fact_id: str, payload: dict[str, Any]) -> None:
+    def prepare_fact(self, fact_id: str, payload: dict[str, Any]) -> str:
         self.scaffold()
+        submission_id = uuid.uuid4().hex
         with self._tx() as db:
-            db.execute("INSERT OR REPLACE INTO pending_facts VALUES (?,?,'prepared')", (fact_id, _dump(payload)))
+            db.execute(
+                "INSERT INTO pending_facts(submission_id,fact_id,payload,status) VALUES (?,?,?,'prepared')",
+                (submission_id, fact_id, _dump(payload)),
+            )
             self._bump(db)
+        return submission_id
 
-    def finalize_fact(self, fact_id: str) -> dict[str, Any]:
+    def finalize_fact(self, fact_id: str, submission_id: str) -> dict[str, Any]:
         self.scaffold()
         from danus.research import index_fact_into
         with self._tx() as db:
-            row = db.execute("SELECT payload FROM pending_facts WHERE fact_id=?", (fact_id,)).fetchone()
+            row = db.execute(
+                "SELECT fact_id,payload FROM pending_facts WHERE submission_id=? AND status='prepared'",
+                (submission_id,),
+            ).fetchone()
             if not row:
                 raise ControlError(f"unknown pending fact: {fact_id}")
-            payload = _load(row[0], {})
+            if str(row["fact_id"]) != fact_id:
+                raise ControlError(f"pending submission does not match fact: {fact_id}")
+            payload = _load(row["payload"], {})
             if not (self.project / "fact_graph" / "facts" / f"{fact_id}.md").is_file():
                 raise ControlError(f"pending fact file is missing: {fact_id}")
             index_fact_into(db, self.project, fact_id)
             event = self._event(db, "fact_linked", fact_id=fact_id, reused=payload.get("reused", False), **payload["scope"])
             db.execute("INSERT OR IGNORE INTO fact_scopes VALUES (?,?,?,?,?,?,?,?)", (fact_id, payload["scope"]["target_version"], payload["scope"]["obligation_id"], payload["scope"]["route_id"], payload["scope"]["assignment_epoch"], payload["scope"].get("claim_role") or "unconditional", "direct", event["seq"]))
-            db.execute("UPDATE pending_facts SET status='complete' WHERE fact_id=?", (fact_id,))
+            db.execute("UPDATE pending_facts SET status='complete' WHERE submission_id=?", (submission_id,))
             self._bump(db)
             return event
 
@@ -1011,10 +1149,10 @@ class SQLiteControlStore:
         if not self.db_path.exists():
             return
         with self._connect() as db:
-            rows = db.execute("SELECT fact_id FROM pending_facts WHERE status='prepared'").fetchall()
+            rows = db.execute("SELECT submission_id,fact_id FROM pending_facts WHERE status='prepared'").fetchall()
         for row in rows:
-            if (self.project / "fact_graph" / "facts" / f"{row[0]}.md").is_file():
-                self.finalize_fact(str(row[0]))
+            if (self.project / "fact_graph" / "facts" / f"{row['fact_id']}.md").is_file():
+                self.finalize_fact(str(row["fact_id"]), str(row["submission_id"]))
 
     def reusable_fact(self, statement: str, assumptions_used: Iterable[str]) -> Optional[str]:
         normalized = " ".join(statement.split())
@@ -1198,12 +1336,38 @@ class SQLiteControlStore:
             if cost_limit > 0 and estimated is None and budget.get("strict_cost_reservations"):
                 raise ControlError("strict project cost budget requires an estimated call cost")
             reservation_id = uuid.uuid4().hex
-            expires = now + wall + 60.0
+            expires = now + wall + _RESERVATION_GRACE_SECONDS
+            if parent_reservation_id:
+                db.execute(
+                    "UPDATE call_reservations SET expires_at_epoch=max(expires_at_epoch,?) WHERE id=?",
+                    (expires + _NESTED_CALL_CLEANUP_SECONDS, parent_reservation_id),
+                )
             db.execute("INSERT INTO call_reservations VALUES (?,?,?,?,?,'active',?,?,?,NULL)", (reservation_id, component, provider_key, reserved_wall, estimated, _dump(scope), utc_now(), expires))
             self._event(db, "call_reserved", reservation_id=reservation_id, component=component, provider_key=provider_key, reserved_wall_seconds=reserved_wall, requested_wall_seconds=wall, reserved_cost_usd=estimated, **scope)
             # Operational reservations do not change the mathematical/control
             # snapshot seen by a running worker.
         return {"id": reservation_id, "component": component, "provider_key": provider_key, "reserved_wall_seconds": reserved_wall, "requested_wall_seconds": wall, "reserved_cost_usd": estimated, "expires_at_epoch": expires, "scope": scope}
+
+    def nested_call_timeout(self, parent_reservation_id: str, requested_seconds: float) -> int:
+        """Validate a verifier child without shortening its own correctness deadline."""
+        self.scaffold()
+        now = time.time()
+        with self._connect() as db:
+            parent = db.execute(
+                "SELECT component,expires_at_epoch FROM call_reservations "
+                "WHERE id=? AND status='active' AND expires_at_epoch>?",
+                (parent_reservation_id, now),
+            ).fetchone()
+        if not parent or parent["component"] != "worker_round":
+            raise ControlError("nested call requires an active worker-round reservation")
+        return max(1, int(float(requested_seconds)))
+
+    def active_nested_call(self, parent_reservation_id: str) -> Optional[dict[str, Any]]:
+        """Return the live child call that a timed-out worker must drain, if any."""
+        for row in self.active_call_reservations():
+            if row["scope"].get("parent_reservation_id") == parent_reservation_id:
+                return row
+        return None
 
     def _settle_reservation(self, db: sqlite3.Connection, reservation_id: Optional[str]) -> Optional[dict[str, Any]]:
         if not reservation_id:

@@ -1,7 +1,7 @@
 # danus.verify — the verify service (sole write-gate)
 
 An **informal-LLM proof verifier** behind a tiny HTTP gateway. It is the sole
-authority on mathematical correctness: a worker's `fact_submit` (in `danus.gateway`)
+authority on mathematical correctness: a worker's fact submission (in `danus.gateway`)
 calls it, and the candidate fact is written to the fact graph **iff** this service
 returns `verdict: "correct"`.
 
@@ -14,16 +14,34 @@ research-level target theorems still need expert review before being trusted.
 
 ```
 POST /verify
-  request : {"statement": <str, >=1 char>, "proof": <str, >=1 char>}   # application/json
+  request : {"statement": <str, >=1 char>, "proof": <str, >=1 char>,
+             "timeout_seconds": <optional positive int>,
+             "cancel_path": <optional worker stop-file path>,
+             "request_id": <optional 64-char content hash>}            # application/json
   200     : {"verification_report": {"summary": str,
                                       "critical_errors": [{"location": str, "issue": str}, ...],
                                       "gaps":            [{"location": str, "issue": str}, ...]},
              "verdict": "correct" | "wrong",
-             "repair_hints": str}                # "" iff verdict == "correct"
+             "repair_hints": str,
+             "usage": {"input_tokens": int, "cached_input_tokens": int,
+                       "fresh_input_tokens": int, "output_tokens": int,
+                       "reasoning_tokens": int}}
+                                                   # usage is parsed from Codex JSONL
   400     : vacuous input, or a P1/P3/P5 pre-check match (see prechecks.py)
   422     : request-model validation (empty statement/proof)
+  499     : operator stop cancelled the verifier
   500     : codex failed / wrote no output / output is not valid JSON / non-dict
   504     : codex exec timed out (only if CODEX_TIMEOUT_SECONDS is set)
+
+POST /verify-batch
+  request : {"verification_goal": str,
+             "candidates": [1-6 × {"candidate_id", "statement", "proof"}],
+             "timeout_seconds"?: int, "cancel_path"?: str,
+             "request_id"?: <64-char content hash>}
+  200     : {"verifications": [ordered per-candidate reports], "usage": {...}}
+  per-item: deterministic pre-check failures become `wrong`; eligible siblings
+            still run in one codex process (all-precheck-rejected starts none)
+  422/5xx : request/output contract or launcher failure
 
 GET /health -> {"status": "ok", "pid": <int>}    # async; never queues behind /verify
                                                  # pid self-identifies the instance so
@@ -31,9 +49,13 @@ GET /health -> {"status": "ok", "pid": <int>}    # async; never queues behind /v
                                                  # from a foreign one on a shared port
 ```
 
-**Invariant (enforced by the verifier *prompt*, not this code):**
-`verdict == "correct"` ⟺ `critical_errors == []` **and** `gaps == []`. This service
-returns whatever the agent wrote; it does not recompute the verdict.
+The gateway always supplies `request_id`. Concurrent retries wait on the same
+run lock, and a retry after a lost HTTP response replays the completed artifact
+and its measured usage instead of starting another Codex verifier.
+
+**Invariant (enforced by both prompt and service):** `verdict == "correct"` ⟺
+`critical_errors == []` **and** `gaps == []`. Malformed or inconsistent model
+output is a 500 and never reaches the fact graph.
 
 ## Modules
 - `prechecks.py` — pure, offline-testable: vacuousness + P1/P3/P5 hard prohibitions
@@ -43,7 +65,7 @@ returns whatever the agent wrote; it does not recompute the verdict.
   -c <danus MCP, role=verifier> --dangerously-bypass-approvals-and-sandbox <prompt>`;
   atomic run-id; reads back `verification.json`. Injects the gateway as **`python
   -m danus.gateway`**.
-- `service.py` — FastAPI app (`/verify`, `/health`).
+- `service.py` — FastAPI app (`/verify`, `/verify-batch`, `/health`) and output validator.
 
 ## Run
 
@@ -71,11 +93,12 @@ environment.
 | `VERIFY_MIN_STATEMENT_CHARS` / `VERIFY_MIN_PROOF_CHARS` / `VERIFY_MIN_PROOF_WORDS` | 10 / 30 / 5 | vacuousness thresholds |
 | `VERIFY_REJECT_PROBLEM_MD_CITATIONS` / `VERIFY_REJECT_UNPROVEN_CONDITIONALS` / `VERIFY_REJECT_VAGUE_GESTURES` | `1` | toggle P1 / P3 / P5 (`0` disables) |
 
-## How `fact_submit` reaches it
-`danus.gateway`'s `fact_submit` POSTs `{statement, proof}` to `DANUS_VERIFY_URL`
-(e.g. `http://127.0.0.1:8091/verify`), writes the fact **iff** `verdict ==
+## How fact submission reaches it
+`danus.gateway` POSTs the claim(s), verifier deadline, and
+worker stop path to `DANUS_VERIFY_URL`
+(e.g. `http://127.0.0.1:8091/verify`; batch uses the adjacent `/verify-batch`), writes each fact **iff** its `verdict ==
 "correct"`, and always records the outcome to global memory (kind `verification`).
-Until this service is up and `DANUS_VERIFY_URL` is set, `fact_submit` returns a
+Until this service is up and `DANUS_VERIFY_URL` is set, submission returns a
 clear "verify service not wired" error.
 
 ## Trust assumptions (security)

@@ -90,14 +90,32 @@ def _prepare_v2(path: str | Path, worker: str | None = None) -> dict:
     }
 
 
+def _stage(binding, statement, proof, title, goal="Shared theorem goal"):
+    links = {
+        "verification_goal": goal,
+        **{key: binding[key] for key in (
+            "target_version", "obligation_id", "route_id", "assignment_epoch",
+        )},
+        "display_title": title, "predecessors": [], "intuition": "",
+        "external_refs": [], "claim_role": "unconditional",
+        "assumptions_used": [], "closes_obligation": False,
+    }
+    return {"source_id": server.gm_add(
+        "proof_attempt", claim=statement, evidence=proof,
+        verifiable=True, links=links,
+    )["id"]}
+
+
 def test_role_table():
     # main can never fabricate a fact
     assert "fact_submit" not in tools_for("main")
+    assert "fact_submit_batch" not in tools_for("main")
     assert "fact_revoke" in tools_for("main")
     # verifier is read-only: literature lookup ONLY
     assert tools_for("verifier") == ["search_arxiv_theorems"]
     # worker is the only role that can submit a fact
-    assert "fact_submit" in tools_for("worker")
+    assert "fact_submit" not in tools_for("worker")
+    assert "fact_submit_batch" in tools_for("worker")
     # all three get the read view + literature grounding
     for r in ("worker", "main", "verifier"):
         assert "search_arxiv_theorems" in tools_for(r)
@@ -120,6 +138,27 @@ def test_gm_and_fact_search_over_temp_project():
         assert hits["results_by_kind"]["plan"]["count"] == 1
         # fact_search over an empty graph is well-formed
         assert server.fact_search("anything")["results"] == []
+
+
+def test_gm_add_staged_candidate_infers_assignment_scope():
+    with tempfile.TemporaryDirectory() as d, _env(
+        DANUS_PROJECT_DIR=d, DANUS_AGENTS_ROOT=None, DANUS_AUTHOR="worker_high",
+        DANUS_ROLE="worker",
+    ):
+        binding = _prepare_v2(d, "worker_high")
+        source_id = server.gm_add(
+            "proof_attempt", claim="A staged claim", evidence="A complete staged proof",
+            verifiable=True,
+            links={
+                "verification_goal": "Shared theorem goal",
+                "display_title": "Staged candidate title", "claim_role": "unconditional",
+                "assumptions_used": [],
+            },
+        )["id"]
+        entry = next(item for item in GlobalMemory(Path(d)).read("proof_attempt") if item["id"] == source_id)
+        for key in ("target_version", "obligation_id", "route_id"):
+            assert entry["links"][key] == binding[key]
+        assert entry["links"]["assignment_epoch"] == binding["assignment_epoch"]
 
 
 def test_fact_submit_accept_writes_fact_and_traces():
@@ -154,6 +193,208 @@ def test_fact_submit_reject_writes_nothing_but_traces():
         assert fg.list() == []  # nothing written
         gm = GlobalMemory(Path(d))
         assert gm.read("verification")[-1]["verdict"] == "wrong"  # but traced
+
+
+def test_fact_submit_batch_one_launch_independent_verdicts():
+    with tempfile.TemporaryDirectory() as d, _env(
+        DANUS_PROJECT_DIR=d, DANUS_AGENTS_ROOT=None, DANUS_AUTHOR="worker_high",
+        DANUS_VERIFY_URL="http://mock", DANUS_PROBLEM_ID="P",
+    ):
+        binding = _prepare_v2(d, "worker_high")
+        calls = []
+        original = server._verify_batch
+
+        def fake(goal, candidates):
+            calls.append((goal, candidates))
+            return {
+                "verifications": [
+                    {"candidate_id": "1", "verdict": "correct", "repair_hints": "",
+                     "verification_report": {"summary": "ok", "critical_errors": [], "gaps": []}},
+                    {"candidate_id": "2", "verdict": "wrong", "repair_hints": "missing case",
+                     "verification_report": {"summary": "gap", "critical_errors": [], "gaps": [{}]}},
+                ],
+                "usage": {"input_tokens": 120, "cached_input_tokens": 80},
+            }
+
+        server._verify_batch = fake
+        try:
+            result = server.fact_submit_batch(
+                candidates=[
+                    _stage(binding, "One plus one equals two.", "This is integer addition.",
+                           "Integer addition lemma"),
+                    _stage(binding, "Every integer is even.", "Assume it is so.",
+                           "False parity claim"),
+                ],
+                verification_goal="Shared theorem goal",
+            )
+        finally:
+            server._verify_batch = original
+        assert len(calls) == 1 and calls[0][0] == "Shared theorem goal" and len(calls[0][1]) == 2
+        assert result["accepted"] is False and result["accepted_count"] == 1
+        assert result["results"][0]["fact_id"] and result["results"][1]["repair_hints"] == "missing case"
+        assert len(FactGraph(Path(d)).list()) == 1
+        traces = GlobalMemory(Path(d)).read("verification")
+        assert [trace["verdict"] for trace in traces[-2:]] == ["correct", "wrong"]
+        obstacle = GlobalMemory(Path(d)).read("obstacle")[-1]
+        refuted = next(entry for entry in GlobalMemory(Path(d)).read("proof_attempt") if entry["status"] == "refuted")
+        assert obstacle["links"]["source_id"] == refuted["id"]
+        assert "missing case" in obstacle["evidence"]
+
+
+def test_fact_submit_batch_flushes_single_durable_source_without_waiting():
+    with tempfile.TemporaryDirectory() as d, _env(
+        DANUS_PROJECT_DIR=d, DANUS_AGENTS_ROOT=None, DANUS_AUTHOR="worker_high",
+        DANUS_VERIFY_URL="http://mock", DANUS_PROBLEM_ID="P",
+    ):
+        binding = _prepare_v2(d, "worker_high")
+        staged = _stage(
+            binding, "A singleton candidate is true.",
+            "A complete proof of the singleton candidate.", "Singleton candidate fact",
+        )
+        with _mock_verify("correct"):
+            result = server.fact_submit_batch(
+                candidates=[staged], verification_goal="Shared theorem goal",
+            )
+        assert result["accepted"] is True and result["results"][0]["fact_id"]
+        source = GlobalMemory(Path(d)).read("proof_attempt")[-1]
+        assert source["status"] == "verified" and source["fact_id"] == result["results"][0]["fact_id"]
+
+
+def test_fact_submit_batch_rejects_duplicate_statements_before_verifier():
+    with tempfile.TemporaryDirectory() as d, _env(
+        DANUS_PROJECT_DIR=d, DANUS_AGENTS_ROOT=None, DANUS_AUTHOR="worker_high",
+        DANUS_VERIFY_URL="http://mock", DANUS_PROBLEM_ID="P",
+    ):
+        binding = _prepare_v2(d, "worker_high")
+        first = _stage(
+            binding, "The duplicate theorem is true.", "First attempted proof.",
+            "Duplicate theorem first",
+        )
+        second = _stage(
+            binding, "  The duplicate theorem   is true. ", "Second attempted proof.",
+            "Duplicate theorem second",
+        )
+        original = server._verify_batch
+        server._verify_batch = lambda *_args: (_ for _ in ()).throw(
+            AssertionError("duplicate statements must not spend verifier tokens")
+        )
+        try:
+            result = server.fact_submit_batch(
+                candidates=[first, second], verification_goal="Shared theorem goal",
+            )
+        finally:
+            server._verify_batch = original
+
+        assert result["verdict"] == "control_error"
+        assert "distinct statements" in result["error"]
+        assert FactGraph(Path(d)).list() == []
+
+
+def test_nested_batch_uses_the_worker_half_open_probe():
+    with tempfile.TemporaryDirectory() as d, _env(
+        DANUS_PROJECT_DIR=d, DANUS_AGENTS_ROOT=None, DANUS_AUTHOR="worker_high",
+        DANUS_VERIFY_URL="http://mock", DANUS_PROBLEM_ID="P",
+    ):
+        binding = _prepare_v2(d, "worker_high")
+        store = ControlStore(Path(d))
+        parent = store.reserve_call(
+            component="worker_round", max_wall_seconds=30, worker="worker_high",
+            assignment_epoch=binding["assignment_epoch"], target_version=binding["target_version"],
+            obligation_id=binding["obligation_id"], route_id=binding["route_id"],
+        )
+        store.retry_backend("codex", reason="test nested half-open probe")
+        assert store.claim_backend_call("codex")["state"] == "half_open"
+        try:
+            with _env(DANUS_CALL_RESERVATION_ID=parent["id"]), _mock_verify("correct"):
+                result = server.fact_submit_batch(
+                    candidates=[_stage(binding, "Nested candidate is true.", "Proof.", "Nested candidate")],
+                    verification_goal="Shared theorem goal",
+                )
+        finally:
+            store.cancel_call_reservation(parent["id"], reason="test complete")
+        assert result["accepted"] is True and result["results"][0]["fact_id"]
+
+
+def test_fact_submit_batch_cancel_writes_no_truth():
+    with tempfile.TemporaryDirectory() as d, _env(
+        DANUS_PROJECT_DIR=d, DANUS_AGENTS_ROOT=None, DANUS_AUTHOR="worker_high",
+        DANUS_VERIFY_URL="http://mock", DANUS_PROBLEM_ID="P",
+    ):
+        binding = _prepare_v2(d, "worker_high")
+        original = server._verify_batch
+        server._verify_batch = lambda goal, candidates: (_ for _ in ()).throw(RuntimeError("499 cancelled"))
+        try:
+            result = server.fact_submit_batch(
+                candidates=[
+                    _stage(binding, "Candidate A is true.", "A complete proof of candidate A.",
+                           "Cancellation candidate A"),
+                    _stage(binding, "Candidate B is true.", "A complete proof of candidate B.",
+                           "Cancellation candidate B"),
+                ],
+                verification_goal="Shared theorem goal",
+            )
+        finally:
+            server._verify_batch = original
+        assert result["accepted"] is False and "cancelled" in result["error"]
+        assert FactGraph(Path(d)).list() == []
+        assert GlobalMemory(Path(d)).read("verification") == []
+        assert {entry["status"] for entry in GlobalMemory(Path(d)).read("proof_attempt")} == {"unverified"}
+
+
+def test_fact_submit_batch_partial_write_is_retryable():
+    with tempfile.TemporaryDirectory() as d, _env(
+        DANUS_PROJECT_DIR=d, DANUS_AGENTS_ROOT=None, DANUS_AUTHOR="worker_high",
+        DANUS_VERIFY_URL="http://mock", DANUS_PROBLEM_ID="P",
+    ):
+        binding = _prepare_v2(d, "worker_high")
+        original_verify = server._verify_batch
+        original_add = FactGraph.add
+        calls = {"add": 0}
+
+        server._verify_batch = lambda goal, candidates: {
+            "verifications": [
+                {"candidate_id": str(index), "verdict": "correct", "repair_hints": "",
+                 "verification_report": {"summary": "ok", "critical_errors": [], "gaps": []}}
+                for index in (1, 2)
+            ],
+            "usage": {"input_tokens": 100},
+        }
+
+        def fail_second_add(self, **kwargs):
+            calls["add"] += 1
+            if calls["add"] == 2:
+                raise OSError("injected disk failure")
+            return original_add(self, **kwargs)
+
+        FactGraph.add = fail_second_add
+        staged = [
+            _stage(binding, "Recovery candidate A.", "A complete proof for recovery A.",
+                   "Recovery candidate A"),
+            _stage(binding, "Recovery candidate B.", "A complete proof for recovery B.",
+                   "Recovery candidate B"),
+        ]
+        try:
+            result = server.fact_submit_batch(
+                candidates=staged,
+                verification_goal="Shared theorem goal",
+            )
+        finally:
+            FactGraph.add = original_add
+            server._verify_batch = original_verify
+        assert result["accepted"] is False
+        assert result["accepted_count"] == 1 and result["verifier_accepted_count"] == 2
+        assert len(FactGraph(Path(d)).list()) == 1
+        original_single = server._verify
+        server._verify = lambda *args: (_ for _ in ()).throw(AssertionError("must not reverify"))
+        try:
+            retry = server.fact_submit_batch(
+                candidates=[staged[1]], verification_goal="Shared theorem goal",
+            )
+        finally:
+            server._verify = original_single
+        assert retry["accepted"] is True and retry["results"][0]["fact_id"]
+        assert retry["verified_count"] == 0 and retry["recovered_write_count"] == 1
+        assert len(FactGraph(Path(d)).list()) == 2
 
 
 def test_fact_submit_verify_error_is_clean():
@@ -274,14 +515,20 @@ def test_verify_http_roundtrip_and_errors():
             except RuntimeError as e:
                 assert "DANUS_VERIFY_URL" in str(e)
         # a real POST round-trip; the body is the JSON we sent
-        with _env(DANUS_VERIFY_URL=url, DANUS_VERIFY_TIMEOUT="5"):
+        with _env(
+            DANUS_VERIFY_URL=url, DANUS_VERIFY_TIMEOUT="5",
+            DANUS_PROJECT_DIR="C:/tmp/project", DANUS_AUTHOR="high",
+        ):
             out = server._verify("S(n)=n^2", "induction")
             assert out["verdict"] == "correct"
         assert '"statement": "S(n)=n^2"' in captured["body"]
+        assert '"timeout_seconds": 5' in captured["body"]
+        assert '"cancel_path": "C:\\\\tmp\\\\project\\\\workers\\\\high\\\\.stop"' in captured["body"]
         assert captured["ctype"] == "application/json"
         # a garbage timeout falls back to the default (no crash)
         with _env(DANUS_VERIFY_URL=url, DANUS_VERIFY_TIMEOUT="not-an-int"):
             assert server._verify("s", "p")["verdict"] == "correct"
+        assert '"timeout_seconds": 900' in captured["body"]
     finally:
         srv.shutdown()
 

@@ -28,6 +28,7 @@ is testable and reconfigurable:
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -99,9 +100,25 @@ def _fg(project: Optional[str] = None) -> FactGraph:
 
 def _verify_timeout() -> int:
     try:
-        return max(1, int(os.environ.get("DANUS_VERIFY_TIMEOUT", "3600")))
+        timeout = max(1, int(os.environ.get("DANUS_VERIFY_TIMEOUT", "900")))
     except ValueError:
-        return 3600
+        timeout = 900
+    parent_id = os.environ.get("DANUS_CALL_RESERVATION_ID")
+    if parent_id:
+        timeout = ControlStore(_project()).nested_call_timeout(parent_id, timeout)
+    return timeout
+
+
+def _verification_request_id(kind: str, content: Dict[str, Any]) -> str:
+    project = os.environ.get("DANUS_PROJECT_DIR", "")
+    material = {
+        "kind": kind, "project": str(Path(project).resolve()) if project else "",
+        "author": _author(), "content": content,
+    }
+    encoded = json.dumps(
+        material, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
 
 
 def _verify(statement: str, proof: str) -> Dict[str, Any]:
@@ -109,14 +126,55 @@ def _verify(statement: str, proof: str) -> Dict[str, Any]:
     verify_url = os.environ.get("DANUS_VERIFY_URL", "")
     if not verify_url:
         raise RuntimeError("DANUS_VERIFY_URL is not set (verify service not wired yet)")
-    data = json.dumps({"statement": statement, "proof": proof}).encode("utf-8")
+    timeout = _verify_timeout()
+    payload = {
+        "statement": statement, "proof": proof, "timeout_seconds": timeout,
+        "request_id": _verification_request_id(
+            "single", {"statement": statement, "proof": proof},
+        ),
+    }
+    if os.environ.get("DANUS_PROJECT_DIR"):
+        payload["cancel_path"] = str(
+            Path(os.environ["DANUS_PROJECT_DIR"]) / "workers" / _author() / ".stop"
+        )
+    data = json.dumps(payload).encode("utf-8")
     req = urllib.request.Request(
         verify_url, data=data, headers={"Content-Type": "application/json"}
     )
     # The verifier is a loopback service.  Bypass host proxy variables so a
     # machine-wide HTTP_PROXY cannot redirect local proof material elsewhere.
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
-    with opener.open(req, timeout=_verify_timeout()) as resp:  # noqa: S310 (trusted local URL)
+    with opener.open(req, timeout=timeout + 15) as resp:  # noqa: S310 (trusted local URL)
+        return json.loads(resp.read().decode("utf-8"))
+
+
+def _verify_batch(verification_goal: str, candidates: List[Dict[str, str]]) -> Dict[str, Any]:
+    """Verify a bounded semantic theorem group in one cold verifier process."""
+    verify_url = os.environ.get("DANUS_VERIFY_BATCH_URL", "")
+    if not verify_url:
+        single_url = os.environ.get("DANUS_VERIFY_URL", "")
+        if not single_url:
+            raise RuntimeError("DANUS_VERIFY_URL is not set (verify service not wired yet)")
+        verify_url = single_url.removesuffix("/verify") + "/verify-batch"
+    timeout = _verify_timeout()
+    payload: Dict[str, Any] = {
+        "verification_goal": verification_goal,
+        "candidates": candidates,
+        "timeout_seconds": timeout,
+        "request_id": _verification_request_id(
+            "batch", {"verification_goal": verification_goal, "candidates": candidates},
+        ),
+    }
+    if os.environ.get("DANUS_PROJECT_DIR"):
+        payload["cancel_path"] = str(
+            Path(os.environ["DANUS_PROJECT_DIR"]) / "workers" / _author() / ".stop"
+        )
+    req = urllib.request.Request(
+        verify_url, data=json.dumps(payload).encode("utf-8"),
+        headers={"Content-Type": "application/json"},
+    )
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    with opener.open(req, timeout=timeout + 15) as resp:  # noqa: S310 (trusted local URL)
         return json.loads(resp.read().decode("utf-8"))
 
 
@@ -141,6 +199,22 @@ def gm_add(
     Main agent: pass ``project`` to target one of several projects by name;
     workers omit it (pinned to their own project)."""
     project_dir = _project(project)
+    links = dict(links or {})
+    if _role() == "worker" and links.get("verification_goal"):
+        goal = " ".join(str(links["verification_goal"]).split())
+        if not 4 <= len(goal) <= 500:
+            raise ControlError("verification_goal must be one line and 4-500 characters")
+        assignment = ControlStore(project_dir).validate_assignment(_author())
+        scope = {
+            "target_version": assignment["target_version"],
+            "obligation_id": assignment["obligation_id"],
+            "route_id": assignment["route_id"],
+            "assignment_epoch": assignment["epoch"],
+        }
+        mismatched = [key for key, value in scope.items() if links.get(key) not in {None, value}]
+        if mismatched:
+            raise ControlError(f"staged verification scope mismatch: {', '.join(mismatched)}")
+        links.update(scope, verification_goal=goal)
     control = ControlStore(project_dir)
     if kind == "master_guidance":
         links = links or {}
@@ -232,6 +306,117 @@ def _close_v2_obligation(
     )
     return {"requested": True, "closed": True, "fact_id": fact_id}
 
+
+def _persist_verification(
+    *, result: Dict[str, Any], statement: str, proof: str, display_title: str,
+    predecessors: Optional[List[str]], glossary_introduces: Optional[Dict[str, str]],
+    intuition: str, source_id: Optional[str], external_refs: Optional[List[Dict[str, Any]]],
+    target_version: str, obligation_id: str, route_id: str, assignment_epoch: str,
+    claim_role: str, assumptions_used: Optional[List[str]], closes_obligation: bool,
+    undefined: List[str], problem_id: str, control: ControlStore, fg: FactGraph,
+    gm: GlobalMemory,
+) -> Dict[str, Any]:
+    """Persist one already-issued verifier verdict without starting a verifier."""
+    verdict = result.get("verdict")
+    accepted = verdict == "correct"
+    binding_error = None
+    if accepted:
+        try:
+            control.validate_submission(
+                _author(), target_version=target_version,
+                obligation_id=obligation_id, route_id=route_id,
+                assignment_epoch=assignment_epoch,
+                assumptions_used=assumptions_used or [],
+                reservation_id=os.environ.get("DANUS_CALL_RESERVATION_ID"),
+            )
+        except ControlError as exc:
+            binding_error = f"control state changed during verification: {exc}"
+
+    fact_id = None
+    write_error = None
+    if accepted and not binding_error:
+        try:
+            pending_id = compute_fact_id(
+                problem_id=problem_id, predecessors=predecessors or [],
+                glossary_introduces=glossary_introduces or {},
+                statement=statement, proof=proof,
+            )
+            submission_id = control.prepare_fact(pending_id, {"reused": False, "scope": {
+                "worker": _author(), "assignment_epoch": assignment_epoch,
+                "target_version": target_version, "obligation_id": obligation_id,
+                "route_id": route_id, "claim_role": claim_role,
+                "assumptions_used": assumptions_used or [],
+            }})
+            fact_id = fg.add(
+                problem_id=problem_id, author=_author(), statement=statement, proof=proof,
+                display_title=display_title, predecessors=predecessors,
+                glossary_introduces=glossary_introduces, intuition=intuition,
+                external_refs=external_refs,
+            )
+            control.finalize_fact(fact_id, submission_id)
+        except Exception as exc:
+            write_error = str(exc)
+
+    gm.append(
+        "verification", claim=statement,
+        evidence="verdict: correct" if verdict == "correct" else (result.get("repair_hints") or "verdict: wrong"),
+        author=_author(), verifiable=False,
+        links={"source_id": source_id, "predecessors": predecessors or []},
+        verdict=verdict, fact_id=fact_id, write_error=binding_error or write_error,
+        verification_report=result.get("verification_report"),
+    )
+    if verdict == "wrong":
+        verification_goal = ""
+        if source_id:
+            for kind in ("conclusion", "example", "counterexample", "proof_attempt"):
+                source = next((entry for entry in gm.read(kind) if entry.get("id") == source_id), None)
+                if source:
+                    verification_goal = str((source.get("links") or {}).get("verification_goal") or "")
+                    break
+        gm.append(
+            "obstacle",
+            claim=f"Verifier rejected: {' '.join(display_title.split()) or statement[:80]}",
+            evidence=json.dumps({
+                "repair_hints": result.get("repair_hints") or "",
+                "verification_report": result.get("verification_report") or {},
+            }, ensure_ascii=False, sort_keys=True),
+            author=_author(), verifiable=False,
+            links={
+                "source_id": source_id, "verification_goal": verification_goal,
+                "target_version": target_version, "obligation_id": obligation_id,
+                "route_id": route_id, "assignment_epoch": assignment_epoch,
+            },
+        )
+    if source_id:
+        gm.set_status(
+            source_id,
+            "verified" if fact_id else "refuted" if verdict == "wrong" else "unverified",
+            fact_id=fact_id,
+        )
+
+    closure = None
+    if accepted and fact_id:
+        closure = _close_v2_obligation(
+            control, statement=statement, fact_id=fact_id,
+            obligation_id=obligation_id, assignment_epoch=assignment_epoch,
+            claim_role=claim_role, undefined=undefined, requested=closes_obligation,
+        )
+    if binding_error:
+        return {"accepted": False, "verifier_accepted": True, "verdict": verdict,
+                "write_error": binding_error, "undefined_symbols": undefined}
+    if not accepted:
+        return {
+            "accepted": False, "verdict": verdict,
+            "repair_hints": result.get("repair_hints"),
+            "verification_report": result.get("verification_report"),
+            "undefined_symbols": undefined,
+        }
+    if write_error:
+        return {"accepted": True, "fact_id": None, "write_error": write_error,
+                "undefined_symbols": undefined}
+    return {"accepted": True, "fact_id": fact_id, "closure": closure,
+            "undefined_symbols": undefined}
+
 def fact_submit(
     statement: str,
     proof: str,
@@ -314,13 +499,15 @@ def fact_submit(
 
     reused_fact_id = control.reusable_fact(statement, assumptions_used or [])
     if reused_fact_id:
-        control.prepare_fact(reused_fact_id, {"reused": True, "scope": {
+        submission_id = control.prepare_fact(reused_fact_id, {"reused": True, "scope": {
             "worker": _author(), "assignment_epoch": assignment_epoch,
             "target_version": target_version, "obligation_id": obligation_id,
             "route_id": route_id, "claim_role": claim_role,
             "assumptions_used": assumptions_used or [],
         }})
-        control.finalize_fact(reused_fact_id)
+        control.finalize_fact(reused_fact_id, submission_id)
+        if source_id:
+            gm.set_status(source_id, "verified", fact_id=reused_fact_id)
         closure = _close_v2_obligation(
             control, statement=statement, fact_id=reused_fact_id,
             obligation_id=obligation_id or "", assignment_epoch=assignment_epoch or "",
@@ -340,14 +527,15 @@ def fact_submit(
     #    clean error so the worker retries. Nothing is lost.
     reservation = None
     try:
+        parent_reservation_id = os.environ.get("DANUS_CALL_RESERVATION_ID")
         reservation = control.reserve_call(
             component="verification", max_wall_seconds=_verify_timeout(),
-            parent_reservation_id=os.environ.get("DANUS_CALL_RESERVATION_ID"),
+            parent_reservation_id=parent_reservation_id,
             worker=_author(), target_version=target_version,
             obligation_id=obligation_id, route_id=route_id,
             assignment_epoch=assignment_epoch,
         )
-        gate = control.claim_backend_call("codex")
+        gate = {"allowed": True} if parent_reservation_id else control.claim_backend_call("codex")
         if not gate["allowed"]:
             control.cancel_call_reservation(reservation["id"], reason="provider circuit is open")
             return {"accepted": False, "verdict": "error", "error": f"Codex provider circuit is {gate['state']}", "undefined_symbols": undefined}
@@ -367,8 +555,12 @@ def fact_submit(
         )
         return {"accepted": False, "verdict": "control_error", "error": str(exc), "undefined_symbols": undefined}
     try:
+        if source_id:
+            gm.set_status(source_id, "verifying")
         result = _verify(statement, proof)
     except Exception as e:
+        if source_id:
+            gm.set_status(source_id, "unverified")
         control.record_cost(
             component="verification", wall_seconds=time.monotonic() - started,
             worker=_author(), target_version=target_version, obligation_id=obligation_id,
@@ -385,6 +577,8 @@ def fact_submit(
     # the .get() below throw uncaught; treat it as a verify error (clean retry
     # envelope, no verdict to store) rather than leaking a stack trace to the worker.
     if not isinstance(result, dict):
+        if source_id:
+            gm.set_status(source_id, "unverified")
         control.record_cost(
             component="verification", wall_seconds=time.monotonic() - started,
             worker=_author(), target_version=target_version, obligation_id=obligation_id,
@@ -396,63 +590,16 @@ def fact_submit(
         return {"accepted": False, "verdict": "error",
                 "error": f"verify service returned a non-dict body ({type(result).__name__})",
                 "undefined_symbols": undefined}
-    verdict = result.get("verdict")
-    accepted = verdict == "correct"
-    binding_error = None
-    if accepted:
-        try:
-            control.validate_submission(
-                _author(), target_version=target_version or "",
-                obligation_id=obligation_id or "", route_id=route_id or "",
-                assignment_epoch=assignment_epoch or "",
-                assumptions_used=assumptions_used or [],
-                reservation_id=os.environ.get("DANUS_CALL_RESERVATION_ID"),
-            )
-        except ControlError as exc:
-            binding_error = f"control state changed during verification: {exc}"
-
-    # 2) Write the fact iff accepted. Catch write failures (e.g. a revoked
-    #    predecessor) so they do NOT skip the trace below.
-    fact_id = None
-    write_error = None
-    if accepted and not binding_error:
-        try:
-            pending_id = compute_fact_id(
-                problem_id=problem_id, predecessors=predecessors or [],
-                glossary_introduces=glossary_introduces or {},
-                statement=statement, proof=proof,
-            )
-            control.prepare_fact(pending_id, {"reused": False, "scope": {
-                "worker": _author(), "assignment_epoch": assignment_epoch,
-                "target_version": target_version, "obligation_id": obligation_id,
-                "route_id": route_id, "claim_role": claim_role,
-                "assumptions_used": assumptions_used or [],
-            }})
-            fact_id = fg.add(
-                problem_id=problem_id, author=_author(), statement=statement, proof=proof,
-                display_title=display_title,
-                predecessors=predecessors, glossary_introduces=glossary_introduces,
-                intuition=intuition, external_refs=external_refs,
-            )
-            control.finalize_fact(fact_id)
-        except Exception as e:
-            write_error = str(e)
-
-    # 3) ALWAYS record the verification outcome to global memory once a verdict exists.
-    gm.append(
-        "verification",
-        claim=statement,
-        evidence="verdict: correct" if verdict == "correct" else (result.get("repair_hints") or "verdict: wrong"),
-        author=_author(),
-        verifiable=False,
-        links={"source_id": source_id, "predecessors": predecessors or []},
-        verdict=verdict,
-        fact_id=fact_id,
-        write_error=binding_error or write_error,
-        verification_report=result.get("verification_report"),
+    response = _persist_verification(
+        result=result, statement=statement, proof=proof, display_title=display_title,
+        predecessors=predecessors, glossary_introduces=glossary_introduces,
+        intuition=intuition, source_id=source_id, external_refs=external_refs,
+        target_version=target_version or "", obligation_id=obligation_id or "",
+        route_id=route_id or "", assignment_epoch=assignment_epoch or "",
+        claim_role=claim_role or "", assumptions_used=assumptions_used,
+        closes_obligation=closes_obligation, undefined=undefined,
+        problem_id=problem_id, control=control, fg=fg, gm=gm,
     )
-
-    closure = None
     control.record_cost(
         component="verification", wall_seconds=time.monotonic() - started,
         worker=_author(), target_version=target_version, obligation_id=obligation_id,
@@ -463,31 +610,301 @@ def fact_submit(
         attempt_status="completed",
     )
     control.record_backend_success(provider_key="codex", actor="verification")
-    if accepted and fact_id:
-        closure = _close_v2_obligation(
-            control, statement=statement, fact_id=fact_id,
-            obligation_id=obligation_id or "", assignment_epoch=assignment_epoch or "",
-            claim_role=claim_role or "", undefined=undefined,
-            requested=closes_obligation,
-        )
+    return response
 
-    # 4) Return.
-    if binding_error:
-        return {"accepted": False, "verifier_accepted": True, "verdict": verdict,
-                "write_error": binding_error, "undefined_symbols": undefined}
-    if not accepted:
-        return {
-            "accepted": False,
-            "verdict": verdict,
-            "repair_hints": result.get("repair_hints"),
-            "verification_report": result.get("verification_report"),
-            "undefined_symbols": undefined,
+
+def fact_submit_batch(
+    candidates: List[Dict[str, Any]], verification_goal: str,
+) -> Dict[str, Any]:
+    """Verify a durable semantic group of 1-6 independent candidate facts.
+
+    Each candidate is ``{"source_id": ...}`` pointing to a verifiable global-memory
+    entry staged with the same ``verification_goal`` and assignment scope. The
+    source claim/evidence are authoritative, so an interrupted worker can resume
+    without reconstructing its proof. The 1-6 bound is a safety cap, not a wait
+    target. Candidates may cite existing signed facts, but not one another.
+    """
+    started = time.monotonic()
+    verification_goal = " ".join(verification_goal.split())
+    if not 4 <= len(verification_goal) <= 500:
+        return {"accepted": False, "verdict": "control_error",
+                "error": "verification_goal must be one line and 4-500 characters"}
+    if not 1 <= len(candidates) <= 6:
+        return {"accepted": False, "verdict": "control_error",
+                "error": "fact_submit_batch requires 1-6 staged candidates"}
+
+    project_dir = _project()
+    control = ControlStore(project_dir)
+    try:
+        assignment = control.validate_assignment(_author())
+    except ControlError as exc:
+        return {"accepted": False, "verdict": "control_error", "error": str(exc)}
+    target_version = assignment["target_version"]
+    obligation_id = assignment["obligation_id"]
+    route_id = assignment["route_id"]
+    assignment_epoch = assignment["epoch"]
+    fg, gm = _fg(), _gm()
+    problem_id = os.environ.get("DANUS_PROBLEM_ID", project_dir.name)
+    prepared: List[Dict[str, Any]] = []
+    normalized: List[Dict[str, Any]] = []
+    results: List[Optional[Dict[str, Any]]] = [None] * len(candidates)
+    entries = {
+        str(entry.get("id")): entry
+        for kind in ("conclusion", "example", "counterexample", "proof_attempt")
+        for entry in gm.read(kind)
+        if entry.get("id")
+    }
+    recoverable_verdicts = {
+        str((entry.get("links") or {}).get("source_id")): {
+            "verdict": "correct", "repair_hints": "",
+            "verification_report": entry.get("verification_report"),
         }
-    if write_error:
-        return {"accepted": True, "fact_id": None, "write_error": write_error,
-                "undefined_symbols": undefined}
-    return {"accepted": True, "fact_id": fact_id, "closure": closure,
-            "undefined_symbols": undefined}
+        for entry in gm.read("verification")
+        if entry.get("verdict") == "correct"
+        and entry.get("write_error")
+        and (entry.get("links") or {}).get("source_id")
+    }
+    source_ids = [raw.get("source_id") if isinstance(raw, dict) else None for raw in candidates]
+    if any(not isinstance(source_id, str) or not source_id for source_id in source_ids):
+        return {"accepted": False, "verdict": "control_error",
+                "error": "every batch candidate requires a staged source_id"}
+    if len(set(source_ids)) != len(source_ids):
+        return {"accepted": False, "verdict": "control_error",
+                "error": "batch source_id values must be unique"}
+    normalized_claims: Dict[str, str] = {}
+    for source_id in source_ids:
+        entry = entries.get(str(source_id)) or {}
+        claim = " ".join(str(entry.get("claim") or "").split())
+        prior = normalized_claims.get(claim) if claim else None
+        if prior:
+            return {
+                "accepted": False, "verdict": "control_error",
+                "error": (
+                    "batch candidates must have distinct statements; "
+                    f"source_ids {prior} and {source_id} are duplicates"
+                ),
+            }
+        if claim:
+            normalized_claims[claim] = str(source_id)
+    if sum(bool((entries.get(str(source_id)) or {}).get("links", {}).get("closes_obligation")) for source_id in source_ids) > 1:
+        return {"accepted": False, "verdict": "control_error",
+                "error": "at most one batch candidate may close the obligation"}
+
+    for index, raw in enumerate(candidates):
+        source_id = str(raw["source_id"])
+        entry = entries.get(source_id)
+        if not entry:
+            return {"accepted": False, "verdict": "control_error",
+                    "error": f"candidate {index + 1} source_id is not a verifiable global-memory entry"}
+        links = entry.get("links") or {}
+        expected_scope = {
+            "target_version": target_version, "obligation_id": obligation_id,
+            "route_id": route_id, "assignment_epoch": assignment_epoch,
+            "verification_goal": verification_goal,
+        }
+        if entry.get("author") != _author() or entry.get("status") not in {"unverified", "verifying"}:
+            return {"accepted": False, "verdict": "control_error",
+                    "error": f"candidate {index + 1} is not a pending draft owned by this worker"}
+        mismatched = [key for key, value in expected_scope.items() if links.get(key) != value]
+        if mismatched:
+            return {"accepted": False, "verdict": "control_error",
+                    "error": f"candidate {index + 1} staged scope mismatch: {', '.join(mismatched)}"}
+        candidate = {
+            "statement": entry.get("claim"), "proof": entry.get("evidence"),
+            "display_title": links.get("display_title", ""),
+            "predecessors": links.get("predecessors") or [],
+            "glossary_introduces": entry.get("glossary") or {},
+            "intuition": links.get("intuition", ""), "source_id": source_id,
+            "external_refs": links.get("external_refs"),
+            "claim_role": links.get("claim_role"),
+            "assumptions_used": links.get("assumptions_used") or [],
+            "closes_obligation": bool(links.get("closes_obligation", False)),
+        }
+        if not isinstance(candidate["statement"], str) or not candidate["statement"].strip():
+            return {"accepted": False, "verdict": "control_error",
+                    "error": f"candidate {index + 1} has no statement"}
+        if not isinstance(candidate["proof"], str) or not candidate["proof"].strip():
+            return {"accepted": False, "verdict": "control_error",
+                    "error": f"candidate {index + 1} has no proof"}
+        title = " ".join(str(candidate["display_title"]).split())
+        if "\n" in str(candidate["display_title"]) or "\r" in str(candidate["display_title"]) or not 4 <= len(title) <= 80:
+            return {"accepted": False, "verdict": "control_error",
+                    "error": f"candidate {index + 1} display_title must be one line and 4-80 characters"}
+        if candidate["claim_role"] not in CLAIM_ROLES:
+            return {"accepted": False, "verdict": "control_error",
+                    "error": f"candidate {index + 1} has invalid claim_role: {candidate['claim_role']}"}
+        if not isinstance(candidate["predecessors"], list) or any(
+            not isinstance(fid, str) or not fg.exists(fid) for fid in candidate["predecessors"]
+        ):
+            return {"accepted": False, "verdict": "control_error",
+                    "error": f"candidate {index + 1} predecessors must be existing signed fact_ids"}
+        tainted = [fid for fid in candidate["predecessors"] if control.fact_tainted(fid)]
+        if tainted:
+            return {"accepted": False, "verdict": "control_error",
+                    "error": f"candidate {index + 1} depends on tainted facts: {', '.join(tainted)}"}
+        try:
+            control.validate_submission(
+                _author(), target_version=target_version, obligation_id=obligation_id,
+                route_id=route_id, assignment_epoch=assignment_epoch,
+                assumptions_used=candidate["assumptions_used"],
+                reservation_id=os.environ.get("DANUS_CALL_RESERVATION_ID"),
+            )
+        except ControlError as exc:
+            return {"accepted": False, "verdict": "control_error",
+                    "error": f"candidate {index + 1}: {exc}"}
+        try:
+            undefined = fg.undefined_symbols(
+                statement=candidate["statement"], proof=candidate["proof"],
+                intuition=candidate["intuition"], predecessors=candidate["predecessors"],
+                glossary_introduces=candidate["glossary_introduces"],
+            )
+        except Exception:
+            undefined = []
+        candidate.update(index=index, undefined=undefined)
+        normalized.append(candidate)
+
+        reused = control.reusable_fact(candidate["statement"], candidate["assumptions_used"])
+        if reused:
+            submission_id = control.prepare_fact(reused, {"reused": True, "scope": {
+                "worker": _author(), "assignment_epoch": assignment_epoch,
+                "target_version": target_version, "obligation_id": obligation_id,
+                "route_id": route_id, "claim_role": candidate["claim_role"],
+                "assumptions_used": candidate["assumptions_used"],
+            }})
+            control.finalize_fact(reused, submission_id)
+            gm.set_status(candidate["source_id"], "verified", fact_id=reused)
+            results[index] = {"accepted": True, "fact_id": reused, "reused": True,
+                              "closure": None, "undefined_symbols": undefined}
+        else:
+            recovered_verdict = recoverable_verdicts.get(candidate["source_id"])
+            if recovered_verdict:
+                results[index] = _persist_verification(
+                    result=recovered_verdict, statement=candidate["statement"],
+                    proof=candidate["proof"], display_title=candidate["display_title"],
+                    predecessors=candidate["predecessors"],
+                    glossary_introduces=candidate["glossary_introduces"],
+                    intuition=candidate["intuition"], source_id=candidate["source_id"],
+                    external_refs=candidate["external_refs"], target_version=target_version,
+                    obligation_id=obligation_id, route_id=route_id,
+                    assignment_epoch=assignment_epoch, claim_role=candidate["claim_role"],
+                    assumptions_used=candidate["assumptions_used"], closes_obligation=False,
+                    undefined=undefined, problem_id=problem_id, control=control, fg=fg, gm=gm,
+                )
+            else:
+                prepared.append(candidate)
+
+    def close_after_writes() -> None:
+        for candidate in normalized:
+            if not candidate["closes_obligation"]:
+                continue
+            item = results[candidate["index"]]
+            if item and item.get("accepted") and item.get("fact_id"):
+                item["closure"] = _close_v2_obligation(
+                    control, statement=candidate["statement"], fact_id=item["fact_id"],
+                    obligation_id=obligation_id, assignment_epoch=assignment_epoch,
+                    claim_role=candidate["claim_role"], undefined=candidate["undefined"],
+                    requested=True,
+                )
+
+    if not prepared:
+        close_after_writes()
+        control.record_cost(
+            component="verification", wall_seconds=time.monotonic() - started,
+            worker=_author(), target_version=target_version, obligation_id=obligation_id,
+            route_id=route_id, assignment_epoch=assignment_epoch, batch_size=len(candidates),
+            usage={}, cost_usd=0.0,
+        )
+        return {"accepted": all(bool(item and item.get("fact_id")) for item in results),
+                "results": results, "verified_count": 0,
+                "reused_count": sum(bool(item and item.get("reused")) for item in results),
+                "recovered_write_count": sum(bool(item and not item.get("reused")) for item in results)}
+
+    reservation = None
+    try:
+        parent_reservation_id = os.environ.get("DANUS_CALL_RESERVATION_ID")
+        reservation = control.reserve_call(
+            component="verification", max_wall_seconds=_verify_timeout(),
+            parent_reservation_id=parent_reservation_id,
+            worker=_author(), target_version=target_version, obligation_id=obligation_id,
+            route_id=route_id, assignment_epoch=assignment_epoch, batch_size=len(prepared),
+        )
+        gate = {"allowed": True} if parent_reservation_id else control.claim_backend_call("codex")
+        if not gate["allowed"]:
+            control.cancel_call_reservation(reservation["id"], reason="provider circuit is open")
+            return {"accepted": False, "verdict": "error",
+                    "error": f"Codex provider circuit is {gate['state']}"}
+    except ControlError as exc:
+        return {"accepted": False, "verdict": "control_error", "error": str(exc)}
+
+    try:
+        for candidate in prepared:
+            gm.set_status(candidate["source_id"], "verifying")
+        payloads = [
+            {"candidate_id": str(candidate["index"] + 1),
+             "statement": candidate["statement"], "proof": candidate["proof"]}
+            for candidate in prepared
+        ]
+        if len(payloads) == 1:
+            raw_result = _verify(payloads[0]["statement"], payloads[0]["proof"])
+            verdicts = [raw_result]
+        else:
+            raw_result = _verify_batch(verification_goal, payloads)
+            verdicts = raw_result.get("verifications") if isinstance(raw_result, dict) else None
+            if not isinstance(verdicts, list) or [item.get("candidate_id") for item in verdicts if isinstance(item, dict)] != [item["candidate_id"] for item in payloads]:
+                raise RuntimeError("verify service returned an invalid batch result")
+        if not isinstance(raw_result, dict) or any(not isinstance(item, dict) for item in verdicts):
+            raise RuntimeError("verify service returned an invalid response")
+    except Exception as exc:
+        for candidate in prepared:
+            gm.set_status(candidate["source_id"], "unverified")
+        control.record_cost(
+            component="verification", wall_seconds=time.monotonic() - started,
+            worker=_author(), target_version=target_version, obligation_id=obligation_id,
+            route_id=route_id, assignment_epoch=assignment_epoch, batch_size=len(prepared),
+            reservation_id=reservation["id"] if reservation else None,
+            attempt_status="failed",
+        )
+        from danus import codex
+        rc = 124 if "timed out" in str(exc).lower() or "504" in str(exc) else 1
+        control.record_backend_failure(
+            codex.classify_failure(rc, text=str(exc)), provider_key="codex",
+            actor="verification", wall_seconds=time.monotonic() - started,
+        )
+        return {"accepted": False, "verdict": "error", "error": str(exc)}
+
+    for candidate, verdict in zip(prepared, verdicts):
+        results[candidate["index"]] = _persist_verification(
+            result=verdict, statement=candidate["statement"], proof=candidate["proof"],
+            display_title=candidate["display_title"], predecessors=candidate["predecessors"],
+            glossary_introduces=candidate["glossary_introduces"], intuition=candidate["intuition"],
+            source_id=candidate["source_id"], external_refs=candidate["external_refs"],
+            target_version=target_version, obligation_id=obligation_id, route_id=route_id,
+            assignment_epoch=assignment_epoch, claim_role=candidate["claim_role"],
+            assumptions_used=candidate["assumptions_used"],
+            closes_obligation=False, undefined=candidate["undefined"],
+            problem_id=problem_id, control=control, fg=fg, gm=gm,
+        )
+    close_after_writes()
+    usage = raw_result.get("usage") if isinstance(raw_result.get("usage"), dict) else {}
+    control.record_cost(
+        component="verification", wall_seconds=time.monotonic() - started,
+        worker=_author(), target_version=target_version, obligation_id=obligation_id,
+        route_id=route_id, assignment_epoch=assignment_epoch, batch_size=len(prepared),
+        usage=usage, cost_usd=raw_result.get("cost_usd"),
+        reservation_id=reservation["id"] if reservation else None,
+        attempt_status="completed",
+    )
+    control.record_backend_success(provider_key="codex", actor="verification")
+    verifier_accepted_count = sum(bool(item and item.get("accepted")) for item in results)
+    persisted_count = sum(bool(item and item.get("fact_id")) for item in results)
+    return {"accepted": persisted_count == len(results), "results": results,
+            "accepted_count": persisted_count,
+            "verifier_accepted_count": verifier_accepted_count,
+            "verified_count": len(prepared),
+            "reused_count": sum(bool(item and item.get("reused")) for item in results),
+            "recovered_write_count": len(candidates) - len(prepared)
+            - sum(bool(item and item.get("reused")) for item in results),
+            "usage": usage}
 
 
 def fact_search(query: str, limit: int = 10, project: Optional[str] = None) -> Dict[str, Any]:
@@ -565,6 +982,7 @@ _TOOLS = {
     "gm_add": gm_add,
     "gm_search": gm_search,
     "fact_submit": fact_submit,
+    "fact_submit_batch": fact_submit_batch,
     "fact_search": fact_search,
     "fact_revoke": fact_revoke,
     "research_map": research_map,

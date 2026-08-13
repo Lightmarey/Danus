@@ -40,12 +40,12 @@ The role table (`danus/gateway/roles.py`):
 | role | tools it can see |
 |---|---|
 | **worker** | memory/write tools plus scoped route/obligation/fact reads and arXiv search |
-| **main** (the orchestrator) | memory tools plus the shared research map/context/proof reads, `fact_revoke`, and arXiv search — **no `fact_submit`** |
+| **main** (the orchestrator) | memory tools plus the shared research map/context/proof reads, `fact_revoke`, and arXiv search — **no fact-submission tools** |
 | **verifier** | `search_arxiv_theorems` **only** (read-only) |
 
 Load-bearing separations:
 
-- **The orchestrator can never fabricate a fact.** `main` has no `fact_submit`;
+- **The orchestrator can never fabricate a fact.** `main` has no fact-submission tools;
   only a `worker` can submit, and only the verifier can accept.
 - **The verifier is read-only.** It can look up literature; it writes nothing to
   the truth stores.
@@ -55,7 +55,7 @@ Load-bearing separations:
 
 ## 3. The write-gate
 
-The single path a fact enters truth is a worker's `fact_submit`, which is a
+The single path a fact enters truth is a worker's verifier-gated submission, which is a
 state machine, not a suggestion:
 
 1. call the verify service with the statement + proof;

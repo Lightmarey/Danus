@@ -21,7 +21,6 @@ from __future__ import annotations
 
 import json
 import os
-import sys
 import tempfile
 import time
 from contextlib import contextmanager
@@ -67,8 +66,11 @@ from pathlib import Path
 out = Path(os.environ["VERIFIER_RESULTS_DIR"]) / "RID" / "verification.json"
 out.parent.mkdir(parents=True, exist_ok=True)
 out.write_text(json.dumps({"verification_report": {"critical_errors": []},
-                           "verdict": "correct", "repair_hints": ""}))
-print("ok")
+                           "verdict": "correct", "repair_hints": "",
+                           "usage": {"input_tokens": 999999}, "cost_usd": 999}))
+print(json.dumps({"type": "turn.completed", "usage": {
+    "input_tokens": 12, "cached_input_tokens": 7,
+    "output_tokens": 4, "reasoning_output_tokens": 3}}))
 """
 
 # stub that exits nonzero and writes nothing
@@ -140,9 +142,25 @@ def test_build_codex_command_shape():
     py = json.dumps(runtime.current_python())
     assert any('mcp_servers.danus=' in a and 'DANUS_ROLE="verifier"' in a and py in a for a in cmd)
     assert "--dangerously-bypass-approvals-and-sandbox" in cmd
+    assert "--json" in cmd
     # the prompt (final arg) names the exact output path
     assert cmd[-1].endswith("verification.json.")
     assert "Run_id: RID" in cmd[-1] and _STMT in cmd[-1]
+
+
+def test_build_batch_codex_command_shape():
+    candidates = [
+        {"candidate_id": "1", "statement": _STMT, "proof": _PROOF},
+        {"candidate_id": "2", "statement": "Two is even.", "proof": "Two equals 2 times 1."},
+    ]
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp = Path(tmp)
+        with _env(DANUS_CODEX_BIN=str(tmp / "codex"), VERIFY_AGENT_HOME=str(tmp)):
+            cmd = launcher.build_batch_codex_command("RID", "Integer identities", candidates)
+    assert "verifications array" in cmd[-1]
+    assert '"candidate_id": "1"' in cmd[-1] and '"candidate_id": "2"' in cmd[-1]
+    assert "Verification goal (shared theorem group): Integer identities" in cmd[-1]
+    assert cmd[-1].endswith("verification.json.")
 
 
 def test_subprocess_env_prepends_dir_for_concrete_path():
@@ -219,6 +237,14 @@ def test_run_success_reads_back_payload():
         out = _run()
         assert out["verdict"] == "correct"
         assert out["verification_report"]["critical_errors"] == []
+        assert out["usage"] == {
+            "input_tokens": 12,
+            "cached_input_tokens": 7,
+            "fresh_input_tokens": 5,
+            "output_tokens": 4,
+            "reasoning_tokens": 3,
+        }
+        assert "cost_usd" not in out
 
 
 def test_run_timeout_504():
@@ -235,6 +261,24 @@ def test_run_timeout_504():
         assert not runtime.pid_alive(child_pid)
         log_path = launcher._results_dir("RID") / "log.md"
         assert runtime.wait_until_path_releasable(log_path, timeout_seconds=0.1) is True
+
+
+def test_operator_stop_cancels_verifier_499():
+    with _service(_STUB_SLOW, timeout="30"):
+        stop = launcher._results_dir("RID") / ".stop"
+        stop.parent.mkdir(parents=True)
+        stop.touch()
+        try:
+            launcher.run_codex_verification("RID", _STMT, _PROOF, cancel_path=str(stop))
+            assert False, "expected 499"
+        except HTTPException as e:
+            assert e.status_code == 499 and "cancelled by operator stop" in e.detail
+
+
+def test_requested_timeout_is_capped_by_service_timeout():
+    with _env(CODEX_TIMEOUT_SECONDS="9"):
+        assert launcher._timeout(20) == 9
+        assert launcher._timeout(4) == 4
 
 
 def test_run_nonzero_exit_500():

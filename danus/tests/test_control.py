@@ -152,15 +152,18 @@ def test_assumption_boundary_and_read_model(tmp_path: Path):
         "high", target_version="v0001", obligation_id="v0001-T",
         route_id="route-1", assignment_epoch=assignment["epoch"], assumptions_used=["A"],
     )
-    for used in (["choice"], ["unknown"]):
+    for used, expected in (
+        (["choice"], "submission uses forbidden assumptions"),
+        (["unknown"], "use exact allowed_assumptions entries: ['A']"),
+    ):
         try:
             store.validate_submission(
                 "high", target_version="v0001", obligation_id="v0001-T",
                 route_id="route-1", assignment_epoch=assignment["epoch"], assumptions_used=used,
             )
             assert False, "out-of-contract assumption should fail"
-        except ControlError:
-            pass
+        except ControlError as exc:
+            assert expected in str(exc)
     result = store.rebuild_read_model()
     assert Path(result["path"]).is_file()
     assert result["targets"] == 1 and result["obligations"] == 1 and result["routes"] == 1
@@ -385,6 +388,59 @@ def test_nested_verification_uses_parent_wall_reservation_without_double_countin
     assert store.budget_state()["wall_seconds"] == 8
 
 
+def test_nested_verification_extends_parent_for_drain(tmp_path: Path):
+    store = _store(tmp_path)
+    target = store.propose_target(_target())
+    store.approve_target(target["version"])
+    parent = store.reserve_call(component="worker_round", max_wall_seconds=30)
+    child = store.reserve_call(
+        component="verification", max_wall_seconds=3600,
+        parent_reservation_id=parent["id"],
+    )
+    assert child["requested_wall_seconds"] == 3600
+    assert store.nested_call_timeout(parent["id"], 3600) == 3600
+    assert store.active_nested_call(parent["id"])["id"] == child["id"]
+    parent_row = next(row for row in store.active_call_reservations() if row["id"] == parent["id"])
+    assert parent_row["expires_at_epoch"] > child["expires_at_epoch"]
+    store.record_cost(component="verification", wall_seconds=1, reservation_id=child["id"])
+    assert store.active_nested_call(parent["id"]) is None
+
+
+def test_dead_worker_recovery_cancels_nested_call_and_releases_parent(tmp_path: Path):
+    store, assignment = _assigned(tmp_path)
+    assignment["status"] = "running"
+    store.save_assignment(assignment)
+    scope = {
+        "worker": "high", "assignment_epoch": assignment["epoch"],
+        "target_version": assignment["target_version"],
+        "obligation_id": assignment["obligation_id"],
+        "route_id": assignment["route_id"],
+    }
+    parent = store.reserve_call(
+        component="worker_round", max_wall_seconds=30, **scope,
+    )
+    child = store.reserve_call(
+        component="verification", max_wall_seconds=60,
+        parent_reservation_id=parent["id"], **scope,
+    )
+
+    result = store.recover_worker_interruption(
+        "high", wall_seconds=7, reason="test_crash",
+    )
+
+    assert result["recovered"] is True
+    assert store.assignment("high")["status"] == "assigned"
+    assert store.assignment("high")["rounds_used"] == 0
+    assert store.active_call_reservations() == []
+    assert store.events("call_reservation_cancelled")[-1]["reservation_id"] == child["id"]
+    assert store.events("round_interrupted")[-1]["reason"] == "test_crash"
+    cost = store.events("cost")[-1]
+    assert cost["reservation_id"] == parent["id"]
+    assert cost["wall_seconds"] == 7
+    assert cost["usage_status"] == "unavailable"
+    assert store.recover_worker_interruption("high")["recovered"] is False
+
+
 def test_authoring_and_consult_preflight_stop_before_an_over_budget_call(tmp_path: Path):
     from danus.human_summary import server as summary_server
     from danus.strategy import cli as strategy_cli
@@ -562,7 +618,41 @@ def test_existing_v2_database_migrates_round_vocabulary_once(tmp_path: Path):
             "SELECT value FROM meta WHERE key='schema_version'",
         ).fetchone()[0]
     assert "rounds_used" in columns and "slice_count" not in columns
-    assert component == "worker_round" and version == "3"
+    assert component == "worker_round" and version == "4"
+
+
+def test_existing_v3_database_migrates_fact_submission_identity(tmp_path: Path):
+    store, _ = _assigned(tmp_path)
+    payload = json.dumps({"scope": {"assignment_epoch": "epoch-old"}})
+    with store._connect() as db:
+        db.execute("ALTER TABLE pending_facts RENAME TO pending_facts_v4")
+        db.execute("CREATE TABLE pending_facts(fact_id TEXT PRIMARY KEY,payload TEXT NOT NULL,status TEXT NOT NULL)")
+        db.execute("INSERT INTO pending_facts VALUES ('fact-old',?,'complete')", (payload,))
+        db.execute("DROP TABLE pending_facts_v4")
+        db.execute("ALTER TABLE fact_scopes RENAME TO fact_scopes_v4")
+        db.execute(
+            "CREATE TABLE fact_scopes("
+            "fact_id TEXT NOT NULL,target_version TEXT NOT NULL,obligation_id TEXT NOT NULL,"
+            "route_id TEXT NOT NULL,assignment_epoch TEXT NOT NULL,claim_role TEXT NOT NULL,"
+            "relation TEXT NOT NULL,event_seq INTEGER,"
+            "PRIMARY KEY(fact_id,target_version,obligation_id,route_id,relation))"
+        )
+        db.execute("INSERT INTO fact_scopes VALUES ('fact-old','v0001','v0001-T','r1','epoch-old','unconditional','direct',NULL)")
+        db.execute("DROP TABLE fact_scopes_v4")
+        db.execute("UPDATE meta SET value='3' WHERE key='schema_version'")
+        db.commit()
+
+    reopened = ControlStore(store.project)
+    reopened.scaffold()
+    with reopened._connect() as db:
+        pending_columns = {row[1] for row in db.execute("PRAGMA table_info(pending_facts)")}
+        scope_pk = {row[1]: row[5] for row in db.execute("PRAGMA table_info(fact_scopes)")}
+        pending = db.execute("SELECT submission_id,fact_id,status FROM pending_facts").fetchone()
+        scope = db.execute("SELECT assignment_epoch FROM fact_scopes").fetchone()
+    assert pending_columns >= {"submission_id", "fact_id"}
+    assert scope_pk["assignment_epoch"] > 0
+    assert tuple(pending) == ("fact-old", "fact-old", "complete")
+    assert scope[0] == "epoch-old"
 
 
 def test_target_change_during_a_round_settles_cost_but_discards_research_state(tmp_path: Path):

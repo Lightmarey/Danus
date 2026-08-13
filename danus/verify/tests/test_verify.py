@@ -10,15 +10,17 @@ Runs standalone (``python -m danus.verify.tests.test_verify``) and under pytest.
 
 from __future__ import annotations
 
+import json
 import os
 import tempfile
 from contextlib import contextmanager
 from pathlib import Path
 
 from fastapi import HTTPException
+from fastapi.testclient import TestClient
 
 from danus.verify import prechecks
-from danus.verify.service import VerifyRequest, verify
+from danus.verify.service import VerifyRequest, app, verify
 from danus.tests.portable import write_python_launcher
 
 FAKE = Path(__file__).resolve().parent / "fake_codex.py"
@@ -82,6 +84,62 @@ def test_verify_reject_via_fake_codex():
     with tempfile.TemporaryDirectory() as tmp:
         out = _call(_GOOD_STATEMENT, _GOOD_PROOF + " [[FAKE:wrong]]", tmp)
         assert out["verdict"] == "wrong" and out["repair_hints"]
+
+
+def test_verify_batch_mixed_via_one_fake_codex():
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        fake = _fake_launcher(root)
+        fake_candidates = [
+            {"candidate_id": "a", "statement": _GOOD_STATEMENT, "proof": _GOOD_PROOF},
+            {"candidate_id": "b", "statement": _GOOD_STATEMENT + " Again.",
+             "proof": _GOOD_PROOF + " [[FAKE:wrong]]"},
+        ]
+        with _env(
+            DANUS_CODEX_BIN=str(fake), VERIFIER_RESULTS_DIR=str(root / "runs"),
+            VERIFY_AGENT_HOME=str(root),
+            # cmd.exe strips JSON quotes from forwarded argv; feed the fake the
+            # same prompt through env so this Windows plumbing test stays exact.
+            FAKE_CODEX_PROMPT=(
+                "Candidates (verify each independently):\n"
+                + json.dumps(fake_candidates)
+            ),
+        ):
+            response = TestClient(app).post("/verify-batch", json={
+                "verification_goal": "Integer identities", "candidates": fake_candidates,
+            })
+            assert response.status_code == 200
+            out = response.json()
+        assert [item["verdict"] for item in out["verifications"]] == ["correct", "wrong"]
+        assert len(list((root / "runs").iterdir())) == 1
+        assert out["usage"] == {
+            "input_tokens": 120, "cached_input_tokens": 80, "fresh_input_tokens": 40,
+            "output_tokens": 20, "reasoning_tokens": 10,
+        }
+
+
+def test_verify_request_id_replays_completed_result_without_new_codex():
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        fake = _fake_launcher(root)
+        request_id = "a" * 64
+        with _env(
+            DANUS_CODEX_BIN=str(fake), VERIFIER_RESULTS_DIR=str(root / "runs"),
+            VERIFY_AGENT_HOME=str(root),
+            FAKE_CODEX_PROMPT=f"Statement: {_GOOD_STATEMENT}\nProof:\n{_GOOD_PROOF}",
+        ):
+            request = VerifyRequest(
+                statement=_GOOD_STATEMENT, proof=_GOOD_PROOF, request_id=request_id,
+            )
+            first = verify(request)
+            os.environ["DANUS_CODEX_BIN"] = str(root / "must-not-run")
+            second = verify(request)
+
+        assert first == second
+        assert first["usage"]["input_tokens"] == 120
+        assert [path.name for path in (root / "runs").iterdir() if path.is_dir()] == [
+            f"request_{request_id}"
+        ]
 
 
 def test_verify_vacuous_rejected_400():

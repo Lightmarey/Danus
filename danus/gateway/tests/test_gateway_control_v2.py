@@ -77,7 +77,7 @@ def test_v2_global_memory_search_is_bounded_and_evidence_is_opt_in(tmp_path: Pat
 
 
 def test_fact_submit_claim_role_schema_matches_worker_contract():
-    tool = next(item for item in server.build_app("worker")._tool_manager.list_tools() if item.name == "fact_submit")
+    tool = next(item for item in server.build_app("all")._tool_manager.list_tools() if item.name == "fact_submit")
     schemas = tool.parameters["properties"]["claim_role"]["anyOf"]
     enum = next(item["enum"] for item in schemas if "enum" in item)
     assert tuple(enum) == server.CLAIM_ROLES
@@ -133,7 +133,10 @@ def test_v2_fact_links_closes_and_records_verifier_cost(tmp_path: Path):
         "usage": {"input_tokens": 10, "output_tokens": 5},
     }
     try:
-        with _env(DANUS_PROJECT_DIR=tmp_path, DANUS_AUTHOR="high", DANUS_VERIFY_URL="mock"):
+        with _env(
+            DANUS_PROJECT_DIR=tmp_path, DANUS_AUTHOR="high", DANUS_VERIFY_URL="mock",
+            DANUS_CODEX_PRICE_IN="1", DANUS_CODEX_PRICE_OUT="2",
+        ):
             result = server.fact_submit(
                 statement="The target conclusion holds.", proof="A complete proof.", display_title="Target conclusion",
                 closes_obligation=True, **_args(assignment),
@@ -147,22 +150,25 @@ def test_v2_fact_links_closes_and_records_verifier_cost(tmp_path: Path):
     costs = store.events("cost")
     assert costs[-1]["component"] == "verification"
     assert costs[-1]["usage"]["input_tokens"] == 10
+    assert costs[-1]["cost_usd"] == 0.00002
 
 
 def test_verifier_inside_worker_round_does_not_need_a_second_wall_budget(tmp_path: Path):
     store, assignment = _project(tmp_path)
     target = store.current_target()
-    target["budget"] = {"max_wall_seconds": 10}
+    target["budget"] = {"max_wall_seconds": 30}
     with store._tx() as db:
         db.execute(
             "UPDATE targets SET payload=? WHERE version=?",
             (json.dumps(target), target["version"]),
         )
     parent = store.reserve_call(
-        component="worker_round", max_wall_seconds=10, worker="high",
+        component="worker_round", max_wall_seconds=30, worker="high",
         assignment_epoch=assignment["epoch"], target_version=assignment["target_version"],
         obligation_id=assignment["obligation_id"], route_id=assignment["route_id"],
     )
+    store.retry_backend("codex", reason="test nested half-open probe")
+    assert store.claim_backend_call("codex")["state"] == "half_open"
     original = server._verify
     server._verify = lambda _s, _p: {"verdict": "correct"}
     try:

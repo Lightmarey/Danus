@@ -16,11 +16,26 @@ Given:
 - `Statement: <the candidate fact's statement>`
 - `Proof: <the candidate fact's proof, markdown>`
 
+or a bounded batch:
+
+- `Verification goal: <the shared intended theorem-group root>`
+- `Candidates: [{"candidate_id": ..., "statement": ..., "proof": ...}, ...]`
+
 produce the verdict (the service returns it to `fact_submit`), with JSON fields:
 
 - `verification_report`
 - `verdict` (`"correct"` or `"wrong"`)
 - `repair_hints`
+
+For a batch, first confirm that every candidate is substantively relevant to the
+shared verification goal; unrelated padding is a gap for that candidate. Then
+verify each candidate independently and return the same three fields plus its
+`candidate_id` under a top-level `verifications` array. Preserve input order.
+One candidate's correctness verdict must not change another candidate's verdict.
+Batch candidates are drafts, not premises: they may not justify one another.
+Whenever a proof cites a 16-hex identifier, require that exact file to exist in
+the fact graph. A missing identifier (including another candidate's staged
+`source_id`) is a critical error for the citing candidate.
 
 ## Input Contract
 
@@ -63,7 +78,7 @@ feedback on whether the proof is correct and, if not, where.
 
 ### Step 1: Initialize run context
 
-1. Read `Run_id`, `Statement`, `Proof`.
+1. Read `Run_id` and either `Statement`/`Proof` or the bounded `Candidates` list.
 2. Treat `Proof` as markdown text and read it in the order written.
 3. Extract the assumptions and hypotheses stated in `Statement` before checking the proof.
 4. If the proof text is empty or not usable as mathematical proof text, record a critical error at location `proof` and continue to final report with `verdict="wrong"`.
@@ -140,6 +155,25 @@ Write the final JSON **directly** to the exact output path named in the prompt
 - `results/{run_id}/verification.json`
 
 Stop only after this file is written successfully.
+
+For a batch, the file content must instead be:
+
+```json
+{
+  "verifications": [
+    {
+      "candidate_id": "candidate-1",
+      "verification_report": {
+        "summary": "string",
+        "critical_errors": [],
+        "gaps": []
+      },
+      "verdict": "correct",
+      "repair_hints": ""
+    }
+  ]
+}
+```
 
 ## Output JSON Contract
 

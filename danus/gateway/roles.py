@@ -5,11 +5,11 @@ MCP tools each agent role may even see. It is data (easy to audit / change), not
 logic scattered across the server.
 
 Invariants (load-bearing — see ARCHITECTURE.md §3):
-  - ``main`` has NO ``fact_submit``: the orchestrator does no math and can never
+  - ``main`` has NO fact-submission tools: the orchestrator does no math and can never
     fabricate a fact.
   - ``verifier`` is read-only: only ``search_arxiv_theorems`` (it reads the fact
     graph as files, writes nothing).
-  - ``worker`` is the only role that can ``fact_submit`` (verifier-gated write).
+  - ``worker`` is the only role that can submit facts (verifier-gated writes).
 All three roles get ``search_arxiv_theorems`` (literature grounding); ``worker``
 and ``main`` additionally get ``fact_search`` (read view over verified facts).
 """
@@ -24,6 +24,7 @@ ALL_TOOLS: Tuple[str, ...] = (
     "gm_add",
     "gm_search",
     "fact_submit",
+    "fact_submit_batch",
     "fact_search",
     "fact_revoke",
     "research_map",
@@ -36,7 +37,7 @@ ALL_TOOLS: Tuple[str, ...] = (
 )
 
 ROLE_TOOLS: Dict[str, Tuple[str, ...]] = {
-    "worker": ("gm_add", "gm_search", "fact_submit", "fact_search", "route_context", "obligation_context", "fact_get", "fact_neighborhood", "search_arxiv_theorems"),
+    "worker": ("gm_add", "gm_search", "fact_submit_batch", "fact_search", "route_context", "obligation_context", "fact_get", "fact_neighborhood", "search_arxiv_theorems"),
     "main": ("gm_add", "gm_search", "fact_search", "fact_revoke", "research_map", "route_context", "obligation_context", "fact_get", "fact_neighborhood", "target_proof_manifest", "search_arxiv_theorems"),
     "verifier": ("search_arxiv_theorems",),
     "all": ALL_TOOLS,

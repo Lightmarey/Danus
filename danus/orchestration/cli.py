@@ -189,6 +189,37 @@ def _start_one(wl: L.WorkerLayout) -> str:
         return "started"
 
 
+def _recover_dead_worker(wl: L.WorkerLayout, *, reason: str) -> Dict:
+    if not is_v2_project(wl.project_dir):
+        return {"recovered": False}
+    status = _read_status(wl)
+    started = status.get("round_started_at")
+    last_round = status.get("last_round_at")
+    round_was_active = bool(
+        status.get("state") in {"running", "auditing"}
+        and isinstance(started, (int, float))
+        and (not isinstance(last_round, (int, float)) or started > last_round)
+    )
+    wall = max(0.0, time.time() - float(started)) if isinstance(started, (int, float)) else 0.0
+    store = ControlStore(wl.project_dir)
+    result = store.recover_worker_interruption(
+        wl.name, wall_seconds=wall, reason=reason, round_was_active=round_was_active,
+    )
+    if not result.get("recovered"):
+        assignment = store.assignment(wl.name)
+        if assignment and assignment.get("status") in {"running", "auditing"}:
+            assignment["status"] = "assigned"
+            store.save_assignment(assignment)
+            result["reset_idle_assignment"] = True
+    return result
+
+
+def _mark_worker_terminated(wl: L.WorkerLayout) -> None:
+    status = _read_status(wl)
+    status.update(state="terminated", pid=None, updated_at=time.time())
+    atomic_write(wl.status, json.dumps(status, ensure_ascii=False, indent=2))
+
+
 def do_start(target: str, stagger: float = 0.2) -> List[Dict]:
     dirs = L.target_worker_dirs(target)
     if not dirs:
@@ -203,11 +234,15 @@ def do_start(target: str, stagger: float = 0.2) -> List[Dict]:
         except ControlError as exc:
             raise SystemExit(str(exc)) from exc
         control = ControlStore(wl.project_dir)
-        try:
-            control.validate_assignment(wl.name)
-        except ControlError as exc:
-            out.append({"worker": wdir.name, "result": "waiting", "reason": str(exc)})
-            continue
+        if not _alive(_read_pid(wl)):
+            _recover_dead_worker(wl, reason="restart_after_dead_worker")
+        assignment = control.assignment(wl.name)
+        if not assignment or assignment.get("status") != "waiting_retry":
+            try:
+                control.validate_assignment(wl.name)
+            except ControlError as exc:
+                out.append({"worker": wdir.name, "result": "waiting", "reason": str(exc)})
+                continue
         out.append({"worker": wdir.name, "result": _start_one(wl)})
     return out
 
@@ -345,7 +380,9 @@ def _stop_one(wl: L.WorkerLayout, force: bool) -> str:
         return "stopping (graceful)"
     if not _alive(pid):
         wl.pid.unlink(missing_ok=True)
+        _recover_dead_worker(wl, reason="force_stop_after_worker_exit")
         return "not-running"
+    wl.stop.touch()          # also cancels a verifier running outside the worker tree
     runtime.terminate_process_tree(pid, force=False)
     for _ in range(50):
         if not _alive(pid):
@@ -354,6 +391,8 @@ def _stop_one(wl: L.WorkerLayout, force: bool) -> str:
     if _alive(pid):
         runtime.terminate_process_tree(pid, force=True)
     wl.pid.unlink(missing_ok=True)
+    _recover_dead_worker(wl, reason="force_stop")
+    _mark_worker_terminated(wl)
     return "killed"
 
 

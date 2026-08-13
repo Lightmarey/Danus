@@ -87,7 +87,7 @@ defaults apply everywhere; per-service overrides win.
 |---|---|---|
 | `VERIFY_PORT` | `8091` | verify service (`127.0.0.1`) |
 | `DASHBOARD_PORT` | `8099` | read-only dashboard (`127.0.0.1`) |
-| `DANUS_VERIFY_URL` | `http://127.0.0.1:8091/verify` | where `fact_submit` posts |
+| `DANUS_VERIFY_URL` | `http://127.0.0.1:8091/verify` | single-submit endpoint; batch derives adjacent `/verify-batch` |
 | `VERIFY_HOST` | `127.0.0.1` | verify bind host (keep loopback — see security doc) |
 
 ## Runtime data locations (gitignored, under `runtime/`)
@@ -139,7 +139,9 @@ budget check. Completion atomically replaces the reservation with the real
 after the hard timeout plus a short cleanup grace period.
 Verifier calls nested inside a worker round reuse the parent's wall reservation,
 so elapsed wall time is not double-counted; their token and USD cost are still
-attributed separately. A graceful `danus stop` polls active rounds, cancels
+attributed separately. A round timeout drains an in-flight verifier through fact
+commit before ending the worker; it does not shorten the verifier's own timeout.
+A graceful `danus stop` polls active rounds, cancels
 the child promptly, and records partial or unavailable usage without decrementing
 the route round budget.
 If a strict USD reservation was configured but the provider returns no usage or

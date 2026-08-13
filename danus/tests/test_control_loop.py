@@ -132,6 +132,32 @@ def test_timeout_without_report_uses_persisted_infra_budget_not_research_rounds(
     assert store.events("work_checkpoint") == []
 
 
+def test_timeout_after_verification_drain_counts_as_a_research_round(tmp_path: Path):
+    wl, store = _worker(tmp_path)
+    original = loop.run_round
+
+    def drained(_wl, _role, _prompt, log_path, _timeout, **_kwargs):
+        log_path.write_text(
+            "[worker_loop] verification committed; ending timed-out round\n",
+            encoding="utf-8",
+        )
+        (wl.project_dir / L.DEADLINE_FILE).write_text("1", encoding="utf-8")
+        return 124
+
+    loop.run_round = drained
+    try:
+        assert loop._run_loop(
+            wl, {"MODEL": "m", "REASONING_EFFORT": "high"}, store, beat=0,
+        ) == 0
+    finally:
+        loop.run_round = original
+    assignment = store.assignment("high")
+    assert assignment["status"] != "infra_blocked"
+    assert assignment["rounds_used"] == 1
+    assert store.events("work_checkpoint")[-1]["report"]["route_status"] == "no_progress"
+    assert store.events("cost")[-1]["component"] == "worker_round"
+
+
 def test_quota_exhaustion_blocks_without_retry_or_round_charge(tmp_path: Path):
     wl, store = _worker(tmp_path, budget={"infra_retry_seconds": [0]})
     calls = 0

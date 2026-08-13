@@ -18,13 +18,13 @@ operator → ① orchestration (main agent + danus CLI)   — conducts, never do
               ↕ v2 control (approved target → obligation → route → finite assignment)
               ② strategy   (elaboration → consult → master_guidance)
               ③ execution  (worker swarm; each round = one codex session running the Rethlas proving skills)
-   gm_* │         │ fact_submit
+   gm_* │         │ fact_submit[_batch]
         ▼         ▼
    ⑤ truth      ④ verification (cold-start codex judge; correct ⟺ no critical_errors AND no gaps)
    (fact graph + memory)   — a fact exists iff the verifier accepted it
         ▲
         │ every read/write goes through …
-   ⑥ gateway (role-gated MCP: 6 tools; main has NO fact_submit; verifier read-only)
+   ⑥ gateway (role-gated MCP; main has NO fact-submission tools; verifier read-only)
 
 cross-cutting: ⑦ observability (dashboard · theorem-search · human-summary · initialize)
                ⑧ ops/runtime (bootstrap · services · doctor · config)
@@ -44,7 +44,7 @@ Danus/
 ├─ config/                      env templates (BYO key; only *.env.example committed)
 ├─ danus/                       THE ENGINE (installable Python package)
 │  ├─ core/                     ⑤ truth: schema · factgraph · global/local memory · bm25 · glossary
-│  ├─ gateway/                  ⑥ role-gated MCP: 6 tools · role table (roles.py)
+│  ├─ gateway/                  ⑥ role-gated MCP · role table (roles.py)
 │  ├─ verify/                   ④ verification HTTP service · prechecks · cold-start codex launcher
 │  ├─ execution/                ③ worker swarm: round loop · project/worker lifecycle + layout
 │  ├─ strategy/                 ② consult gateway (gpt_pro|claude_api|claude_code|off transport)
@@ -76,10 +76,10 @@ Danus/
    (shared awareness) → fact graph (the only truth). A proof may build only on
    `fact_id`s; global memory is never a correctness source.
 2. Permission is enforced by which tools a role can even see (the gateway role
-   table), not by prompt convention. `main` cannot `fact_submit`; `verifier` is
+   table), not by prompt convention. `main` cannot submit facts; `verifier` is
    read-only.
 3. The verifier is the sole write-gate. A fact exists only if a `correct` verdict
-   came back; the gate lives in the `fact_submit` code path, not in prose.
+   came back; the gate lives in the fact-submission code paths, not in prose.
 4. Content-addressed, cascade-revocable fact graph. `fact_id` hashes content
    (problem_id + predecessors + glossary_introduces + statement + proof);
    `external_refs` is deliberately excluded so the paper pipeline can rewrite
@@ -116,19 +116,20 @@ Danus/
 
 | port | service | producer → consumer |
 |---|---|---|
-| 8091 | verify `/verify`, `/health` | `danus.gateway` `fact_submit` → `danus.verify` (via `DANUS_VERIFY_URL`) |
+| 8091 | verify `/verify`, `/verify-batch`, `/health` | `danus.gateway` fact submission → `danus.verify` (via `DANUS_VERIFY_URL`) |
 | 8099 | dashboard | operator browser → `danus.observability` (read-only) |
 
 **Cross-module contracts (both ends must agree):**
 
 | contract | pinned shape | ends |
 |---|---|---|
-| MCP tool set + role gating | `roles.py` `ROLE_TOOLS` (main has NO `fact_submit`; verifier read-only; worker/main share scoped research reads) | `danus.gateway` ↔ worker/main/verifier agents |
+| MCP tool set + role gating | `roles.py` `ROLE_TOOLS` (main has no fact-submission tools; verifier read-only; worker/main share scoped research reads) | `danus.gateway` ↔ worker/main/verifier agents |
 | MCP launch | current Python/uv + `DANUS_ROLE` env | verifier launcher · worker `.codex/config.toml` · main `.codex/config.toml` → gateway |
-| verify HTTP | `POST /verify {statement,proof}` → `{verification_report,verdict,repair_hints}`; verdict ⟺ no critical_errors & no gaps | `danus.gateway.fact_submit` ↔ `danus.verify` |
+| verify HTTP | `/verify` checks one candidate; `/verify-batch` checks a 1-6 candidate semantic theorem group in one cold process and returns ordered per-candidate reports; a content-addressed request ID deduplicates disconnect retries; usage is service-owned Codex JSONL data; every verdict is schema-validated and correct ⟺ no critical_errors & no gaps | `danus.gateway` fact submission ↔ `danus.verify` |
+| durable verify staging | verifiable global-memory entry + gateway-stamped assignment scope + `verification_goal`; `ContextManifest.pending_verification` recovers `unverified`/`verifying` source IDs after interruption | worker ↔ global memory ↔ gateway/execution |
 | v2 control | transactional `control/control.sqlite3` authority (targets, obligations, routes, assignments, events, outbox); verified fact Markdown remains mathematical truth | orchestration · execution · gateway · observability |
 | v2 research reads | one `ResearchQuery` snapshot → bounded `ContextManifest` for agents and layered indexed views for humans | execution · gateway · authoring · observability |
-| v2 call admission | atomically reserve timeout and optional USD ceiling before every expensive call; active reservations count against the budget; settlement emits one `CostEvent`; expired reservations are recovered after crashes | control DB ↔ execution · gateway · strategy · authoring |
+| v2 call admission | atomically reserve timeout and optional USD ceiling before every expensive call; active reservations count against the budget; settlement emits one `CostEvent`; expiry and dead-worker/forced-stop reconciliation recover reservations without consuming a research round | control DB ↔ execution · gateway · strategy · authoring |
 | v2 provider resilience | persistent assignment retry state plus one project-wide provider circuit; bounded failures become `waiting_retry`/`infra_blocked`; only one half-open probe is admitted | control DB ↔ execution · gateway · strategy · authoring · operations |
 | fact binding | `statement, proof, display_title, predecessors, target_version, obligation_id, route_id, assignment_epoch, claim_role, assumptions_used, closes_obligation` | worker ↔ gateway ↔ control |
 | fact id inputs | `problem_id + sorted(predecessors) + sorted(glossary) + normalized(statement,proof)`; **external_refs EXCLUDED** | `danus.core` ↔ everyone (write-paper reads `external_refs`) |

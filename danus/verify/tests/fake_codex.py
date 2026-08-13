@@ -40,8 +40,18 @@ def main() -> int:
             return 3
         out_path = run_dirs[0] / "verification.json"
 
-    if "[[FAKE:wrong]]" in prompt:
-        payload = {
+    def verdict(text: str) -> dict:
+        if "[[FAKE:wrong]]" not in text:
+            return {
+                "verification_report": {
+                    "summary": "FAKE stub verdict (plumbing test): no error marker; accepting.",
+                    "critical_errors": [],
+                    "gaps": [],
+                },
+                "verdict": "correct",
+                "repair_hints": "",
+            }
+        return {
             "verification_report": {
                 "summary": "FAKE stub verdict (plumbing test): marker [[FAKE:wrong]] present.",
                 "critical_errors": [
@@ -52,20 +62,23 @@ def main() -> int:
             "verdict": "wrong",
             "repair_hints": "This is a fake reject from fake_codex.py (plumbing only).",
         }
+
+    marker = "Candidates (verify each independently):"
+    if marker in prompt:
+        candidates, _ = json.JSONDecoder().raw_decode(prompt.partition(marker)[2].lstrip())
+        payload = {"verifications": [
+            {"candidate_id": candidate["candidate_id"], **verdict(candidate["proof"])}
+            for candidate in candidates
+        ]}
     else:
-        payload = {
-            "verification_report": {
-                "summary": "FAKE stub verdict (plumbing test): no error marker; accepting.",
-                "critical_errors": [],
-                "gaps": [],
-            },
-            "verdict": "correct",
-            "repair_hints": "",
-        }
+        payload = verdict(prompt)
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
-    sys.stdout.write(f"fake_codex: wrote {payload['verdict']} verdict to {out_path}\n")
+    sys.stdout.write(json.dumps({"type": "turn.completed", "usage": {
+        "input_tokens": 120, "cached_input_tokens": 80,
+        "output_tokens": 20, "reasoning_output_tokens": 10,
+    }}) + "\n")
     return 0
 
 

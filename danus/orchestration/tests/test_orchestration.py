@@ -271,6 +271,30 @@ def test_idempotent_start(tmp: Path):
             _kill_project("P")
 
 
+def test_start_after_audited_backend_retry(tmp: Path):
+    fc = _fake_codex(tmp)
+    with _project_env(tmp, DANUS_CODEX_BIN=str(fc), DANUS_ROUND_BEAT="0",
+                      FAKE_CODEX_SLEEP="0"):
+        cli.do_new("P", roles="high:1")
+        _prepare_route("P", ("high",))
+        store = ControlStore(L.project_dir("P"))
+        quota = {
+            "failure_class": "quota_exhausted", "retryable": False,
+            "retry_after_seconds": 0, "error_signature": "quota", "return_code": 1,
+        }
+        store.record_worker_infra_failure("high", quota, wall_seconds=1)
+        store.retry_backend("codex", reason="provider quota renewed")
+        assert store.assignment("high")["status"] == "waiting_retry"
+        try:
+            assert cli.do_start("P/high")[0]["result"] == "started"
+            assert _wait_until(
+                lambda: store.assignment("high")["status"] != "waiting_retry"
+            )
+            assert _wait_until(lambda: not _st("P", "high")["alive"])
+        finally:
+            _kill_project("P")
+
+
 def test_project_wide_targets(tmp: Path):
     fc = _fake_codex(tmp)
     with _project_env(tmp, DANUS_CODEX_BIN=str(fc), DANUS_ROUND_BEAT="0",
@@ -307,7 +331,8 @@ def test_missing_codex_returns_error_state(tmp: Path):
 def main() -> None:
     fs_tests = [test_assign_replace_and_rejects, test_status_before_start, test_list]
     loop_tests = [test_loop_stalls_only_after_audited_low_gain, test_graceful_stop, test_force_stop,
-                  test_idempotent_start, test_project_wide_targets,
+                  test_idempotent_start, test_start_after_audited_backend_retry,
+                  test_project_wide_targets,
                   test_missing_codex_returns_error_state]
     for t in fs_tests + loop_tests:
         with tempfile.TemporaryDirectory() as d:

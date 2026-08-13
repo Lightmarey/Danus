@@ -59,6 +59,7 @@ main agent runs as `role=main`.
 | `gm_add` | `kind, claim, evidence, verifiable?, glossary?, links?, project?` | publish a finding to shared global memory |
 | `gm_search` | `query, kinds?, limit_per_kind?, project?, include_evidence?` | search compact global-memory findings; evidence is opt-in |
 | `fact_submit` | `statement, proof, display_title, predecessors?, target_version, obligation_id, route_id, assignment_epoch, claim_role, assumptions_used, closes_obligation?` | **the write-gate** — validate control scope, verify, then recoverably write/link the fact iff `correct` |
+| `fact_submit_batch` | `candidates=[{source_id}], verification_goal` | infer/check assignment scope, then verify one durable semantic group; 1-6 is a safety cap, and verdict/fact identity remain per source |
 | `fact_search` | `query, limit?, project?` | indexed FTS5 search with bounded snippets; use `fact_get` for proof expansion |
 | `research_map`, `route_context`, `obligation_context` | scoped IDs plus optional snapshot | shared target/method/route/obligation read model |
 | `fact_get`, `fact_neighborhood` | fact ID, optional proof/direction/depth/limit | opt-in fact body and bounded local DAG |

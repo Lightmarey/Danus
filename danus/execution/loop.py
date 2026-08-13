@@ -49,8 +49,11 @@ def kickoff(project: str, worker: str, assignment: dict, *, audit: bool,
         "failed signatures and evidence with the obligation, identify a genuinely new route "
         "or report no progress honestly."
         if audit else
-        "Explore the assigned route deeply for this bounded round. Preserve useful partial "
-        "progress, but do not change the approved target or silently adopt extra assumptions."
+        "Explore the assigned route adaptively for this bounded round. Start with a brief survey "
+        "of at least three materially different route-compatible sub-strategies, including a "
+        "literature/applicability route when relevant, then focus on the best-supported one. "
+        "Reopen the survey after a repeated failure signature. Preserve useful partial progress, "
+        "but do not change the approved target or silently adopt extra assumptions."
     )
     scope = {
         "target_version": assignment["target_version"],
@@ -65,10 +68,19 @@ def kickoff(project: str, worker: str, assignment: dict, *, audit: bool,
         f"Authoritative scope:\n{json.dumps(scope, ensure_ascii=False, indent=2)}\n"
         f"Assigned task:\n{assignment['task']}\n"
         f"\n{context}\n"
+        "The route is a method family rather than a mandatory proof script: compare viable "
+        "sub-strategies inside it and change proof architecture when evidence defeats the current one. "
+        "Keep unverified leads as navigation evidence only; verify a load-bearing claim before using "
+        "it downstream, and reserve enough closing time to durably stage pending results. "
         "AGENTS.md, the task, and this research snapshot are already loaded. Do not reopen them, "
         "list the workspace, or perform routine memory/fact searches. Use included facts first and "
         "expand only what the route needs. Work only in the scope above. Finish this round with the "
-        "required WorkReport JSON; after completion or a control/budget/provider block, stop."
+        "required WorkReport JSON. Repair ordinary tool validation errors and use verifier feedback "
+        "to improve the proof while time remains; do not finalize early merely because one proof "
+        "attempt fails. An accepted intermediate fact or progress synthesis is not completion: if "
+        "the obligation remains open, continue with the next unresolved interface or an independent "
+        "sub-strategy while meaningful round time remains. Stop immediately only after completion or a "
+        "terminal scope, budget, provider, cancellation, or stale-assignment block."
     )
 
 
@@ -148,11 +160,21 @@ def _parse_last_fact_id(log_path: Path) -> Optional[str]:
             continue
         saw_json_event = saw_json_event or isinstance(event, dict)
         item = event.get("item") if isinstance(event, dict) else None
-        if not isinstance(item, dict) or item.get("type") != "mcp_tool_call" or item.get("tool") != "fact_submit":
+        if (
+            not isinstance(item, dict)
+            or item.get("type") != "mcp_tool_call"
+            or item.get("tool") not in {"fact_submit", "fact_submit_batch"}
+        ):
             continue
         saw_structured_submission = True
         result = item.get("result")
         payload = result.get("structured_content", {}).get("result") if isinstance(result, dict) else None
+        if item.get("tool") == "fact_submit_batch" and isinstance(payload, dict):
+            for batch_item in payload.get("results") or []:
+                fact_id = batch_item.get("fact_id") if isinstance(batch_item, dict) and batch_item.get("accepted") is True else None
+                if isinstance(fact_id, str) and re.fullmatch(r"[0-9a-f]{16}", fact_id):
+                    accepted = fact_id
+            continue
         if isinstance(payload, dict) and payload.get("accepted") is True:
             fact_id = payload.get("fact_id")
             if isinstance(fact_id, str) and re.fullmatch(r"[0-9a-f]{16}", fact_id):
@@ -180,7 +202,8 @@ def run_round(wl: L.WorkerLayout, role: dict, prompt: str, log_path: Path,
     report_path.parent.mkdir(parents=True, exist_ok=True)
     report_path.unlink(missing_ok=True)
     structured = [
-        "--config", scaffold.worker_gateway_config_arg(wl),
+        "--json",
+        "--config", scaffold.worker_gateway_config_arg(wl, reservation_id),
         "--output-schema", str(output_schema),
         "--output-last-message", str(report_path),
     ]
@@ -223,6 +246,24 @@ def run_round(wl: L.WorkerLayout, role: dict, prompt: str, log_path: Path,
                     if deadline is not None and time.monotonic() >= deadline:
                         raise
         except subprocess.TimeoutExpired:
+            child = (
+                ControlStore(wl.project_dir).active_nested_call(reservation_id)
+                if reservation_id else None
+            )
+            if child:
+                logf.write("\n[worker_loop] exploration timeout; draining in-flight verification\n")
+                drain_deadline = float(child["expires_at_epoch"]) + 1
+                while time.time() < drain_deadline:
+                    try:
+                        return _Child.proc.wait(timeout=.5)
+                    except subprocess.TimeoutExpired:
+                        if wl.stop.exists():
+                            runtime.stop_process(_Child.proc, wait_seconds=1, force=True)
+                            logf.write("\n[worker_loop] verification drain interrupted by stop request\n")
+                            return 130
+                        if not ControlStore(wl.project_dir).active_nested_call(reservation_id):
+                            logf.write("\n[worker_loop] verification committed; ending timed-out round\n")
+                            break
             runtime.stop_process(_Child.proc, wait_seconds=10, force=True)
             logf.write(f"\n[worker_loop] round hard-timeout after {hard_timeout}s\n")
             timed_out = True
@@ -327,6 +368,12 @@ def _run_loop(wl: L.WorkerLayout, role: dict, control: ControlStore, beat: float
         wall = time.monotonic() - started
         report = parse_work_report(report_path)
         complete_report = report_path.is_file() and work_report_valid(report)
+        drained_verification = (
+            rc == 124
+            and log_path.is_file()
+            and "verification committed; ending timed-out round" in
+            log_path.read_text(encoding="utf-8", errors="replace")
+        )
         if rc == 130 and wl.stop.exists():
             usage = parse_codex_usage(log_path)
             control.record_worker_interruption(
@@ -340,7 +387,7 @@ def _run_loop(wl: L.WorkerLayout, role: dict, control: ControlStore, beat: float
                 control_reason="operator stop interrupted the active round",
             )
             return 0
-        if rc != 0 and not (rc == 124 and complete_report):
+        if rc != 0 and not (rc == 124 and (complete_report or drained_verification)):
             outcome = codex.classify_failure(rc, log_path)
             failure = control.record_worker_infra_failure(
                 worker, outcome, wall_seconds=wall, usage=parse_codex_usage(log_path),
@@ -408,8 +455,30 @@ def main(worker_dir: str) -> int:
     wl.logs.mkdir(parents=True, exist_ok=True)
 
     def _on_term(signum, _frame):
+        wl.stop.touch()
         if _Child.proc is not None:
             runtime.stop_process(_Child.proc, wait_seconds=1, force=True)
+        try:
+            status = json.loads(wl.status.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            status = {}
+        started = status.get("round_started_at")
+        last_round = status.get("last_round_at")
+        round_was_active = bool(
+            status.get("state") in {"running", "auditing"}
+            and isinstance(started, (int, float))
+            and (not isinstance(last_round, (int, float)) or started > last_round)
+        )
+        wall = max(0.0, time.time() - float(started)) if isinstance(started, (int, float)) else 0.0
+        try:
+            control.recover_worker_interruption(
+                wl.name, wall_seconds=wall, reason=f"signal_{signum}",
+                round_was_active=round_was_active,
+            )
+        except Exception as exc:
+            write_status(wl, state="terminated", error=f"interruption recovery failed: {exc}")
+            _cleanup_pid(wl)
+            sys.exit(1)
         write_status(wl, state="terminated")
         _cleanup_pid(wl)
         sys.exit(0)

@@ -23,6 +23,7 @@ import json
 import os
 import shlex
 import subprocess
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -32,6 +33,7 @@ from fastapi import HTTPException
 from danus import codex
 from danus import runtime
 from danus import agent_assets
+from danus.control import parse_codex_usage
 
 _HERE = Path(__file__).resolve().parent  # danus/verify/
 VERIFICATION_FILENAMES = ("verification.json", "verificationt.json")
@@ -76,8 +78,11 @@ def _effort() -> str:
     return codex.effort("DANUS_VERIFY_EFFORT")
 
 
-def _timeout() -> Optional[int]:
-    return int(os.getenv("CODEX_TIMEOUT_SECONDS", "0")) or None
+def _timeout(requested_seconds: Optional[int] = None) -> Optional[int]:
+    configured = int(os.getenv("CODEX_TIMEOUT_SECONDS", "0")) or None
+    if requested_seconds is None:
+        return configured
+    return min(requested_seconds, configured) if configured else requested_seconds
 
 
 def _mcp_config_arg() -> str:
@@ -129,6 +134,28 @@ def _verification_path(run_id: str) -> Optional[Path]:
     return None
 
 
+def load_verification_result(run_id: str) -> Optional[Dict[str, Any]]:
+    """Load a completed verifier artifact, including measured token usage."""
+    verification_path = _verification_path(run_id)
+    if verification_path is None:
+        return None
+    try:
+        payload = json.loads(verification_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=f"verification output at {verification_path} is not valid JSON",
+        ) from exc
+    if not isinstance(payload, dict):
+        raise HTTPException(
+            status_code=500,
+            detail=f"verification output at {verification_path} must be a JSON object",
+        )
+    payload.pop("cost_usd", None)
+    payload["usage"] = parse_codex_usage(_results_dir(run_id) / "log.md")
+    return payload
+
+
 def build_prompt(run_id: str, statement: str, proof: str) -> str:
     output_path = _results_dir(run_id) / VERIFICATION_FILENAMES[0]
     return (
@@ -140,7 +167,31 @@ def build_prompt(run_id: str, statement: str, proof: str) -> str:
     )
 
 
+def build_batch_prompt(
+    run_id: str, verification_goal: str, candidates: List[Dict[str, str]],
+) -> str:
+    output_path = _results_dir(run_id) / VERIFICATION_FILENAMES[0]
+    return (
+        f"Run_id: {run_id}. Verification goal (shared theorem group): {verification_goal}. "
+        "Candidates (verify each independently):\n"
+        f"{json.dumps(candidates, ensure_ascii=False, indent=2)}\n\n"
+        "Use AGENTS.md to verify every candidate. Return one result per candidate_id "
+        "under a top-level verifications array, preserving input order. "
+        f"Write the verification JSON to this exact path: {output_path}."
+    )
+
+
 def build_codex_command(run_id: str, statement: str, proof: str) -> List[str]:
+    return _build_codex_command(build_prompt(run_id, statement, proof))
+
+
+def build_batch_codex_command(
+    run_id: str, verification_goal: str, candidates: List[Dict[str, str]],
+) -> List[str]:
+    return _build_codex_command(build_batch_prompt(run_id, verification_goal, candidates))
+
+
+def _build_codex_command(prompt: str) -> List[str]:
     return codex.exec_cmd(
         codex.resolve_bin(), _model(), _effort(),
         "-C", str(_agent_home()),
@@ -149,20 +200,44 @@ def build_codex_command(run_id: str, statement: str, proof: str) -> List[str]:
         "--skip-git-repo-check",
         "-c", _mcp_config_arg(),
         "--dangerously-bypass-approvals-and-sandbox",
-        build_prompt(run_id=run_id, statement=statement, proof=proof),
+        "--json",
+        prompt,
     )
 
 
-def run_codex_verification(run_id: str, statement: str, proof: str) -> Dict[str, Any]:
+def run_codex_verification(
+    run_id: str, statement: str, proof: str, timeout_seconds: Optional[int] = None,
+    cancel_path: Optional[str] = None,
+) -> Dict[str, Any]:
     """Spawn the cold-start codex verifier; read back + return the verification
     JSON. Raises HTTPException 504 (timeout) / 500 (nonzero exit, no output, or
     bad/non-dict JSON) — the callers translate these into the fact_submit
     verify-error path."""
+    return _run_codex(
+        run_id, build_codex_command(run_id, statement, proof),
+        timeout_seconds=timeout_seconds, cancel_path=cancel_path,
+    )
+
+
+def run_codex_batch_verification(
+    run_id: str, verification_goal: str, candidates: List[Dict[str, str]],
+    timeout_seconds: Optional[int] = None, cancel_path: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Verify several independent candidates in one cold Codex process."""
+    return _run_codex(
+        run_id, build_batch_codex_command(run_id, verification_goal, candidates),
+        timeout_seconds=timeout_seconds, cancel_path=cancel_path,
+    )
+
+
+def _run_codex(
+    run_id: str, cmd: List[str], timeout_seconds: Optional[int] = None,
+    cancel_path: Optional[str] = None,
+) -> Dict[str, Any]:
     results_dir = _results_dir(run_id)
     results_dir.mkdir(parents=True, exist_ok=True)
     log_path = results_dir / "log.md"
     ensure_agent_home()  # provision the codex -C home on a fresh checkout (idempotent)
-    cmd = build_codex_command(run_id=run_id, statement=statement, proof=proof)
     env = codex.subprocess_env(cmd[0])
 
     started_at = datetime.now(timezone.utc).isoformat()
@@ -177,7 +252,25 @@ def run_codex_verification(run_id: str, statement: str, proof: str) -> Dict[str,
                 stdin=subprocess.DEVNULL, stdout=log_handle, stderr=subprocess.STDOUT,
                 new_process_group=True,
             )
-            completed_rc = proc.wait(timeout=_timeout())
+            timeout = _timeout(timeout_seconds)
+            if not cancel_path:
+                completed_rc = proc.wait(timeout=timeout)
+            else:
+                deadline = time.monotonic() + timeout if timeout else None
+                while True:
+                    if Path(cancel_path).exists():
+                        runtime.stop_process(proc, wait_seconds=10.0, force=True)
+                        raise HTTPException(
+                            status_code=499,
+                            detail=f"verification cancelled by operator stop. See log at {log_path}",
+                        )
+                    wait_for = .5 if deadline is None else min(.5, max(.01, deadline - time.monotonic()))
+                    try:
+                        completed_rc = proc.wait(timeout=wait_for)
+                        break
+                    except subprocess.TimeoutExpired:
+                        if deadline is not None and time.monotonic() >= deadline:
+                            raise
     except subprocess.TimeoutExpired as exc:
         if proc is not None:
             runtime.stop_process(proc, wait_seconds=10.0, force=True)
@@ -193,17 +286,9 @@ def run_codex_verification(run_id: str, statement: str, proof: str) -> Dict[str,
         raise HTTPException(status_code=500,
                             detail=f"codex exec failed with exit code {completed_rc}. See log at {log_path}")
 
-    verification_path = _verification_path(run_id)
-    if verification_path is None:
+    payload = load_verification_result(run_id)
+    if payload is None:
         expected = results_dir / VERIFICATION_FILENAMES[0]
         raise HTTPException(status_code=500,
                             detail=f"verification output was not found at {expected}. See log at {log_path}")
-    try:
-        payload = json.loads(verification_path.read_text(encoding="utf-8"))
-    except json.JSONDecodeError as exc:
-        raise HTTPException(status_code=500,
-                            detail=f"verification output at {verification_path} is not valid JSON") from exc
-    if not isinstance(payload, dict):
-        raise HTTPException(status_code=500,
-                            detail=f"verification output at {verification_path} must be a JSON object")
     return payload

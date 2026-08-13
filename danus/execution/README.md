@@ -36,11 +36,16 @@ WorkReport and decides whether to renew, audit, fall back, pause, or complete.
 `.status.json` is written atomically. Resumability comes from SQLite control state
 and the verified fact graph, not process state.
 
+The round timeout stops exploration. If the worker is blocked in `fact_submit` or
+`fact_submit_batch`,
+the loop drains that one verifier through fact commit and cost settlement, then
+ends the timed-out round. An explicit stop still interrupts immediately.
+
 ## Connects to
 
 Projects require an approved target and a structured assignment before they can
 start. Unmigrated projects are rejected with `danus migrate <project>`. Workers
-write facts only through `fact_submit` (gateway → verifier); the loop itself never
+write facts only through the gateway's submission tools (gateway → verifier); the loop itself never
 writes mathematical truth.
 
 ## Tests
