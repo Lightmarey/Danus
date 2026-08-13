@@ -523,7 +523,8 @@ def test_verify_http_roundtrip_and_errors():
             assert out["verdict"] == "correct"
         assert '"statement": "S(n)=n^2"' in captured["body"]
         assert '"timeout_seconds": 5' in captured["body"]
-        assert '"cancel_path": "C:\\\\tmp\\\\project\\\\workers\\\\high\\\\.stop"' in captured["body"]
+        body = json.loads(captured["body"])
+        assert body["cancel_path"] == str(Path("C:/tmp/project") / "workers" / "high" / ".stop")
         assert captured["ctype"] == "application/json"
         # a garbage timeout falls back to the default (no crash)
         with _env(DANUS_VERIFY_URL=url, DANUS_VERIFY_TIMEOUT="not-an-int"):
