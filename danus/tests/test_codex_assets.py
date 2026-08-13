@@ -4,9 +4,13 @@ import os
 import shutil
 import subprocess
 import sys
-import tomllib
 import zipfile
 from pathlib import Path
+
+try:
+    import tomllib
+except ModuleNotFoundError:  # Python 3.10; pytest's dependency provides tomli.
+    import tomli as tomllib
 
 from danus import agent_assets
 from danus.human_summary import assemble as human_summary
