@@ -1,7 +1,7 @@
 # Danus — Getting Started
 
 Danus runs natively on Windows, macOS, and Linux. The required path is `uv`,
-Python 3.10+, an installed `codex` executable, and Git. LaTeX and Chrome are
+Python 3.11+, an installed `codex` executable, and Git. LaTeX and Chrome are
 optional until you render papers or human-summary PDFs.
 
 ## 1. Install and check
