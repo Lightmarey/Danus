@@ -29,6 +29,46 @@ def _project(tmp_path: Path) -> tuple[Path, ControlStore, dict]:
     return project, store, target
 
 
+def test_targetless_migrated_archive_projects_fact_dag_without_inventing_control_state(tmp_path: Path):
+    project = tmp_path / "archive"
+    project.mkdir()
+    (project / "project.json").write_text(
+        '{"name":"archive","control_version":2,"migrated_from_control_version":1}',
+        encoding="utf-8",
+    )
+    graph = FactGraph(project)
+    premise = graph.add(
+        problem_id="archive", author="high", display_title="Direct premise",
+        statement="L", proof="proof L",
+    )
+    headline = graph.add(
+        problem_id="archive", author="high", display_title="Headline theorem",
+        statement="T", proof="proof T", predecessors=[premise],
+    )
+    detached = graph.add(
+        problem_id="archive", author="xhigh", display_title="Unused exploration",
+        statement="X", proof="proof X",
+    )
+    (project / "TARGET.md").write_text(f"# finalized target\n{headline}\n", encoding="utf-8")
+    store = ControlStore(project)
+    store.scaffold()
+
+    query = ResearchQuery(project)
+    archive = query.archive_fact_graph()
+    assert archive["headline_fact_ids"] == [headline]
+    assert archive["fact_count"] == 3
+    assert archive["proof_fact_count"] == 2
+    assert archive["outside_proof_count"] == 1
+    assert archive["direct_premise_count"] == 1
+    assert {(edge["source"], edge["target"]) for edge in archive["edges"]} == {(premise, headline)}
+    roles = {fact["fact_id"]: fact["role"] for fact in archive["nodes"]}
+    assert roles == {premise: "direct", headline: "closing", detached: "unassigned"}
+    research_map = query.research_map()
+    assert research_map["active_target"] is None
+    assert research_map["targets"] == [] and research_map["obligations"] == []
+    assert "nodes" not in research_map["archive"] and "edges" not in research_map["archive"]
+
+
 def test_target_commands_are_transactional_idempotent_and_withdraw_to_no_target(tmp_path: Path):
     _, store, target = _project(tmp_path)
     generation = store.generation()
@@ -144,7 +184,11 @@ def test_fact_title_pending_recovery_scopes_and_manifest_are_deterministic(tmp_p
     store.add_route({"id": "r1", "obligation_id": "v0001-T", "method_title": "Direct proof", "expected_result": "T holds"})
     assignment = store.assign("high", obligation_id="v0001-T", route_id="r1", task="prove T")
     graph = FactGraph(project)
-    fact_id = graph.add(problem_id="P", author="high", display_title="Readable target theorem", statement="T holds", proof="proof")
+    fact_id = graph.add(
+        problem_id="P", author="high", display_title="Readable target theorem",
+        display_summary="Establishes the target.", display_method="Direct proof",
+        display_tags=["target"], statement="T holds", proof="proof",
+    )
     # Presentation metadata is deliberately outside content addressing and is first-write-wins.
     assert graph.add(problem_id="P", author="high", display_title="Replacement title", statement="T holds", proof="proof") == fact_id
     assert "title: Readable target theorem" in (graph.get_raw(fact_id) or "")
@@ -162,6 +206,8 @@ def test_fact_title_pending_recovery_scopes_and_manifest_are_deterministic(tmp_p
     formatted = query.format_context_manifest(first)
     assert 'Allowed assumptions (copy exact list entries into assumptions_used): []' in formatted
     assert first["facts"][0]["title"] == "Readable target theorem"
+    assert query.fact_get(fact_id)["summary"] == "Establishes the target."
+    assert query.route_context("r1")["fact_group"]["facts"][0]["tags"] == ["target"]
     assert "assignment_new" in first["facts"][0]["reasons"]
     assert all("fts_candidate" not in fact["reasons"] for fact in first["facts"])
     assert len(query.format_context_manifest(first)) < 4000
@@ -270,6 +316,87 @@ def test_route_context_bounds_long_statements_and_fact_get_expands_them(tmp_path
     assert query.fact_get(fact_id)["statement"] == statement
 
 
+def test_route_proof_structure_is_derived_from_scopes_and_fact_dag():
+    def fact(fact_id, title, role):
+        return {
+            "fact_id": fact_id, "title": title, "statement": title, "role": role,
+            "summary": "", "method": "", "tags": [],
+        }
+
+    structure = ResearchQuery._derive_proof_structure({
+        "facts": [
+            fact("a", "Input proposition", "input"),
+            fact("s1", "Support for middle", "support"),
+            fact("b", "Middle proposition", "direct"),
+            fact("s2", "Support for conclusion", "support"),
+            fact("c", "Closing proposition", "closing"),
+            fact("shared", "Shared support", "support"),
+            fact("x", "Exploratory proposition", "direct"),
+        ],
+        "edges": [
+            {"source": "a", "target": "s1"}, {"source": "s1", "target": "b"},
+            {"source": "b", "target": "s2"}, {"source": "s2", "target": "c"},
+            {"source": "shared", "target": "b"}, {"source": "shared", "target": "x"},
+        ],
+        "unexpanded_count": 0,
+    })
+
+    groups = {group["root_fact_id"]: group for group in structure["proposition_groups"]}
+    assert groups["b"]["fact_ids"] == ["b", "shared", "s1"]
+    assert groups["b"]["shared_fact_ids"] == ["shared"]
+    assert groups["c"]["fact_ids"] == ["c", "s2"]
+    assert structure["edges"] == [
+        {"source": "fact-group:a", "target": "fact-group:b"},
+        {"source": "fact-group:b", "target": "fact-group:c"},
+    ]
+    # x stays in the same layout branch through its shared support fact,
+    # without inventing a directed proof edge between b and x.
+    assert len(structure["components"]) == 1
+    assert set(structure["components"][0]["group_ids"]) == {
+        "fact-group:a", "fact-group:b", "fact-group:c", "fact-group:x",
+    }
+
+
+def test_exploration_network_uses_explicit_fallbacks_and_fact_transfers(tmp_path: Path):
+    project, store, target = _project(tmp_path)
+    store.approve_target(target["version"])
+    store.add_obligation({"id": "v0001-U", "statement": "U holds"})
+    graph = FactGraph(project)
+    first = graph.add(problem_id="P", author="high", display_title="First proposition", statement="L", proof="proof")
+    second = graph.add(problem_id="P", author="high", display_title="Second proposition", statement="U", proof="proof", predecessors=[first])
+    detached = graph.add(problem_id="P", author="high", display_title="Detached proposition", statement="D", proof="proof")
+    store.add_route({"id": "r3", "obligation_id": "v0001-T", "method_title": "Fallback work item", "expected_result": "D", "fallback_route_ids": ["r1"]})
+    store.add_route({"id": "r1", "obligation_id": "v0001-T", "method_title": "First work item", "expected_result": "L", "fallback_route_ids": ["r3"]})
+    store.add_route({"id": "r2", "obligation_id": "v0001-U", "method_title": "Second work item", "expected_result": "U", "input_fact_ids": [first]})
+    for fact_id, obligation_id, route_id in (
+        (first, "v0001-T", "r1"), (second, "v0001-U", "r2"), (detached, "v0001-T", "r3"),
+    ):
+        submission = store.prepare_fact(fact_id, {"scope": {
+            "worker": "high", "target_version": "v0001", "obligation_id": obligation_id,
+            "route_id": route_id, "assignment_epoch": route_id,
+            "claim_role": "unconditional", "assumptions_used": [],
+        }})
+        store.finalize_fact(fact_id, submission)
+
+    research_map = ResearchQuery(project).research_map("v0001")
+    exploration = research_map["exploration"]
+    assert {attempt["id"] for attempt in exploration["attempts"]} == {"r1", "r2", "r3"}
+    assert {conclusion["id"] for conclusion in exploration["conclusions"]} == {"v0001-T", "v0001-U"}
+    assert {attempt["id"]: attempt["fact_count"] for attempt in exploration["attempts"]} == {"r1": 1, "r2": 2, "r3": 1}
+    assert {tuple(edge[key] for key in ("source", "target", "type")) for edge in exploration["edges"]} == {
+        ("r1", "r3", "fallback"), ("r3", "r1", "fallback"), ("r1", "r2", "fact_flow"),
+    }
+    assert exploration["cycle_groups"] == [{"id": "cycle:r1", "obligation_id": "v0001-T", "attempt_ids": ["r1", "r3"]}]
+    assert exploration["shared_facts"] == [{
+        "id": first, "title": "First proposition",
+        "obligations": [
+            {"id": "v0001-T", "roles": ["direct"]},
+            {"id": "v0001-U", "roles": ["input"]},
+        ],
+        "producer_attempt_ids": ["r1"], "consumer_attempt_ids": ["r2"],
+    }]
+
+
 def test_interleaved_identical_fact_submissions_preserve_each_scope(tmp_path: Path):
     project, store, target = _project(tmp_path)
     store.approve_target(target["version"])
@@ -337,20 +464,27 @@ def test_browser_view_state_has_no_persistent_or_write_path():
     assert "state.enabled" not in script
     assert "Legacy project — v2 research control is not enabled." not in script
     assert "/api/factgraph" not in script
-    assert "function renderFactResearchMap(d)" in script
-    assert "selectFactGraphRoute" in script
+    assert "function renderGraphView()" in script
+    assert "function renderTargetOverview(d)" in script
+    assert "function renderSharedFacts(d, selectedFactId = null)" in script
+    assert "function conclusionAttemptMap(d, conclusionId)" in script
+    assert "function renderGraphBreadcrumb()" in script
+    assert "async function refreshSelectedGraphView(d)" in script
+    assert "active?.dataset.tab === 'graph'" in script
+    assert "Loop ·" not in script
     assert "function renderResearchMap(d)" in script
     assert "function layerFactNodes(facts, edges)" in script
     assert "layout:'none'" in script
-    assert "focus:'adjacency'" not in script
+    assert "focus:'adjacency'" in script
     assert "function factSection(title, text, open = false)" in script
     assert "el('details', 'fact-section')" in script
-    assert "function renderRouteFactSkeleton(data, surface = 'fact')" in script
-    assert "direction=predecessors&depth=3&limit=300" in script
+    assert "function renderAttemptProofStructure(data, surface = 'fact')" in script
+    assert "PROOF_GROUP_PAGE_SIZE" not in script
+    assert "function openPropositionGroup(factGroup, propositionGroup, surface)" in script
     assert "katex.renderToString" in script
     page = (Path(observability_app.__file__).parent / "static" / "index.html").read_text(encoding="utf-8")
-    assert "Show all routes" in page
-    assert "route facts" in page
+    assert "Exploration pivots" in page
+    assert "Target conclusions contain exploration attempts" in page
     assert "katex.min.js" in page
 
 

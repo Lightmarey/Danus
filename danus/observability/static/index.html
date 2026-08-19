@@ -40,8 +40,15 @@
     <section id="tab-graph" class="tab">
       <div class="graph-wrap">
         <div class="graph-toolbar">
-          <button id="graph-map-reset" type="button" hidden>Show all routes</button>
-          <span class="muted">Target → obligation → route → route facts. Supporting facts expand on click.</span>
+          <nav id="graph-breadcrumb" class="graph-breadcrumb" aria-label="Graph breadcrumb"></nav>
+          <label class="graph-toggle">View
+            <select id="graph-mode">
+              <option value="exploration">Exploration pivots</option>
+              <option value="facts">Verified-fact reuse</option>
+            </select>
+          </label>
+          <span id="graph-description" class="muted">Target conclusions contain exploration attempts; verified facts may be reused across conclusions.</span>
+          <span id="graph-legend" class="graph-legend" aria-label="Graph legend"></span>
           <span id="graph-stat" class="muted"></span>
         </div>
         <div id="graph" class="graph"></div>
@@ -62,13 +69,13 @@
       <div id="control-summary" class="cards"></div>
       <div class="research-grid">
         <div class="panel"><div class="panel-h">Target governance</div><div id="control-targets" class="mem-list"></div></div>
-        <div class="panel"><div class="panel-h">Methods → routes</div><div id="control-methods" class="mem-list"></div></div>
+        <div class="panel"><div class="panel-h">Method labels → work items</div><div id="control-methods" class="mem-list"></div></div>
         <div class="panel"><div class="panel-h">Obligations</div><div id="control-obligations" class="mem-list"></div></div>
       </div>
       <div class="research-lower">
         <div class="panel">
           <div class="panel-h">Research map / local fact graph <span id="route-stat" class="muted"></span></div>
-          <div class="graph-toolbar"><button id="show-research-map" type="button">Show all routes</button><button id="clear-pins" type="button">Clear view pins</button><span class="muted">Pins and filters live only in this page memory.</span></div>
+          <div class="graph-toolbar"><button id="show-research-map" type="button">Show all work items</button><button id="clear-pins" type="button">Clear view pins</button><span class="muted">Pins and filters live only in this page memory.</span></div>
           <div id="route-graph" class="route-graph"></div>
         </div>
         <aside class="panel"><div class="panel-h">Fact / progress detail</div><div id="research-detail" class="mem-list"><div class="empty">Select a route or obligation.</div></div></aside>
@@ -77,6 +84,6 @@
     </section>
   </main>
 
-  <script defer src="/static/app.js?v=5-route-facts"></script>
+  <script defer src="/static/app.js?v=17-v1-archive"></script>
 </body>
 </html>

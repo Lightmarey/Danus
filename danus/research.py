@@ -17,6 +17,7 @@ from typing import Any, Iterable, Optional
 from danus.core._util import utc_now
 from danus.core.factgraph import FactGraph, parse_frontmatter, statement_of
 from danus.core.global_memory import GlobalMemory
+from danus.write_paper.assemble import target_fact_ids
 
 
 _CONTEXT_STATEMENT_CHARS = 1000
@@ -191,10 +192,15 @@ class ResearchQuery:
         if not wanted:
             return []
         marks = ",".join("?" for _ in wanted)
-        columns = "fact_id,title,statement,status" + (",proof,intuition" if include_proof else "")
+        columns = "fact_id,title,statement,status,raw" + (",proof,intuition" if include_proof else "")
         with self.store._connect() as db:
             rows = db.execute(f"SELECT {columns} FROM facts WHERE fact_id IN ({marks})", wanted).fetchall()
-        found = {str(row["fact_id"]): dict(row) for row in rows}
+        found = {}
+        for row in rows:
+            fact = dict(row)
+            front = parse_frontmatter(str(fact.pop("raw", "")))
+            fact.update({key: front[key] for key in ("summary", "method", "tags")})
+            found[str(row["fact_id"])] = fact
         return [found[item] for item in wanted if item in found]
 
     def descendants(self, fact_id: str, *, limit: int = 10000) -> list[str]:
@@ -213,7 +219,7 @@ class ResearchQuery:
         return found
 
     def fact_get(self, fact_id: str, *, include_proof: bool = False) -> dict[str, Any]:
-        columns = "fact_id,title,statement,intuition,author,problem_id,status" + (",proof" if include_proof else "")
+        columns = "fact_id,title,statement,intuition,author,problem_id,status,raw" + (",proof" if include_proof else "")
         with self.store._connect() as db:
             row = db.execute(f"SELECT {columns} FROM facts WHERE fact_id=?", (fact_id,)).fetchone()
             if not row:
@@ -221,7 +227,10 @@ class ResearchQuery:
             predecessors = [item[0] for item in db.execute("SELECT predecessor_id FROM fact_edges WHERE fact_id=? ORDER BY predecessor_id", (fact_id,))]
             successors = [item[0] for item in db.execute("SELECT fact_id FROM fact_edges WHERE predecessor_id=? ORDER BY fact_id", (fact_id,))]
             scopes = [dict(item) for item in db.execute("SELECT target_version,obligation_id,route_id,claim_role,relation FROM fact_scopes WHERE fact_id=? ORDER BY relation,route_id,obligation_id", (fact_id,))]
-        return {**dict(row), "predecessors": predecessors, "successors": successors, "scopes": scopes}
+        fact = dict(row)
+        front = parse_frontmatter(str(fact.pop("raw", "")))
+        fact.update({key: front[key] for key in ("summary", "method", "tags")})
+        return {**fact, "predecessors": predecessors, "successors": successors, "scopes": scopes}
 
     def fact_neighborhood(self, fact_id: str, *, direction: str = "both", depth: int = 1, limit: int = 300) -> dict[str, Any]:
         if direction not in {"predecessors", "successors", "both"}:
@@ -247,6 +256,56 @@ class ResearchQuery:
                         levels[other] = levels[current] + 1
                         queue.append(other)
         return {"center": fact_id, "nodes": self._fact_rows(levels), "edges": [{"source": a, "target": b} for a, b in sorted(edges)], "truncated": bool(queue)}
+
+    def archive_fact_graph(self) -> dict[str, Any]:
+        """Compact, presentation-only projection for a migrated V1 fact DAG.
+
+        TARGET.md supplies headline facts.  The proof closure and direct premises
+        are derived from fact_edges; no V2 target, obligation, or route is made up.
+        """
+        with self.store._connect() as db:
+            known = {str(row[0]) for row in db.execute("SELECT fact_id FROM facts")}
+            headlines = [fact_id for fact_id in target_fact_ids(self.project) if fact_id in known]
+            rows = [dict(row) for row in db.execute(
+                "SELECT fact_id,title,status,author FROM facts ORDER BY fact_id"
+            )]
+            edges = [
+                {"source": str(row[0]), "target": str(row[1])}
+                for row in db.execute("SELECT predecessor_id,fact_id FROM fact_edges ORDER BY predecessor_id,fact_id")
+                if str(row[0]) in known and str(row[1]) in known
+            ]
+            direct = {
+                str(row[0])
+                for headline in headlines
+                for row in db.execute("SELECT predecessor_id FROM fact_edges WHERE fact_id=?", (headline,))
+            }
+        proof_ids = set(self._topological_closure(headlines))
+        outgoing = {edge["source"] for edge in edges}
+        nodes = []
+        for row in rows:
+            fact_id = str(row["fact_id"])
+            role = (
+                "closing" if fact_id in headlines else
+                "direct" if fact_id in direct else
+                "support" if fact_id in proof_ids else
+                "unassigned"
+            )
+            nodes.append({
+                **row, "role": role, "headline": fact_id in headlines,
+                "terminal": fact_id not in outgoing,
+            })
+        return {
+            "project": self.project.name,
+            "headline_fact_ids": headlines,
+            "nodes": nodes,
+            "edges": edges,
+            "fact_count": len(nodes),
+            "edge_count": len(edges),
+            "proof_fact_count": len(proof_ids),
+            "outside_proof_count": len(nodes) - len(proof_ids),
+            "direct_premise_count": len(direct),
+            "terminal_count": sum(1 for node in nodes if node["terminal"]),
+        }
 
     def _support_closure(self, fact_ids: Iterable[str], depth: Optional[int] = 2, limit: int = 300) -> tuple[list[str], list[dict[str, str]], int]:
         roots = list(dict.fromkeys(str(item) for item in fact_ids if item))
@@ -307,6 +366,306 @@ class ResearchQuery:
         facts.sort(key=lambda item: (self.ROLE_PRIORITY.get(item["role"], 9), item["title"], item["fact_id"]))
         return {"facts": facts[:limit], "edges": edges, "unexpanded_count": omitted + max(0, len(facts) - limit)}
 
+    @staticmethod
+    def _derive_proof_structure(fact_group: dict[str, Any]) -> dict[str, Any]:
+        """Collapse a scoped fact DAG into deterministic proposition groups.
+
+        Scoped facts are proposition-group anchors. Support-only paths become
+        edges between anchors; each anchor owns the support closure immediately
+        below it, stopping at another anchor. Weak components are retained only
+        as layout branches; exploration attempts and target conclusions are derived separately.
+        """
+        facts = fact_group.get("facts") or []
+        by_id = {str(fact["fact_id"]): fact for fact in facts}
+        anchors = {fact_id for fact_id, fact in by_id.items() if fact.get("role") != "support"}
+        incoming = {fact_id: [] for fact_id in by_id}
+        outgoing = {fact_id: [] for fact_id in by_id}
+        for edge in fact_group.get("edges") or []:
+            source, target = str(edge.get("source") or ""), str(edge.get("target") or "")
+            if source in by_id and target in by_id:
+                outgoing[source].append(target)
+                incoming[target].append(source)
+
+        anchor_edges: set[tuple[str, str]] = set()
+        for source in anchors:
+            pending = list(outgoing[source])
+            seen: set[str] = set()
+            while pending:
+                target = pending.pop()
+                if target in seen:
+                    continue
+                seen.add(target)
+                if target in anchors:
+                    anchor_edges.add((source, target))
+                else:
+                    pending.extend(outgoing[target])
+
+        members: dict[str, set[str]] = {}
+        membership_count: dict[str, int] = defaultdict(int)
+        for anchor in anchors:
+            owned = {anchor}
+            pending = list(incoming[anchor])
+            while pending:
+                fact_id = pending.pop()
+                if fact_id in owned or fact_id in anchors:
+                    continue
+                owned.add(fact_id)
+                pending.extend(incoming[fact_id])
+            members[anchor] = owned
+            for fact_id in owned:
+                membership_count[fact_id] += 1
+
+        def label(fact_id: str) -> str:
+            fact = by_id[fact_id]
+            return str(fact.get("title") or fact.get("summary") or fact.get("statement") or fact_id)
+
+        proposition_groups = []
+        for anchor in sorted(anchors, key=lambda fact_id: (label(fact_id), fact_id)):
+            fact = by_id[anchor]
+            support_ids = sorted(members[anchor] - {anchor}, key=lambda fact_id: (label(fact_id), fact_id))
+            proposition_groups.append({
+                "id": f"fact-group:{anchor}", "root_fact_id": anchor,
+                "title": label(anchor), "summary": fact.get("summary") or "",
+                "method": fact.get("method") or "", "tags": fact.get("tags") or [],
+                "role": fact.get("role") or "direct", "fact_ids": [anchor, *support_ids],
+                "shared_fact_ids": [fact_id for fact_id in support_ids if membership_count[fact_id] > 1],
+            })
+
+        neighbors = {anchor: set() for anchor in anchors}
+        for source, target in anchor_edges:
+            neighbors[source].add(target)
+            neighbors[target].add(source)
+        for fact_id, count in membership_count.items():
+            if count < 2:
+                continue
+            # ponytail: quadratic only inside the existing <=300-fact payload;
+            # build a reverse owner index if that hard cap ever grows.
+            owners = [anchor for anchor, owned in members.items() if fact_id in owned]
+            for left in owners:
+                neighbors[left].update(right for right in owners if right != left)
+        branch_members: list[list[str]] = []
+        unseen = set(anchors)
+        while unseen:
+            start = min(unseen)
+            component: set[str] = set()
+            pending = [start]
+            while pending:
+                fact_id = pending.pop()
+                if fact_id in component:
+                    continue
+                component.add(fact_id)
+                unseen.discard(fact_id)
+                pending.extend(neighbors[fact_id] - component)
+            branch_members.append(sorted(component))
+
+        component_rows = []
+        edge_sources = {source for source, _ in anchor_edges}
+        for component in sorted(branch_members, key=lambda item: item[0]):
+            terminals = [fact_id for fact_id in component if fact_id not in edge_sources]
+            component_rows.append({
+                "id": f"branch:{component[0]}",
+                "group_ids": [f"fact-group:{fact_id}" for fact_id in component],
+                "terminal_group_ids": [f"fact-group:{fact_id}" for fact_id in terminals],
+            })
+
+        return {
+            "components": component_rows,
+            "proposition_groups": proposition_groups,
+            "edges": [
+                {"source": f"fact-group:{source}", "target": f"fact-group:{target}"}
+                for source, target in sorted(anchor_edges)
+            ],
+            "fact_count": len(by_id),
+            "unexpanded_count": int(fact_group.get("unexpanded_count") or 0),
+        }
+
+    def _exploration_network(
+        self,
+        target_version: str,
+        obligations: list[dict[str, Any]],
+        routes: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        """Project explicit work-item pivots and verified-fact transfers."""
+        route_ids = {str(route["id"]) for route in routes}
+        relation_counts: dict[str, dict[str, int]] = defaultdict(dict)
+        fact_counts: dict[str, int] = {}
+        with self.store._connect() as db:
+            for row in db.execute(
+                """SELECT route_id,relation,COUNT(DISTINCT fact_id) AS count
+                   FROM fact_scopes WHERE target_version=? AND route_id<>''
+                   GROUP BY route_id,relation""",
+                (target_version,),
+            ):
+                relation_counts[str(row["route_id"])][str(row["relation"])] = int(row["count"])
+            fact_counts = {
+                str(row["route_id"]): int(row["count"])
+                for row in db.execute(
+                    """SELECT route_id,COUNT(DISTINCT fact_id) AS count
+                       FROM fact_scopes WHERE target_version=? AND route_id<>''
+                       GROUP BY route_id""",
+                    (target_version,),
+                )
+            }
+            fact_flow_rows = db.execute(
+                """SELECT producer.route_id AS source,consumer.route_id AS target,
+                          COUNT(DISTINCT producer.fact_id) AS fact_count
+                   FROM fact_scopes producer
+                   JOIN fact_scopes consumer
+                     ON consumer.target_version=producer.target_version
+                    AND consumer.fact_id=producer.fact_id
+                   WHERE producer.target_version=?
+                     AND producer.relation IN ('direct','closing')
+                     AND consumer.relation='input'
+                     AND producer.route_id<>'' AND consumer.route_id<>''
+                     AND producer.route_id<>consumer.route_id
+                   GROUP BY producer.route_id,consumer.route_id
+                   ORDER BY producer.route_id,consumer.route_id""",
+                (target_version,),
+            ).fetchall()
+            shared_scope_rows = db.execute(
+                """SELECT s.fact_id,f.title,s.obligation_id,s.route_id,s.relation
+                   FROM fact_scopes s JOIN facts f ON f.fact_id=s.fact_id
+                   WHERE s.target_version=? AND s.obligation_id<>''
+                   ORDER BY s.fact_id,s.obligation_id,s.route_id,s.relation""",
+                (target_version,),
+            ).fetchall()
+
+        attempts = []
+        fallback_edges: set[tuple[str, str]] = set()
+        for route in routes:
+            route_id = str(route["id"])
+            counts = relation_counts.get(route_id, {})
+            attempts.append({
+                "id": route_id,
+                "obligation_id": str(route["obligation_id"]),
+                "title": str(route.get("method_title") or route_id),
+                "expected_result": str(route.get("expected_result") or ""),
+                "state": str(route.get("state") or "proposed"),
+                "fact_count": fact_counts.get(route_id, 0),
+                "role_counts": counts,
+            })
+            for fallback_id in route.get("fallback_route_ids") or []:
+                if str(fallback_id) in route_ids and str(fallback_id) != route_id:
+                    fallback_edges.add((route_id, str(fallback_id)))
+
+        obligation_by_route = {attempt["id"]: attempt["obligation_id"] for attempt in attempts}
+        fact_flow_edges = [
+            {
+                "source": str(row["source"]), "target": str(row["target"]),
+                "type": "fact_flow", "fact_count": int(row["fact_count"]),
+                "cross_obligation": obligation_by_route.get(str(row["source"])) != obligation_by_route.get(str(row["target"])),
+            }
+            for row in fact_flow_rows
+            if str(row["source"]) in route_ids and str(row["target"]) in route_ids
+        ]
+        scoped_by_fact: dict[str, dict[str, Any]] = {}
+        for row in shared_scope_rows:
+            fact_id = str(row["fact_id"])
+            item = scoped_by_fact.setdefault(fact_id, {
+                "id": fact_id, "title": str(row["title"] or fact_id), "obligation_roles": defaultdict(set),
+                "producer_attempt_ids": set(), "consumer_attempt_ids": set(),
+            })
+            obligation_id, route_id, relation = str(row["obligation_id"]), str(row["route_id"]), str(row["relation"])
+            item["obligation_roles"][obligation_id].add(relation)
+            if relation in {"direct", "closing"} and route_id:
+                item["producer_attempt_ids"].add(route_id)
+            if relation == "input" and route_id:
+                item["consumer_attempt_ids"].add(route_id)
+        shared_facts = []
+        for item in scoped_by_fact.values():
+            if len(item["obligation_roles"]) < 2:
+                continue
+            shared_facts.append({
+                "id": item["id"], "title": item["title"],
+                "obligations": [
+                    {"id": obligation_id, "roles": sorted(roles)}
+                    for obligation_id, roles in sorted(item["obligation_roles"].items())
+                ],
+                "producer_attempt_ids": sorted(item["producer_attempt_ids"]),
+                "consumer_attempt_ids": sorted(item["consumer_attempt_ids"]),
+            })
+
+        fallback_rows = [
+            {
+                "source": source, "target": target, "type": "fallback", "fact_count": 0,
+                "cross_obligation": obligation_by_route.get(source) != obligation_by_route.get(target),
+            }
+            for source, target in sorted(fallback_edges)
+        ]
+        cycle_groups = self._cycle_groups(route_ids, fallback_edges, obligation_by_route)
+        conclusions = []
+        for obligation in obligations:
+            obligation_id = str(obligation["id"])
+            conclusions.append({
+                "id": obligation_id,
+                "title": str(obligation.get("statement") or obligation_id),
+                "state": str(obligation.get("state") or "open"),
+                "attempt_ids": [attempt["id"] for attempt in attempts if attempt["obligation_id"] == obligation_id],
+            })
+        return {
+            "conclusions": conclusions,
+            "attempts": attempts,
+            "edges": [*fallback_rows, *fact_flow_edges],
+            "shared_facts": sorted(shared_facts, key=lambda item: item["id"]),
+            "cycle_groups": cycle_groups,
+            "fallback_edge_count": len(fallback_edges),
+            "fact_flow_edge_count": len(fact_flow_edges),
+        }
+
+    @staticmethod
+    def _cycle_groups(
+        route_ids: set[str],
+        fallback_edges: set[tuple[str, str]],
+        obligation_by_route: dict[str, str],
+    ) -> list[dict[str, Any]]:
+        """Return non-trivial strongly connected fallback components."""
+        children = {route_id: [] for route_id in route_ids}
+        for source, target in fallback_edges:
+            children[source].append(target)
+        index = 0
+        indices: dict[str, int] = {}
+        low: dict[str, int] = {}
+        stack: list[str] = []
+        on_stack: set[str] = set()
+        groups: list[list[str]] = []
+
+        def visit(route_id: str) -> None:
+            nonlocal index
+            indices[route_id] = low[route_id] = index
+            index += 1
+            stack.append(route_id)
+            on_stack.add(route_id)
+            for child in children[route_id]:
+                if child not in indices:
+                    visit(child)
+                    low[route_id] = min(low[route_id], low[child])
+                elif child in on_stack:
+                    low[route_id] = min(low[route_id], indices[child])
+            if low[route_id] != indices[route_id]:
+                return
+            component = []
+            while stack:
+                child = stack.pop()
+                on_stack.remove(child)
+                component.append(child)
+                if child == route_id:
+                    break
+            if len(component) > 1:
+                groups.append(sorted(component))
+
+        for route_id in sorted(route_ids):
+            if route_id not in indices:
+                visit(route_id)
+        return [
+            {
+                "id": f"cycle:{attempt_ids[0]}",
+                "obligation_id": next(iter({obligation_by_route.get(item, "") for item in attempt_ids}))
+                if len({obligation_by_route.get(item, "") for item in attempt_ids}) == 1 else "",
+                "attempt_ids": attempt_ids,
+            }
+            for attempt_ids in sorted(groups)
+        ]
+
     def research_map(self, target_version: Optional[str] = None) -> dict[str, Any]:
         target_version = target_version or self.store.current_target_version()
         targets = []
@@ -317,7 +676,9 @@ class ResearchQuery:
             with self.store._connect() as db:
                 unassigned_count = int(db.execute("SELECT COUNT(*) FROM facts f WHERE NOT EXISTS (SELECT 1 FROM fact_scopes s WHERE s.fact_id=f.fact_id)").fetchone()[0])
                 unassigned = [dict(row) | {"role": "unassigned"} for row in db.execute("SELECT fact_id,title,statement,status FROM facts f WHERE NOT EXISTS (SELECT 1 FROM fact_scopes s WHERE s.fact_id=f.fact_id) ORDER BY title,fact_id LIMIT 100")]
-            return {"generation": self.store.generation(), "active_target": None, "targets": targets, "methods": [], "obligations": [], "unassigned_count": unassigned_count, "unassigned_facts": unassigned, "budget": self.store.budget_state(), "backend_circuits": self.store.backend_circuits(), "active_call_reservations": self.store.active_call_reservations(), "outbox": self.store.list_outbox()}
+            archive = self.archive_fact_graph()
+            archive_summary = {key: value for key, value in archive.items() if key not in {"nodes", "edges"}}
+            return {"generation": self.store.generation(), "active_target": None, "targets": targets, "methods": [], "obligations": [], "exploration": {"conclusions": [], "attempts": [], "edges": [], "shared_facts": [], "cycle_groups": [], "fallback_edge_count": 0, "fact_flow_edge_count": 0}, "archive": archive_summary, "unassigned_count": unassigned_count, "unassigned_facts": unassigned, "budget": self.store.budget_state(), "backend_circuits": self.store.backend_circuits(), "active_call_reservations": self.store.active_call_reservations(), "outbox": self.store.list_outbox()}
         obligations = self.store.list_obligations(target_version)
         routes = self.store.list_routes(target_version)
         with self.store._connect() as db:
@@ -332,7 +693,8 @@ class ResearchQuery:
             obligation = next((item for item in obligations if item["id"] == route["obligation_id"]), None)
             by_method[(route["method_key"], route["method_title"])].append({**route, "obligation": obligation, "gain_sequence": [item["gain"] for item in route_checkpoints], "checkpoints": len(route_checkpoints), "obstacles": route_obstacles})
         methods = [{"method_key": key, "method_title": title, "routes": values} for (key, title), values in sorted(by_method.items())]
-        return {"generation": self.store.generation(), "active_target": self.store.target(target_version), "target_state": self.store.target_state(target_version), "targets": targets, "methods": methods, "obligations": obligations, "unassigned_count": unassigned_count, "unassigned_facts": unassigned, "budget": self.store.budget_state(), "backend_circuits": self.store.backend_circuits(), "active_call_reservations": self.store.active_call_reservations(), "outbox": self.store.list_outbox()}
+        exploration = self._exploration_network(target_version, obligations, routes)
+        return {"generation": self.store.generation(), "active_target": self.store.target(target_version), "target_state": self.store.target_state(target_version), "targets": targets, "methods": methods, "obligations": obligations, "exploration": exploration, "unassigned_count": unassigned_count, "unassigned_facts": unassigned, "budget": self.store.budget_state(), "backend_circuits": self.store.backend_circuits(), "active_call_reservations": self.store.active_call_reservations(), "outbox": self.store.list_outbox()}
 
     def route_context(self, route_id: str, *, snapshot: Optional[int] = None) -> dict[str, Any]:
         generation = self._snapshot(snapshot)
@@ -341,14 +703,18 @@ class ResearchQuery:
         with self.store._connect() as db:
             checkpoints = [dict(row) | {"report": _load(row["report"], {})} for row in db.execute("SELECT * FROM checkpoints WHERE route_id=? ORDER BY event_seq DESC LIMIT 20", (route_id,))]
             obstacles = [dict(row) for row in db.execute("SELECT * FROM obstacles WHERE route_id=? ORDER BY last_seen_seq DESC", (route_id,))]
-        return {"snapshot_generation": generation, "route": {**route, "state": self.store.route_state(route_id)}, "obligation": obligation, "fact_group": self._scoped_facts(route_id=route_id), "checkpoints": checkpoints, "obstacles": obstacles}
+        fact_group = self._scoped_facts(route_id=route_id)
+        fact_group["proof_structure"] = self._derive_proof_structure(fact_group)
+        return {"snapshot_generation": generation, "route": {**route, "state": self.store.route_state(route_id)}, "obligation": obligation, "fact_group": fact_group, "checkpoints": checkpoints, "obstacles": obstacles}
 
     def obligation_context(self, obligation_id: str, *, snapshot: Optional[int] = None) -> dict[str, Any]:
         generation = self._snapshot(snapshot)
         obligation = self.store.obligation(obligation_id)
         routes = [item for item in self.store.list_routes(obligation["target_version"]) if item["obligation_id"] == obligation_id]
         dependencies = [self.store.obligation(item) for item in obligation.get("dependencies") or []]
-        return {"snapshot_generation": generation, "obligation": obligation, "dependencies": dependencies, "routes": routes, "fact_group": self._scoped_facts(obligation_id=obligation_id)}
+        fact_group = self._scoped_facts(obligation_id=obligation_id)
+        fact_group["proof_structure"] = self._derive_proof_structure(fact_group)
+        return {"snapshot_generation": generation, "obligation": obligation, "dependencies": dependencies, "routes": routes, "fact_group": fact_group}
 
     def _topological_closure(self, seeds: Iterable[str]) -> list[str]:
         support, _, _ = self._support_closure(seeds, depth=None, limit=100000)

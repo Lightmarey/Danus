@@ -272,6 +272,11 @@ def research_map(target_version: Optional[str] = None) -> JSONResponse:
     return JSONResponse(ResearchQuery(_project_dir()).research_map(target_version))
 
 
+@app.get("/api/research/archive")
+def research_archive() -> JSONResponse:
+    return JSONResponse(ResearchQuery(_project_dir()).archive_fact_graph())
+
+
 @app.get("/api/research/routes/{route_id}")
 def research_route(route_id: str, snapshot: Optional[int] = None) -> JSONResponse:
     try:
