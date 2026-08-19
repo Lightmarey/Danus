@@ -269,6 +269,7 @@ def test_legacy_stop_requires_matching_identity_health(monkeypatch, tmp_path):
     alive = {"value": True}
     monkeypatch.setattr(runtime, "pid_alive", lambda pid: alive["value"])
     monkeypatch.setattr(runtime, "process_identity", lambda pid: "token")
+    monkeypatch.setattr(services, "_port_open", lambda port: False)
     monkeypatch.setattr(
         services, "_http_health",
         lambda port: ({"status": "ok", "pid": 123, "identity": "token"}

@@ -204,15 +204,26 @@ def _recover_dead_worker(wl: L.WorkerLayout, *, reason: str) -> Dict:
     if not is_v2_project(wl.project_dir):
         return {"recovered": False}
     status = _read_status(wl)
+    store = ControlStore(wl.project_dir)
+    assignment = store.assignment(wl.name)
     started = status.get("round_started_at")
     last_round = status.get("last_round_at")
+    status_matches_assignment = bool(
+        assignment
+        and status.get("assignment_epoch") == assignment.get("epoch")
+    )
     round_was_active = bool(
+        status_matches_assignment
+        and
         status.get("state") in {"running", "auditing"}
         and isinstance(started, (int, float))
         and (not isinstance(last_round, (int, float)) or started > last_round)
     )
-    wall = max(0.0, time.time() - float(started)) if isinstance(started, (int, float)) else 0.0
-    store = ControlStore(wl.project_dir)
+    wall = (
+        max(0.0, time.time() - float(started))
+        if round_was_active and isinstance(started, (int, float))
+        else 0.0
+    )
     result = store.recover_worker_interruption(
         wl.name, wall_seconds=wall, reason=reason, round_was_active=round_was_active,
     )

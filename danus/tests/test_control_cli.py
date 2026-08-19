@@ -179,6 +179,7 @@ def test_start_recovers_crashed_round_before_spawning(tmp_path: Path, monkeypatc
         (worker / ".pid").write_text("99999999", encoding="utf-8")
         (worker / ".status.json").write_text(json.dumps({
             "state": "running", "round_started_at": time.time() - 5,
+            "assignment_epoch": assignment["epoch"],
         }), encoding="utf-8")
         monkeypatch.setattr(cli, "spawn_loop", lambda _worker_dir: 4321)
 
@@ -188,6 +189,36 @@ def test_start_recovers_crashed_round_before_spawning(tmp_path: Path, monkeypatc
         assert store.active_call_reservations() == []
         assert store.events("round_interrupted")[-1]["reason"] == "restart_after_dead_worker"
         assert [e for e in gm.read("proof_attempt") if e["id"] == source_id][0]["status"] == "unverified"
+
+
+def test_start_ignores_stale_legacy_running_status_for_new_assignment(
+    tmp_path: Path, monkeypatch,
+):
+    with _env(tmp_path):
+        result = cli.do_new("P", roles="high:1")
+        project = Path(result["project_dir"])
+        store = ControlStore(project)
+        target = store.propose_target({
+            "statement": "T", "allowed_assumptions": [], "forbidden_assumptions": [],
+            "required_conclusions": ["T"], "fallback_candidates": [],
+            "budget": {"max_wall_seconds": 100},
+        })
+        store.approve_target(target["version"])
+        store.add_route({
+            "id": "r1", "obligation_id": "v0001-root-1",
+            "method_family": "direct", "expected_result": "T",
+        })
+        store.assign("high", obligation_id="v0001-root-1", route_id="r1", task="T")
+        worker = project / "workers" / "high"
+        (worker / ".status.json").write_text(json.dumps({
+            "state": "running", "round_started_at": time.time() - 1000,
+        }), encoding="utf-8")
+        monkeypatch.setattr(cli, "spawn_loop", lambda _worker_dir: 4321)
+
+        assert cli.do_start("P/high")[0]["result"] == "started"
+        assert store.events("round_interrupted") == []
+        assert store.events("cost") == []
+        assert store.budget_state()["stage"] == "normal"
 
 
 def test_dead_idle_worker_resets_control_without_fake_interruption(tmp_path: Path):
