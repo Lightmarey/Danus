@@ -78,7 +78,7 @@ Install: `danus/gateway/INSTALL.md`.
      the verifier's feedback is not lost and siblings learn from rejections. The
      verifier itself stays stateless — `fact_submit` (the worker's tool) does this
      write.
-  - in: `problem_id, author, statement, proof, predecessors[], glossary_introduces{}` (+ optional `intuition`, `source_id`, `external_refs[]` — structured bibliography for cited external results, metadata only, not in the `fact_id`)
+  - in: `problem_id, author, statement, proof, predecessors[], glossary_introduces{}` (+ optional `display_title`, `display_summary`, `display_method`, `display_tags[]`, `intuition`, `source_id`, `external_refs[]`; display and bibliography metadata are not in the `fact_id`)
   - out: `{accepted, fact_id}` · `{accepted: false, repair_hints, undefined_symbols}` ·
     `{accepted: false, verdict: "error"}` (verify service down — retry) ·
     `{accepted: true, fact_id: null, write_error}` (verified but a predecessor was revoked)

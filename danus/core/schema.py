@@ -76,8 +76,9 @@ def clean_external_refs(refs: object) -> List[Dict[str, object]]:
 @dataclass
 class Fact:
     """A verified fact = one node in the fact graph. Frontmatter (fact_id /
-    problem_id / author / predecessors / glossary_introduces / external_refs) +
-    the markdown body (statement / proof / optional intuition)."""
+    problem_id / author / presentation metadata / predecessors /
+    glossary_introduces / external_refs) + the markdown body (statement / proof /
+    optional intuition)."""
 
     fact_id: str
     problem_id: str
@@ -88,6 +89,11 @@ class Fact:
     proof: str
     glossary_introduces: Dict[str, str] = field(default_factory=dict)  # symbol -> definition
     intuition: str = ""
+    # Human-readable presentation metadata. It is advisory and deliberately not
+    # part of the content-addressed fact_id.
+    summary: str = ""
+    method: str = ""
+    tags: List[str] = field(default_factory=list)
     # Structured bibliography of external (published) results the proof cites.
     # Mutable metadata — NOT part of the content-addressed fact_id (see
     # compute_fact_id): the reference auditor corrects these post-hoc, so binding

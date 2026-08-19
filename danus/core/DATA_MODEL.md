@@ -229,13 +229,17 @@ markdown file per fact (file name = the bare-hex id) + `revocation_log.jsonl` +
 `_revoked/<ts>/`. No `glossary.json`, no `drafts/` (rejected claims stay in
 global memory as `refuted`).
 
-**Fact node — 6 frontmatter fields + markdown body:**
+**Fact node — frontmatter + markdown body:**
 
 ```yaml
 ---
 fact_id: 0056a49384644046          # content-addressed (bare hex)
 problem_id: KMMP
 author: KMMP_pro3                  # which worker produced it
+title: Local compactness lemma     # short human-readable label
+summary: "Rules out finite-scale loss of compactness."
+method: "Boundary rescaling and a Pohozaev identity"
+tags: ["compactness", "blow-up"]
 predecessors: [7b6dd3df2e88fff5]   # bare-hex ids this depends on (the DAG)
 glossary_introduces:               # symbols this fact defines (kept — see below)
   X: a complex manifold
@@ -279,11 +283,15 @@ external_refs: [{"key": "HL26", "authors": ["Han", "Liu"], "title": "...", "arxi
   cited keys themselves already live in `proof`, which *is* hashed. Read it via
   `external_refs(fact_id)`; rewrite it via `set_external_refs(fact_id, refs)`
   (touches only the metadata line, never the body or id).
+- **`title`, `summary`, `method`, and `tags` are presentation metadata.** The
+  gateway requires a title; `summary`, `method`, and `tags` are optional and may
+  be empty. They improve human navigation but are not sent to the verifier and
+  are not part of `fact_id`.
 - **`fact_id` is content-addressed:**
   `SHA256(json{problem_id, sorted(predecessors), sorted(glossary_introduces), normalized(statement), normalized(proof)})[:16]`.
   Same content ⇒ same id ⇒ natural dedup. Nodes are immutable
   (a changed statement/proof/glossary ⇒ a different id ⇒ a new file). `external_refs`
-  is deliberately excluded (mutable metadata, above).
+  and presentation metadata are deliberately excluded.
 - **DAG:** `predecessors` are the bare-hex fact ids this fact depends on
   (its "depends-on"). References use bare hex everywhere — one convention.
 - **Revocation:** revoking a fact moves it (and every descendant) to `_revoked/`,
@@ -308,8 +316,9 @@ on my subgoal?"). Exposed as the `fact_search` MCP tool (worker + main). It is a
 *read view*; the fact files stay the single source of truth.
 
 **Operations (code = data-structure I/O only).** `compute_fact_id(...)`,
-`add(problem_id, author, statement, proof, predecessors=[], intuition="",
-external_refs=[]) -> fact_id`, `get_raw(fact_id)`, `list()`, `search(query, limit)`,
+`add(problem_id, author, statement, proof, display_title="",
+display_summary="", display_method="", display_tags=[], predecessors=[],
+intuition="", external_refs=[]) -> fact_id`, `get_raw(fact_id)`, `list()`, `search(query, limit)`,
 `predecessors(fact_id)`, `descendants(fact_id)`, `external_refs(fact_id)`,
 `set_external_refs(fact_id, refs)`, `revoke(fact_id, reason)`.
 

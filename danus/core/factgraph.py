@@ -1,7 +1,7 @@
 """fact graph — project-shared, verified, content-addressed DAG.
 
 One human/agent-readable markdown file per fact: YAML frontmatter (fact_id /
-problem_id / author / predecessors / glossary_introduces) + a markdown body
+problem_id / author / presentation / predecessors / glossary_introduces) + a markdown body
 (## statement / ## proof / optional ## intuition). Plus the project glossary, a
 revocation log, and a ``_revoked/`` archive. See DATA_MODEL.md §3.
 
@@ -52,6 +52,9 @@ def serialize_fact(fact: Fact) -> str:
         f"problem_id: {fact.problem_id}",
         f"author: {fact.author}",
         f"title: {fact.title}",
+        "summary: " + json.dumps(fact.summary, ensure_ascii=False),
+        "method: " + json.dumps(fact.method, ensure_ascii=False),
+        "tags: " + json.dumps(fact.tags, ensure_ascii=False),
         f"predecessors: [{', '.join(fact.predecessors)}]",
     ]
     if fact.glossary_introduces:
@@ -72,12 +75,14 @@ def serialize_fact(fact: Fact) -> str:
 
 
 def parse_frontmatter(text: str) -> Dict[str, object]:
-    """Extract ``predecessors`` (list), ``glossary_introduces`` (dict), and
-    ``external_refs`` (list of dicts) from a fact's frontmatter. ``external_refs``
-    defaults to ``[]`` for facts written before the field existed."""
+    """Extract presentation and dependency metadata from fact frontmatter.
+
+    Optional fields default to empty values for facts written before they existed.
+    """
     preds: List[str] = []
     gloss: Dict[str, str] = {}
     refs: List[Dict[str, object]] = []
+    presentation: Dict[str, object] = {"summary": "", "method": "", "tags": []}
     in_gloss = False
     lines = text.splitlines()
     for i, line in enumerate(lines):
@@ -99,6 +104,18 @@ def parse_frontmatter(text: str) -> Dict[str, object]:
             except json.JSONDecodeError:
                 refs = []
             continue
+        if any(line.startswith(f"{key}:") for key in presentation):
+            in_gloss = False
+            key, payload = line.split(":", 1)
+            try:
+                value = json.loads(payload.strip()) if payload.strip() else presentation[key]
+            except json.JSONDecodeError:
+                value = payload.strip() if key != "tags" else []
+            if key in {"summary", "method"} and isinstance(value, str):
+                presentation[key] = value
+            elif key == "tags" and isinstance(value, list):
+                presentation[key] = [str(tag) for tag in value if isinstance(tag, str)]
+            continue
         if in_gloss:
             gm = _GLOSS_LINE_RE.match(line)
             if gm:
@@ -110,7 +127,10 @@ def parse_frontmatter(text: str) -> Dict[str, object]:
         if line.startswith("title:"):
             title = line.split(":", 1)[1].strip()
             break
-    return {"title": title, "predecessors": preds, "glossary_introduces": gloss, "external_refs": refs}
+    return {
+        "title": title, **presentation, "predecessors": preds,
+        "glossary_introduces": gloss, "external_refs": refs,
+    }
 
 
 class FactGraph:
@@ -135,6 +155,9 @@ class FactGraph:
         statement: str,
         proof: str,
         display_title: str = "",
+        display_summary: str = "",
+        display_method: str = "",
+        display_tags: Optional[List[str]] = None,
         predecessors: Optional[List[str]] = None,
         glossary_introduces: Optional[Dict[str, str]] = None,
         intuition: str = "",
@@ -145,8 +168,8 @@ class FactGraph:
         Refuses a revoked predecessor (cascade integrity). Idempotent: identical
         content -> identical id -> identical file. Merges the fact's introduced
         symbols into the project glossary. ``external_refs`` is structured
-        bibliography for cited external results; it does NOT affect the fact_id
-        (mutable metadata — see ``compute_fact_id``).
+        bibliography for cited external results; presentation metadata and
+        ``external_refs`` do NOT affect the fact_id.
         """
         predecessors = [p for p in (predecessors or []) if p]
         glossary_introduces = glossary_introduces or {}
@@ -162,11 +185,21 @@ class FactGraph:
             proof=proof,
         )
         title = " ".join((display_title or statement).split())[:80]
+        summary = " ".join(display_summary.split())[:240] if isinstance(display_summary, str) else ""
+        method = " ".join(display_method.split())[:160] if isinstance(display_method, str) else ""
+        tags: List[str] = []
+        for raw_tag in display_tags if isinstance(display_tags, list) else []:
+            tag = " ".join(raw_tag.split())[:40] if isinstance(raw_tag, str) else ""
+            if tag and tag not in tags:
+                tags.append(tag)
+            if len(tags) == 5:
+                break
         fact = Fact(
             fact_id=fact_id, problem_id=problem_id, author=author,
             title=title,
             predecessors=predecessors, statement=statement, proof=proof,
             glossary_introduces=glossary_introduces, intuition=intuition,
+            summary=summary, method=method, tags=tags,
             external_refs=external_refs,
         )
         self.facts_dir.mkdir(parents=True, exist_ok=True)

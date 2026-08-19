@@ -311,6 +311,7 @@ def _close_v2_obligation(
 
 def _persist_verification(
     *, result: Dict[str, Any], statement: str, proof: str, display_title: str,
+    display_summary: str, display_method: str, display_tags: Optional[List[str]],
     predecessors: Optional[List[str]], glossary_introduces: Optional[Dict[str, str]],
     intuition: str, source_id: Optional[str], external_refs: Optional[List[Dict[str, Any]]],
     target_version: str, obligation_id: str, route_id: str, assignment_epoch: str,
@@ -351,7 +352,9 @@ def _persist_verification(
             }})
             fact_id = fg.add(
                 problem_id=problem_id, author=_author(), statement=statement, proof=proof,
-                display_title=display_title, predecessors=predecessors,
+                display_title=display_title, display_summary=display_summary,
+                display_method=display_method, display_tags=display_tags,
+                predecessors=predecessors,
                 glossary_introduces=glossary_introduces, intuition=intuition,
                 external_refs=external_refs,
             )
@@ -423,6 +426,9 @@ def fact_submit(
     statement: str,
     proof: str,
     display_title: str = "",
+    display_summary: str = "",
+    display_method: str = "",
+    display_tags: Optional[List[str]] = None,
     predecessors: Optional[List[str]] = None,
     glossary_introduces: Optional[Dict[str, str]] = None,
     intuition: str = "",
@@ -452,7 +458,9 @@ def fact_submit(
     "arxiv": "2603.03817", "year": 2026, "cited_for": "Theorem 1.2"}`` (ground it
     with ``search_arxiv_theorems``). This is captured on the fact so the paper
     pipeline can cite it without re-deriving; it is mutable metadata and does not
-    affect the ``fact_id``."""
+    affect the ``fact_id``. ``display_summary``, ``display_method``, and
+    ``display_tags`` are optional human-readable metadata; all may be empty and
+    are not sent to the verifier."""
     started = time.monotonic()
     project_dir = _project()
     fg = _fg()
@@ -594,6 +602,8 @@ def fact_submit(
                 "undefined_symbols": undefined}
     response = _persist_verification(
         result=result, statement=statement, proof=proof, display_title=display_title,
+        display_summary=display_summary, display_method=display_method,
+        display_tags=display_tags,
         predecessors=predecessors, glossary_introduces=glossary_introduces,
         intuition=intuition, source_id=source_id, external_refs=external_refs,
         target_version=target_version or "", obligation_id=obligation_id or "",
@@ -714,6 +724,9 @@ def fact_submit_batch(
         candidate = {
             "statement": entry.get("claim"), "proof": entry.get("evidence"),
             "display_title": links.get("display_title", ""),
+            "display_summary": links.get("display_summary", ""),
+            "display_method": links.get("display_method", ""),
+            "display_tags": links.get("display_tags") or [],
             "predecessors": links.get("predecessors") or [],
             "glossary_introduces": entry.get("glossary") or {},
             "intuition": links.get("intuition", ""), "source_id": source_id,
@@ -805,6 +818,9 @@ def fact_submit_batch(
                 results[index] = _persist_verification(
                     result=recovered_verdict, statement=candidate["statement"],
                     proof=candidate["proof"], display_title=candidate["display_title"],
+                    display_summary=candidate["display_summary"],
+                    display_method=candidate["display_method"],
+                    display_tags=candidate["display_tags"],
                     predecessors=candidate["predecessors"],
                     glossary_introduces=candidate["glossary_introduces"],
                     intuition=candidate["intuition"], source_id=candidate["source_id"],
@@ -913,6 +929,8 @@ def fact_submit_batch(
         results[candidate["index"]] = _persist_verification(
             result=verdict, statement=candidate["statement"], proof=candidate["proof"],
             display_title=candidate["display_title"], predecessors=candidate["predecessors"],
+            display_summary=candidate["display_summary"],
+            display_method=candidate["display_method"], display_tags=candidate["display_tags"],
             glossary_introduces=candidate["glossary_introduces"], intuition=candidate["intuition"],
             source_id=candidate["source_id"], external_refs=candidate["external_refs"],
             target_version=target_version, obligation_id=obligation_id, route_id=route_id,

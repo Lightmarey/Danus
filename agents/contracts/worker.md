@@ -68,6 +68,8 @@ token-bounded `ContextManifest`. Codex has already loaded this contract.
 Every staged candidate must include:
 
 - a one-line `display_title` of 4-80 characters;
+- optional `display_summary`, `display_method`, and `display_tags` presentation
+  metadata; all three may be empty and never affect verification;
 - `assumptions_used` within the approved target contract;
 - whether the fact is intended to close the obligation;
 - exactly one `claim_role`:
@@ -100,7 +102,8 @@ match this problem.
 For a candidate that may wait for semantically related candidates, first persist
 it with `gm_add(kind="proof_attempt"|"conclusion", claim=<statement>,
 evidence=<proof>, verifiable=true)`. Put the submission metadata in `links`:
-`verification_goal`, `display_title`, `predecessors`, `intuition`,
+`verification_goal`, `display_title`, `display_summary`, `display_method`,
+`display_tags`, `predecessors`, `intuition`,
 `external_refs`, `claim_role`, `assumptions_used`, `closes_obligation`, and, for
 a self-contained closing expansion, `closure_statement`.
 The gateway stamps the four exact assignment values; do not repeat them.

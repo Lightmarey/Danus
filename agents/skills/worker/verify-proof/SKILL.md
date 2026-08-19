@@ -73,9 +73,11 @@ Concretely, before you submit:
 
 Call `gm_add(kind="proof_attempt"|"conclusion", claim=<statement>,
 evidence=<proof>, verifiable=true)` and put `verification_goal`, `display_title`,
-`predecessors`, `glossary_introduces`, `intuition`, `external_refs`, `claim_role`,
-`assumptions_used`, and `closes_obligation` in `links`. Copy every
-`assumptions_used` entry exactly from the research-context list; the gateway
+`display_summary`, `display_method`, `display_tags`, `predecessors`,
+`glossary_introduces`, `intuition`, `external_refs`, `claim_role`,
+`assumptions_used`, and `closes_obligation` in `links`. The three additional
+display fields are optional and may be empty. Copy every `assumptions_used`
+entry exactly from the research-context list; the gateway
 stamps the assignment scope. Then call
 `fact_submit_batch(verification_goal, candidates=[{"source_id": ...}])`.
 When `closes_obligation=true`, keep `claim` self-contained. If the obligation

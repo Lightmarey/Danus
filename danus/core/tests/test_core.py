@@ -315,8 +315,12 @@ def test_global_memory():
 def test_factgraph():
     with tempfile.TemporaryDirectory() as d:
         fg = FactGraph(Path(d) / "proj2")
-        base = fg.add(problem_id="P", author="P_high", statement="A holds", proof="proof of A",
-                      glossary_introduces={"X": "a complex manifold"})
+        base = fg.add(
+            problem_id="P", author="P_high", statement="A holds", proof="proof of A",
+            glossary_introduces={"X": "a complex manifold"},
+            display_summary="A reusable base fact.", display_method="Direct argument",
+            display_tags=["foundation", "foundation", " reusable "],
+        )
         child = fg.add(problem_id="P", author="P_high", statement="B from A", proof="uses A",
                        predecessors=[base])
         grand = fg.add(problem_id="P", author="P_high", statement="C from B", proof="uses B",
@@ -341,6 +345,13 @@ def test_factgraph():
         assert "X: a complex manifold" in fg.get_raw(base)
         assert fg.glossary().get("X") == "a complex manifold"
         assert parse_frontmatter(fg.get_raw(base))["glossary_introduces"] == {"X": "a complex manifold"}
+        assert {key: parse_frontmatter(fg.get_raw(base))[key] for key in ("summary", "method", "tags")} == {
+            "summary": "A reusable base fact.", "method": "Direct argument",
+            "tags": ["foundation", "reusable"],
+        }
+        assert {key: parse_frontmatter(fg.get_raw(child))[key] for key in ("summary", "method", "tags")} == {
+            "summary": "", "method": "", "tags": [],
+        }
 
         # coverage check: a symbol defined in a predecessor is OK; an undefined one is flagged
         assert fg.undefined_symbols(statement="K_F equals zero", proof="by X",

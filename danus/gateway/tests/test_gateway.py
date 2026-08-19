@@ -16,7 +16,7 @@ from contextlib import contextmanager
 from pathlib import Path
 
 from danus.control import ControlStore
-from danus.core import FactGraph, GlobalMemory
+from danus.core import FactGraph, GlobalMemory, parse_frontmatter
 from danus.gateway import build_app, tools_for
 from danus.gateway import server
 
@@ -92,7 +92,7 @@ def _prepare_v2(path: str | Path, worker: str | None = None) -> dict:
 
 def _stage(
     binding, statement, proof, title, goal="Shared theorem goal", *,
-    closes_obligation=False, closure_statement=None,
+    closes_obligation=False, closure_statement=None, summary="", method="", tags=None,
 ):
     links = {
         "verification_goal": goal,
@@ -100,6 +100,7 @@ def _stage(
             "target_version", "obligation_id", "route_id", "assignment_epoch",
         )},
         "display_title": title, "predecessors": [], "intuition": "",
+        "display_summary": summary, "display_method": method, "display_tags": tags or [],
         "external_refs": [], "claim_role": "unconditional",
         "assumptions_used": [], "closes_obligation": closes_obligation,
     }
@@ -228,7 +229,8 @@ def test_fact_submit_batch_one_launch_independent_verdicts():
             result = server.fact_submit_batch(
                 candidates=[
                     _stage(binding, "One plus one equals two.", "This is integer addition.",
-                           "Integer addition lemma"),
+                           "Integer addition lemma", summary="Computes one plus one.",
+                           method="Integer addition", tags=["arithmetic"]),
                     _stage(binding, "Every integer is even.", "Assume it is so.",
                            "False parity claim"),
                 ],
@@ -239,6 +241,10 @@ def test_fact_submit_batch_one_launch_independent_verdicts():
         assert len(calls) == 1 and calls[0][0] == "Shared theorem goal" and len(calls[0][1]) == 2
         assert result["accepted"] is False and result["accepted_count"] == 1
         assert result["results"][0]["fact_id"] and result["results"][1]["repair_hints"] == "missing case"
+        front = parse_frontmatter(FactGraph(Path(d)).get_raw(result["results"][0]["fact_id"]))
+        assert (front["summary"], front["method"], front["tags"]) == (
+            "Computes one plus one.", "Integer addition", ["arithmetic"],
+        )
         assert len(FactGraph(Path(d)).list()) == 1
         traces = GlobalMemory(Path(d)).read("verification")
         assert [trace["verdict"] for trace in traces[-2:]] == ["correct", "wrong"]
