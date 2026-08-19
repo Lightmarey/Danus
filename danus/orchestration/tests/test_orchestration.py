@@ -20,7 +20,7 @@ import contextlib
 from pathlib import Path
 
 from danus.control import ControlStore
-from danus.execution import layout as L
+from danus.execution import layout as L, loop
 from danus.orchestration import cli
 from danus import runtime
 from danus.tests.portable import write_python_launcher
@@ -54,7 +54,8 @@ def _project_env(tmp: Path, **extra):
     skills.mkdir(exist_ok=True)
     env = {"DANUS_AGENTS_ROOT": str(tmp / "agents"),
            "DANUS_WORKER_CONTRACT": str(contract),
-           "DANUS_WORKER_SKILLS": str(skills)}
+           "DANUS_WORKER_SKILLS": str(skills),
+           "DANUS_CODEX_MIN_REMAINING_PERCENT": "0"}
     env.update(extra)
     with _env(**env):
         yield
@@ -183,6 +184,19 @@ def test_status_before_start(tmp: Path):
         assert s["alive"] is False and s["state"] == "created" and s["label"] == "created"
 
 
+def test_round_output_paths_preserve_previous_attempt(tmp_path: Path):
+    wl = L.WorkerLayout(tmp_path / "worker")
+    wl.logs.mkdir(parents=True)
+    first_log, first_report = loop._round_output_paths(wl, 3)
+    assert first_log.name == "round_3.jsonl"
+    assert first_report.name == "round_3_report.json"
+    first_log.write_text("old events", encoding="utf-8")
+    retry_log, retry_report = loop._round_output_paths(wl, 3)
+    assert retry_log.name == "round_3_attempt_2.jsonl"
+    assert retry_report.name == "round_3_attempt_2_report.json"
+    assert first_log.read_text(encoding="utf-8") == "old events"
+
+
 def test_list(tmp: Path):
     with _project_env(tmp):
         cli.do_new("P", roles="high:2", model="gpt-5.5")
@@ -237,6 +251,25 @@ def test_graceful_stop(tmp: Path):
                 lambda: cli._read_pid(wl) is None and not runtime.pid_alive(loop_pid)
             ), "loop should exit after .stop and fully close its handles"
             assert cli._read_pid(wl) is None  # pid cleaned
+        finally:
+            _kill_project("P")
+
+
+def test_round_start_clears_stale_evaluation_status(tmp: Path):
+    fc = _fake_codex(tmp)
+    with _project_env(tmp, DANUS_CODEX_BIN=str(fc), DANUS_ROUND_BEAT="0",
+                      FAKE_CODEX_SLEEP="1"):
+        cli.do_new("P", roles="high:1")
+        _prepare_route("P", ("high",))
+        wl = L.WorkerLayout(L.worker_dir("P", "high"))
+        stale = json.loads(wl.status.read_text(encoding="utf-8"))
+        stale.update(gain="high", decision="budget_exhausted")
+        wl.status.write_text(json.dumps(stale), encoding="utf-8")
+        try:
+            cli.do_start("P/high")
+            assert _wait_until(lambda: _st("P", "high")["round"] >= 1)
+            status = json.loads(wl.status.read_text(encoding="utf-8"))
+            assert status["gain"] is None and status["decision"] is None
         finally:
             _kill_project("P")
 

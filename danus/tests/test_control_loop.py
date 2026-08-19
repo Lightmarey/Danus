@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 
 from danus.control import ControlStore
+from danus.core import GlobalMemory
 from danus.execution import layout as L
 from danus.execution import loop
 
@@ -44,31 +45,89 @@ def _report() -> dict:
 
 def test_v2_loop_runs_two_exploration_rounds_then_independent_audit(tmp_path: Path):
     wl, store = _worker(tmp_path)
+    loop.write_status(
+        wl, state="waiting_retry", failure_class="auth_or_config",
+        infra_failure_count=1, retry_after_seconds=30,
+        last_fact_id="0123456789abcdef",
+    )
     prompts = []
+    round_statuses = []
     original = loop.run_round
+    original_refresh = loop.refresh_worker_assets
+    refreshes = []
 
     def fake(_wl, _role, prompt, log_path, _timeout, *, report_path=None, output_schema=None, **_kwargs):
         prompts.append(prompt)
+        round_statuses.append(json.loads(_wl.status.read_text(encoding="utf-8")))
         assert report_path is not None and output_schema == store.work_report_schema
         report_path.write_text(json.dumps(_report()), encoding="utf-8")
         log_path.write_text('{"type":"turn.completed","usage":{"input_tokens":3,"output_tokens":2}}\n', encoding="utf-8")
         return 0
 
     loop.run_round = fake
+    loop.refresh_worker_assets = lambda worker_layout: refreshes.append(worker_layout.name)
     try:
         assert loop._run_loop(
             wl, {"MODEL": "m", "REASONING_EFFORT": "high"}, store, beat=0,
         ) == 0
     finally:
         loop.run_round = original
+        loop.refresh_worker_assets = original_refresh
     assert len(prompts) == 3
+    assert refreshes == ["high", "high", "high"]
+    assert all(status["failure_class"] is None for status in round_statuses)
+    assert all(status["infra_failure_count"] == 0 for status in round_statuses)
+    assert all(status["retry_after_seconds"] is None for status in round_statuses)
     assert "independent route audit" not in prompts[0]
     assert "independent route audit" in prompts[2]
     assert store.assignment("high")["status"] == "stalled"
     status = json.loads(wl.status.read_text(encoding="utf-8"))
     assert status["state"] == "paused" and status["control_reason"] == "stalled"
+    assert status["failure_class"] is None
+    assert status["infra_failure_count"] == 0
+    assert status["retry_after_seconds"] is None
+    assert status["last_fact_id"] == "0123456789abcdef"
     costs = store.events("cost")
     assert len(costs) == 3 and costs[0]["usage"]["input_tokens"] == 3
+
+
+def test_v2_loop_rebuilds_context_after_concurrent_generation_change(tmp_path: Path):
+    wl, store = _worker(tmp_path)
+    original_manifest = loop.ResearchQuery.build_context_manifest
+    original_round = loop.run_round
+    manifest_calls = 0
+    prompts = []
+
+    def flaky_manifest(self, worker, **kwargs):
+        nonlocal manifest_calls
+        manifest_calls += 1
+        if manifest_calls == 1:
+            raise ValueError(
+                "snapshot generation 10 is not current generation 11; "
+                "use the persisted ContextManifest to reproduce an earlier model view"
+            )
+        return original_manifest(self, worker, **kwargs)
+
+    def stop_after_round(_wl, _role, prompt, log_path, _timeout, *, report_path=None, **_kwargs):
+        prompts.append(prompt)
+        assert report_path is not None
+        report_path.write_text(json.dumps(_report()), encoding="utf-8")
+        log_path.write_text("{}\n", encoding="utf-8")
+        _wl.stop.touch()
+        return 0
+
+    loop.ResearchQuery.build_context_manifest = flaky_manifest
+    loop.run_round = stop_after_round
+    try:
+        assert loop._run_loop(
+            wl, {"MODEL": "m", "REASONING_EFFORT": "high"}, store, beat=0,
+        ) == 0
+    finally:
+        loop.ResearchQuery.build_context_manifest = original_manifest
+        loop.run_round = original_round
+
+    assert manifest_calls == 2
+    assert len(prompts) == 1
 
 
 def test_reusing_the_same_evidence_does_not_keep_renewing_a_route(tmp_path: Path):
@@ -132,6 +191,37 @@ def test_timeout_without_report_uses_persisted_infra_budget_not_research_rounds(
     assert store.events("work_checkpoint") == []
 
 
+def test_failed_old_round_exits_without_mutating_reassignment(tmp_path: Path):
+    wl, store = _worker(tmp_path, budget={"max_infra_attempts": 2, "infra_retry_seconds": [0]})
+    original = loop.run_round
+    replacement = None
+
+    def timeout_after_reassign(_wl, _role, _prompt, log_path, _timeout, **_kwargs):
+        nonlocal replacement
+        current = store.assignment("high")
+        replacement = store.assign(
+            "high", obligation_id=current["obligation_id"], route_id=current["route_id"],
+            task="replacement task",
+        )
+        log_path.write_text("[worker_loop] round hard-timeout\n", encoding="utf-8")
+        return 124
+
+    loop.run_round = timeout_after_reassign
+    try:
+        assert loop._run_loop(
+            wl, {"MODEL": "m", "REASONING_EFFORT": "high"}, store, beat=0,
+        ) == 0
+    finally:
+        loop.run_round = original
+
+    assert replacement is not None
+    current = store.assignment("high")
+    assert current["epoch"] == replacement["epoch"]
+    assert current["status"] == "assigned"
+    assert current["infra_failure_count"] == 0
+    assert store.events("round_infra_error")[-1]["assignment_changed"] is True
+
+
 def test_timeout_after_verification_drain_counts_as_a_research_round(tmp_path: Path):
     wl, store = _worker(tmp_path)
     original = loop.run_round
@@ -183,6 +273,12 @@ def test_quota_exhaustion_blocks_without_retry_or_round_charge(tmp_path: Path):
 
 def test_operator_stop_records_partial_usage_without_consuming_a_round(tmp_path: Path):
     wl, store = _worker(tmp_path, budget={"max_wall_seconds": 20}, round_timeout_seconds=10)
+    gm = GlobalMemory(wl.project_dir)
+    source_id = gm.append(
+        "proof_attempt", claim="Interrupted candidate", evidence="partial proof",
+        author="high",
+    )
+    gm.set_status(source_id, "verifying")
     original = loop.run_round
 
     def interrupted(_wl, _role, _prompt, log_path, _timeout, **_kwargs):
@@ -209,6 +305,7 @@ def test_operator_stop_records_partial_usage_without_consuming_a_round(tmp_path:
     assert cost["attempt_status"] == "interrupted"
     assert cost["usage"]["input_tokens"] == 12
     assert store.active_call_reservations() == []
+    assert [e for e in gm.read("proof_attempt") if e["id"] == source_id][0]["status"] == "unverified"
 
 
 def test_a_call_reservation_at_the_budget_ceiling_does_not_reject_its_own_report(tmp_path: Path):

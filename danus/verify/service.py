@@ -41,6 +41,7 @@ class VerifyRequest(BaseModel):
     proof: str = Field(..., min_length=1)
     timeout_seconds: int | None = Field(default=None, gt=0)
     cancel_path: str | None = None
+    project_dir: str | None = None
     request_id: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
 
 
@@ -55,6 +56,7 @@ class VerifyBatchRequest(BaseModel):
     candidates: List[VerifyBatchCandidate] = Field(..., min_length=1, max_length=6)
     timeout_seconds: int | None = Field(default=None, gt=0)
     cancel_path: str | None = None
+    project_dir: str | None = None
     request_id: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
 
 
@@ -151,6 +153,7 @@ def verify(request: VerifyRequest) -> Dict[str, Any]:
         key: value for key, value in {
             "timeout_seconds": request.timeout_seconds,
             "cancel_path": request.cancel_path,
+            "project_dir": request.project_dir,
         }.items() if value is not None
     }
     invoke = lambda run_id: run_codex_verification(
@@ -192,6 +195,7 @@ def verify_batch(request: VerifyBatchRequest) -> Dict[str, Any]:
         key: value for key, value in {
             "timeout_seconds": request.timeout_seconds,
             "cancel_path": request.cancel_path,
+            "project_dir": request.project_dir,
         }.items() if value is not None
     }
     if eligible:

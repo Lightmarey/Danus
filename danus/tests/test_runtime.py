@@ -81,6 +81,20 @@ def test_sync_symlink_or_copy_refreshes_copies_and_removes_deleted_files():
         assert not (dst / "removed.txt").exists()
 
 
+def test_sync_symlink_or_copy_replaces_a_broken_moved_link():
+    if runtime.is_windows():
+        return
+    with tempfile.TemporaryDirectory() as d:
+        root = Path(d)
+        src, dst = root / "src", root / "dst"
+        src.mkdir()
+        os.symlink(root / "old-location", dst)
+
+        runtime.sync_symlink_or_copy(src, dst)
+
+        assert dst.resolve() == src.resolve()
+
+
 def test_file_lock_is_exclusive():
     with tempfile.TemporaryDirectory() as d:
         path = Path(d) / "x.lock"

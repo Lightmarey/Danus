@@ -7,7 +7,7 @@ from contextlib import contextmanager
 from pathlib import Path
 
 from danus.control import ControlStore
-from danus.core import FactGraph
+from danus.core import FactGraph, GlobalMemory
 from danus.orchestration import cli
 
 
@@ -169,6 +169,12 @@ def test_start_recovers_crashed_round_before_spawning(tmp_path: Path, monkeypatc
             component="verification", max_wall_seconds=30,
             parent_reservation_id=parent["id"], **scope,
         )
+        gm = GlobalMemory(project)
+        source_id = gm.append(
+            "proof_attempt", claim="Interrupted candidate", evidence="partial proof",
+            author="high",
+        )
+        gm.set_status(source_id, "verifying")
         worker = project / "workers" / "high"
         (worker / ".pid").write_text("99999999", encoding="utf-8")
         (worker / ".status.json").write_text(json.dumps({
@@ -181,6 +187,7 @@ def test_start_recovers_crashed_round_before_spawning(tmp_path: Path, monkeypatc
         assert store.assignment("high")["rounds_used"] == 0
         assert store.active_call_reservations() == []
         assert store.events("round_interrupted")[-1]["reason"] == "restart_after_dead_worker"
+        assert [e for e in gm.read("proof_attempt") if e["id"] == source_id][0]["status"] == "unverified"
 
 
 def test_dead_idle_worker_resets_control_without_fake_interruption(tmp_path: Path):

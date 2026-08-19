@@ -33,6 +33,12 @@ def _target(statement: str = "T holds") -> dict:
     }
 
 
+def test_sqlite_busy_timeout_covers_concurrent_verifier_writes(tmp_path: Path):
+    store = _store(tmp_path)
+    with store._connect() as db:
+        assert db.execute("PRAGMA busy_timeout").fetchone()[0] >= 30_000
+
+
 def _assigned(tmp: Path) -> tuple[ControlStore, dict]:
     store = _store(tmp)
     target = store.propose_target(_target())
@@ -53,6 +59,128 @@ def _low_report() -> dict:
         "failed_attempt_signatures": ["same"], "novelty_basis": [],
         "recommended_next_action": "audit",
     }
+
+
+def test_stale_assignment_save_cannot_overwrite_reassignment(tmp_path: Path):
+    store, stale = _assigned(tmp_path)
+    current = store.assign(
+        "high", obligation_id=stale["obligation_id"], route_id=stale["route_id"],
+        task="replacement task",
+    )
+    stale["status"] = "budget_exhausted"
+
+    try:
+        store.save_assignment(stale)
+        assert False, "a stale assignment epoch must not overwrite its replacement"
+    except ControlError as exc:
+        assert "assignment changed" in str(exc)
+
+    persisted = store.assignment("high")
+    assert persisted["epoch"] == current["epoch"]
+    assert persisted["task"] == "replacement task"
+    assert persisted["status"] == "assigned"
+
+
+def test_old_round_reservation_is_discarded_after_reassignment(tmp_path: Path):
+    store, stale = _assigned(tmp_path)
+    reservation = store.reserve_call(
+        component="worker_round", max_wall_seconds=10, worker="high",
+        assignment_epoch=stale["epoch"], target_version=stale["target_version"],
+        obligation_id=stale["obligation_id"], route_id=stale["route_id"],
+    )
+    current = store.assign(
+        "high", obligation_id=stale["obligation_id"], route_id=stale["route_id"],
+        task="replacement task",
+    )
+
+    result = store.evaluate_work_report(
+        "high", _low_report(), wall_seconds=3, reservation_id=reservation["id"],
+    )
+
+    assert result["decision"] == "invalidated"
+    assert store.assignment("high")["epoch"] == current["epoch"]
+    assert store.assignment("high")["rounds_used"] == 0
+    assert store.events("round_discarded")[-1]["assignment_epoch"] == stale["epoch"]
+    assert store.events("cost")[-1]["assignment_epoch"] == stale["epoch"]
+
+
+def test_worker_round_reservation_rejects_a_reassigned_epoch(tmp_path: Path):
+    store, stale = _assigned(tmp_path)
+    store.assign(
+        "high", obligation_id=stale["obligation_id"], route_id=stale["route_id"],
+        task="replacement task",
+    )
+
+    try:
+        store.reserve_call(
+            component="worker_round", max_wall_seconds=10,
+            require_current_assignment=True, worker="high",
+            assignment_epoch=stale["epoch"], target_version=stale["target_version"],
+            obligation_id=stale["obligation_id"], route_id=stale["route_id"],
+        )
+        assert False, "a stale epoch must not reserve a worker call"
+    except ControlError as exc:
+        assert "does not match" in str(exc)
+
+
+def test_reassignment_during_report_evaluation_preserves_new_epoch(tmp_path: Path):
+    store, stale = _assigned(tmp_path)
+    report = _low_report() | {"new_evidence_refs": ["trigger"]}
+    replacement = None
+
+    def reassign(_reference: str) -> bool:
+        nonlocal replacement
+        replacement = store.assign(
+            "high", obligation_id=stale["obligation_id"], route_id=stale["route_id"],
+            task="replacement task",
+        )
+        return False
+
+    store.evidence_exists = reassign
+    result = store.evaluate_work_report("high", report, wall_seconds=1)
+
+    assert replacement is not None
+    assert result["decision"] == "invalidated"
+    assert store.assignment("high")["epoch"] == replacement["epoch"]
+    assert store.assignment("high")["rounds_used"] == 0
+    assert store.events("round_discarded")[-1]["assignment_epoch"] == stale["epoch"]
+
+
+def test_old_round_completion_paths_do_not_mutate_reassignment(tmp_path: Path):
+    store, stale = _assigned(tmp_path)
+    scope = {
+        "worker": "high", "assignment_epoch": stale["epoch"],
+        "target_version": stale["target_version"],
+        "obligation_id": stale["obligation_id"], "route_id": stale["route_id"],
+    }
+    interrupted = store.reserve_call(component="worker_round", max_wall_seconds=10, **scope)
+    failed = store.reserve_call(component="worker_round", max_wall_seconds=10, **scope)
+    current = store.assign(
+        "high", obligation_id=stale["obligation_id"], route_id=stale["route_id"],
+        task="replacement task",
+    )
+    current["status"] = "running"
+    current["infra_failure_count"] = 7
+    store.save_assignment(current)
+
+    result = store.record_worker_interruption(
+        "high", wall_seconds=1, reservation_id=interrupted["id"],
+    )
+    assert result["event"]["assignment_changed"] is True
+    assert store.assignment("high")["status"] == "running"
+    assert result["event"]["assignment_epoch"] == stale["epoch"]
+
+    store.record_worker_call_success("high", assignment_epoch=stale["epoch"])
+    assert store.assignment("high")["infra_failure_count"] == 7
+
+    failure = store.record_worker_infra_failure(
+        "high", {"failure_class": "transient_network", "retryable": True},
+        wall_seconds=1, reservation_id=failed["id"],
+    )
+    assert failure["assignment_changed"] is True
+    assert store.assignment("high")["status"] == "running"
+    assert store.assignment("high")["infra_failure_count"] == 7
+    assert failure["event"]["assignment_epoch"] == stale["epoch"]
 
 
 def test_target_approval_creates_root_obligation_and_never_auto_approves_fallback(tmp_path: Path):
@@ -146,6 +274,54 @@ def test_fact_event_is_high_gain_but_stale_target_invalidates_assignment(tmp_pat
         assert "not runnable" in str(exc)
 
 
+def test_verified_route_completion_stops_without_closing_root_obligation(tmp_path: Path):
+    store, assignment = _assigned(tmp_path)
+    fact_id = FactGraph(store.project).add(
+        problem_id="P", author="high", statement="Route lemma", proof="Proof",
+    )
+    store.append_event(
+        "fact_linked", fact_id=fact_id, worker="high",
+        assignment_epoch=assignment["epoch"], target_version="v0001",
+        obligation_id="v0001-T", route_id="route-1",
+    )
+    report = _low_report() | {
+        "route_status": "completed",
+        "new_fact_ids": [fact_id],
+        "summary": "assigned route is complete",
+    }
+    result = store.evaluate_work_report("high", report, wall_seconds=1)
+    assert result["gain"] == "high"
+    assert result["decision"] == "completed"
+    assert result["last_fact_id"] == fact_id
+    assert result["assignment"]["status"] == "completed"
+    assert store.route_state("route-1") == "succeeded"
+    assert store.obligation_state("v0001-T") != "closed"
+
+
+def test_verified_route_refutation_stops_without_refuting_root_obligation(tmp_path: Path):
+    store, assignment = _assigned(tmp_path)
+    fact_id = FactGraph(store.project).add(
+        problem_id="P", author="high", statement="Route counterexample", proof="Proof",
+    )
+    store.append_event(
+        "fact_linked", fact_id=fact_id, worker="high",
+        assignment_epoch=assignment["epoch"], target_version="v0001",
+        obligation_id="v0001-T", route_id="route-1",
+    )
+    report = _low_report() | {
+        "route_status": "refuted",
+        "new_fact_ids": [fact_id],
+        "summary": "assigned route is refuted",
+    }
+    result = store.evaluate_work_report("high", report, wall_seconds=1)
+    assert result["gain"] == "high"
+    assert result["decision"] == "completed"
+    assert result["last_fact_id"] == fact_id
+    assert result["assignment"]["status"] == "completed"
+    assert store.route_state("route-1") == "refuted"
+    assert store.obligation_state("v0001-T") != "refuted"
+
+
 def test_assumption_boundary_and_read_model(tmp_path: Path):
     store, assignment = _assigned(tmp_path)
     store.validate_submission(
@@ -202,6 +378,23 @@ def test_taint_is_append_only_and_pauses_routes_that_depend_on_the_fact(tmp_path
     assert store.assignment("high")["status"] == "tainted"
     assert store.fact_tainted(fact_id) is True
     assert FactGraph(store.project).exists(fact_id) is True  # review marker, not destructive revoke
+
+
+def test_taint_pauses_the_route_that_produced_the_fact(tmp_path: Path):
+    store, assignment = _assigned(tmp_path)
+    fact_id = FactGraph(store.project).add(
+        problem_id="P", author="high", statement="Route result", proof="Proof",
+    )
+    store.append_event(
+        "fact_linked", fact_id=fact_id, worker="high",
+        assignment_epoch=assignment["epoch"], target_version="v0001",
+        obligation_id="v0001-T", route_id="route-1",
+    )
+
+    result = store.taint_fact(fact_id, "result is invalid")
+
+    assert result["stale_workers"] == ["high"]
+    assert store.assignment("high")["status"] == "tainted"
 
 
 def test_route_input_fact_is_reusable_without_a_fact_link_event(tmp_path: Path):
@@ -285,6 +478,22 @@ def test_authoring_call_records_v2_wall_time_without_inventing_token_cost(tmp_pa
     event = store.events("cost")[-1]
     assert event["component"] == "human_summary"
     assert event["cost_usd"] is None
+
+
+def test_fresh_input_usage_anomaly_is_recorded_at_100k(tmp_path: Path):
+    store = _store(tmp_path)
+    normal = store.record_cost(
+        component="worker_round", wall_seconds=1,
+        usage={"input_tokens": 100_000, "cached_input_tokens": 1},
+    )
+    assert normal["usage"]["fresh_input_tokens"] == 99_999
+    assert normal["usage_anomaly"] is False
+    anomalous = store.record_cost(
+        component="verification", wall_seconds=1,
+        usage={"input_tokens": 120_000, "cached_input_tokens": 20_000},
+    )
+    assert anomalous["usage_anomaly"] is True
+    assert store.events("usage_anomaly")[-1]["fresh_input_tokens"] == 100_000
 
 
 def test_failure_classification_and_unknown_billing_are_explicit(tmp_path: Path, monkeypatch):

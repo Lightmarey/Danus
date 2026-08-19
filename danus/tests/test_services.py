@@ -44,6 +44,15 @@ def test_default_service_deployment_root_is_current_directory(monkeypatch, tmp_p
     assert Path(services.service_env()["DANUS_RUNTIME"]) == (tmp_path / "runtime").resolve()
 
 
+def test_pause_blocks_service_up_and_recover(tmp_path):
+    r = root(tmp_path)
+    runtime.pause_path(r / "runtime").write_text("paused\n", encoding="utf-8")
+    with pytest.raises(SystemExit, match="Danus is paused"):
+        services.up("verify", root=r)
+    with pytest.raises(SystemExit, match="Danus is paused"):
+        services.recover(root=r)
+
+
 def test_env_loader_order_quotes_comments_and_process_precedence():
     with tempfile.TemporaryDirectory() as td:
         r = root(Path(td))
@@ -85,6 +94,7 @@ def test_health_identity_stale_and_foreign(monkeypatch, tmp_path):
 
 def test_dashboard_resolution_autostart_logs_and_down(monkeypatch, tmp_path):
     r = root(tmp_path)
+    runtime.pause_path(r / "runtime").write_text("paused\n", encoding="utf-8")
     projects = r / "runtime" / "projects"
     (projects / "alpha").mkdir(parents=True)
     seen = {}
@@ -102,11 +112,13 @@ def test_dashboard_resolution_autostart_logs_and_down(monkeypatch, tmp_path):
         lambda port: ({
             "status": "ok", "pid": 321, "identity": "created",
             "project": str((projects / "alpha").resolve()),
-        } if seen else None),
+        } if seen and not seen.get("dead") else None),
     )
-    row = services.up("dashboard", "alpha", root=r)
+    with env(DASHBOARD_HOST="0.0.0.0"):
+        row = services.up("dashboard", "alpha", root=r)
     assert row["state"] == "up" and row["pid"] == 321
     assert str(projects / "alpha") in seen["cmd"]
+    assert seen["cmd"][seen["cmd"].index("--host") + 1] == "0.0.0.0"
     run = r / "runtime" / "run"
     assert (run / "dashboard-alpha.pid").read_text() == "321"
     assert (run / "dashboard-alpha.identity").read_text() == "created"
@@ -122,6 +134,24 @@ def test_dashboard_resolution_autostart_logs_and_down(monkeypatch, tmp_path):
     assert services.down("dashboard", root=r)[0]["state"] == "stopped"
     assert seen["stopped"] == 321
     assert not (run / "autostart").exists()
+
+
+def test_logs_group_known_external_warning_noise(tmp_path):
+    r = root(tmp_path)
+    log = r / "runtime" / "logs" / "verify.log"
+    log.parent.mkdir(parents=True, exist_ok=True)
+    log.write_text(
+        "base_instructions cache TTL expired\n"
+        "base_instructions cache TTL expired again\n"
+        "worker anomaly\n"
+        "skill budget exceeded\n"
+        "skill budget exceeded again\n",
+        encoding="utf-8",
+    )
+    rendered = services.logs("verify", root=r)
+    assert rendered.count("known-external:codex-cache-ttl") == 1
+    assert rendered.count("known-external:codex-skill-budget") == 1
+    assert "repeated=2" in rendered and "worker anomaly" in rendered
 
 
 def test_verify_start_refuses_foreign_and_port_collision(monkeypatch, tmp_path):
@@ -192,6 +222,7 @@ def test_dashboard_project_mismatch_is_foreign_and_unsafe_to_stop(monkeypatch, t
     (run / "dashboard-alpha.identity").write_text("token")
     monkeypatch.setattr(runtime, "pid_alive", lambda pid: True)
     monkeypatch.setattr(runtime, "process_identity", lambda pid: "token")
+    monkeypatch.setattr(runtime, "terminate_process_tree", lambda *args, **kwargs: None)
     monkeypatch.setattr(services, "_http_health", lambda port: {
         "status": "ok", "pid": 123, "identity": "token",
         "project": str((projects / "other").resolve()),
@@ -240,13 +271,32 @@ def test_legacy_stop_requires_matching_identity_health(monkeypatch, tmp_path):
     monkeypatch.setattr(runtime, "process_identity", lambda pid: "token")
     monkeypatch.setattr(
         services, "_http_health",
-        lambda port: {"status": "ok", "pid": 123, "identity": "token"},
+        lambda port: ({"status": "ok", "pid": 123, "identity": "token"}
+                      if alive["value"] else None),
     )
     monkeypatch.setattr(
         runtime, "terminate_process_tree",
         lambda pid, force: alive.update(value=False),
     )
     assert services.down("verify", root=r)[0]["state"] == "stopped"
+
+
+def test_down_all_stops_health_discovered_orphan_without_pid_files(monkeypatch, tmp_path):
+    r = root(tmp_path)
+    alive = {456: True}
+    monkeypatch.setattr(runtime, "pid_alive", lambda pid: bool(alive.get(pid)))
+    monkeypatch.setattr(runtime, "process_identity", lambda pid: "orphan" if alive.get(pid) else None)
+    monkeypatch.setattr(services, "_port_open", lambda port: bool(alive.get(456)))
+    monkeypatch.setattr(services, "_http_health", lambda port: (
+        {"status": "ok", "pid": 456, "identity": "orphan"}
+        if port == 8091 and alive[456] else None
+    ))
+    monkeypatch.setattr(
+        runtime, "terminate_process_tree",
+        lambda pid, force: alive.update({pid: False}),
+    )
+    rows = services.down("all", root=r)
+    assert rows == [{"service": "verify", "state": "stopped", "pid": 456}]
 
 
 def test_services_test_requires_verify_up(monkeypatch):

@@ -39,7 +39,7 @@ from typing import Any, Dict, List, Literal, Optional, get_args
 
 from danus._mcp import FastMCP
 from danus.control import ControlError, ControlStore, require_v2_project
-from danus.core import FactGraph, GlobalMemory
+from danus.core import FactGraph, GlobalMemory, glossary as core_glossary
 from danus.core.schema import compute_fact_id
 from danus.integrations import search as _arxiv_search
 from danus.research import ResearchQuery
@@ -134,6 +134,7 @@ def _verify(statement: str, proof: str) -> Dict[str, Any]:
         ),
     }
     if os.environ.get("DANUS_PROJECT_DIR"):
+        payload["project_dir"] = str(Path(os.environ["DANUS_PROJECT_DIR"]).resolve())
         payload["cancel_path"] = str(
             Path(os.environ["DANUS_PROJECT_DIR"]) / "workers" / _author() / ".stop"
         )
@@ -166,6 +167,7 @@ def _verify_batch(verification_goal: str, candidates: List[Dict[str, str]]) -> D
         ),
     }
     if os.environ.get("DANUS_PROJECT_DIR"):
+        payload["project_dir"] = str(Path(os.environ["DANUS_PROJECT_DIR"]).resolve())
         payload["cancel_path"] = str(
             Path(os.environ["DANUS_PROJECT_DIR"]) / "workers" / _author() / ".stop"
         )
@@ -719,6 +721,7 @@ def fact_submit_batch(
             "claim_role": links.get("claim_role"),
             "assumptions_used": links.get("assumptions_used") or [],
             "closes_obligation": bool(links.get("closes_obligation", False)),
+            "closure_statement": links.get("closure_statement"),
         }
         if not isinstance(candidate["statement"], str) or not candidate["statement"].strip():
             return {"accepted": False, "verdict": "control_error",
@@ -733,6 +736,19 @@ def fact_submit_batch(
         if candidate["claim_role"] not in CLAIM_ROLES:
             return {"accepted": False, "verdict": "control_error",
                     "error": f"candidate {index + 1} has invalid claim_role: {candidate['claim_role']}"}
+        if candidate["closes_obligation"]:
+            closure_statement = candidate["closure_statement"] or candidate["statement"]
+            if not isinstance(closure_statement, str) or not closure_statement.strip():
+                return {"accepted": False, "verdict": "control_error",
+                        "error": f"candidate {index + 1} closure_statement must be nonempty"}
+            obligation_statement = control.obligation(obligation_id)["statement"]
+            if " ".join(closure_statement.split()) != " ".join(obligation_statement.split()):
+                return {"accepted": False, "verdict": "control_error",
+                        "error": f"candidate {index + 1} closure_statement does not exactly match the obligation"}
+            candidate["closure_statement"] = closure_statement
+        elif candidate["closure_statement"] is not None:
+            return {"accepted": False, "verdict": "control_error",
+                    "error": f"candidate {index + 1} closure_statement requires closes_obligation=true"}
         if not isinstance(candidate["predecessors"], list) or any(
             not isinstance(fid, str) or not fg.exists(fid) for fid in candidate["predecessors"]
         ):
@@ -763,7 +779,15 @@ def fact_submit_batch(
         candidate.update(index=index, undefined=undefined)
         normalized.append(candidate)
 
-        reused = control.reusable_fact(candidate["statement"], candidate["assumptions_used"])
+        separate_closure = bool(
+            candidate["closes_obligation"]
+            and " ".join(candidate["closure_statement"].split())
+            != " ".join(candidate["statement"].split())
+        )
+        candidate["separate_closure"] = separate_closure
+        reused = None if separate_closure else control.reusable_fact(
+            candidate["statement"], candidate["assumptions_used"]
+        )
         if reused:
             submission_id = control.prepare_fact(reused, {"reused": True, "scope": {
                 "worker": _author(), "assignment_epoch": assignment_epoch,
@@ -800,7 +824,9 @@ def fact_submit_batch(
             item = results[candidate["index"]]
             if item and item.get("accepted") and item.get("fact_id"):
                 item["closure"] = _close_v2_obligation(
-                    control, statement=candidate["statement"], fact_id=item["fact_id"],
+                    control,
+                    statement=candidate["closure_statement"] or candidate["statement"],
+                    fact_id=item["fact_id"],
                     obligation_id=obligation_id, assignment_epoch=assignment_epoch,
                     claim_role=candidate["claim_role"], undefined=candidate["undefined"],
                     requested=True,
@@ -839,11 +865,22 @@ def fact_submit_batch(
     try:
         for candidate in prepared:
             gm.set_status(candidate["source_id"], "verifying")
-        payloads = [
-            {"candidate_id": str(candidate["index"] + 1),
-             "statement": candidate["statement"], "proof": candidate["proof"]}
-            for candidate in prepared
-        ]
+        payloads = []
+        for candidate in prepared:
+            proof = candidate["proof"]
+            if candidate["separate_closure"]:
+                proof = (
+                    "Closure-binding check (not an additional premise): the detailed theorem "
+                    "below is requested to entail the approved obligation statement exactly as "
+                    f"follows: {candidate['closure_statement']}\n\n"
+                    "Reject the candidate if the detailed self-contained statement and proof do "
+                    "not establish that obligation.\n\n"
+                    f"{proof}"
+                )
+            payloads.append({
+                "candidate_id": str(candidate["index"] + 1),
+                "statement": candidate["statement"], "proof": proof,
+            })
         if len(payloads) == 1:
             raw_result = _verify(payloads[0]["statement"], payloads[0]["proof"])
             verdicts = [raw_result]
@@ -926,18 +963,38 @@ def research_map(target_version: Optional[str] = None, project: Optional[str] = 
 
 
 def route_context(route_id: str, snapshot: Optional[int] = None, project: Optional[str] = None) -> Dict[str, Any]:
-    """Return one route's deterministic fact group, progress, and obstacles."""
+    """Return one route's bounded fact snippets, progress, and obstacles; expand with fact_get."""
     return ResearchQuery(_project(project)).route_context(route_id, snapshot=snapshot)
 
 
 def obligation_context(obligation_id: str, snapshot: Optional[int] = None, project: Optional[str] = None) -> Dict[str, Any]:
-    """Return an obligation, dependencies, routes, and proof-support group."""
+    """Return an obligation, dependencies, routes, and bounded fact snippets; expand with fact_get."""
     return ResearchQuery(_project(project)).obligation_context(obligation_id, snapshot=snapshot)
 
 
 def fact_get(fact_id: str, include_proof: bool = False, project: Optional[str] = None) -> Dict[str, Any]:
     """Read an indexed fact; proof text is opt-in."""
-    return ResearchQuery(_project(project)).fact_get(fact_id, include_proof=include_proof)
+    result = ResearchQuery(_project(project)).fact_get(fact_id, include_proof=include_proof)
+    if _role() == "verifier" and not include_proof:
+        return {
+            key: result[key]
+            for key in ("fact_id", "title", "statement", "status")
+        }
+    return result
+
+
+def glossary_get(term: str, project: Optional[str] = None) -> Dict[str, Any]:
+    """Return one exact glossary definition without exposing the full glossary."""
+    term = term.strip()
+    if not term:
+        raise ValueError("term must be non-empty")
+    project_terms = FactGraph(_project(project)).glossary()
+    if term in project_terms:
+        return {"term": term, "definition": project_terms[term], "source": "project"}
+    global_terms = core_glossary.global_glossary()
+    if term in global_terms:
+        return {"term": term, "definition": global_terms[term], "source": "global"}
+    return {"term": term, "definition": None, "source": None}
 
 
 def fact_neighborhood(fact_id: str, direction: str = "both", depth: int = 1, limit: int = 300, project: Optional[str] = None) -> Dict[str, Any]:
@@ -989,6 +1046,7 @@ _TOOLS = {
     "route_context": route_context,
     "obligation_context": obligation_context,
     "fact_get": fact_get,
+    "glossary_get": glossary_get,
     "fact_neighborhood": fact_neighborhood,
     "target_proof_manifest": target_proof_manifest,
     "search_arxiv_theorems": search_arxiv_theorems,

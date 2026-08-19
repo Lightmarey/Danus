@@ -80,6 +80,26 @@ def test_approval_failure_rolls_back_every_control_change(tmp_path: Path, monkey
         pass
 
 
+def test_context_manifest_cannot_overwrite_reassigned_worker(tmp_path: Path):
+    project, store, target = _project(tmp_path)
+    store.approve_target(target["version"])
+    store.add_route({"id": "r1", "obligation_id": "v0001-T", "method_title": "Direct", "expected_result": "T"})
+    stale = store.assign("high", obligation_id="v0001-T", route_id="r1", task="old task")
+    current = store.assign("high", obligation_id="v0001-T", route_id="r1", task="new task")
+    query = ResearchQuery(project)
+    query.store.validate_assignment = lambda _worker: stale
+
+    try:
+        query.build_context_manifest("high")
+        assert False, "a stale context build must not overwrite its replacement"
+    except ControlError as exc:
+        assert "assignment changed" in str(exc)
+
+    persisted = store.assignment("high")
+    assert persisted["epoch"] == current["epoch"]
+    assert persisted["task"] == "new task"
+
+
 def test_file_backed_v2_state_is_imported_once_and_preserved(tmp_path: Path):
     project = tmp_path / "legacy-v2"
     control = project / "control"
@@ -229,6 +249,27 @@ def test_same_fact_can_be_shared_by_routes_and_indexed_reads_do_not_open_markdow
     assert "## statement\n\nL" in summary_assemble.fact_bundle(project)
 
 
+def test_route_context_bounds_long_statements_and_fact_get_expands_them(tmp_path: Path):
+    project, store, target = _project(tmp_path)
+    store.approve_target(target["version"])
+    store.add_route({"id": "r1", "obligation_id": "v0001-T", "method_title": "Method A", "expected_result": "T"})
+    statement = "S" * 5000
+    fact_id = FactGraph(project).add(
+        problem_id="P", author="high", display_title="Long lemma",
+        statement=statement, proof="proof",
+    )
+    submission_id = store.prepare_fact(fact_id, {
+        "scope": {"worker": "high", "target_version": "v0001", "obligation_id": "v0001-T", "route_id": "r1", "assignment_epoch": "epoch", "claim_role": "unconditional", "assumptions_used": []},
+    })
+    store.finalize_fact(fact_id, submission_id)
+
+    query = ResearchQuery(project)
+    snippet = query.route_context("r1")["fact_group"]["facts"][0]
+    assert snippet["statement_truncated"] is True
+    assert len(snippet["statement"]) == 1001
+    assert query.fact_get(fact_id)["statement"] == statement
+
+
 def test_interleaved_identical_fact_submissions_preserve_each_scope(tmp_path: Path):
     project, store, target = _project(tmp_path)
     store.approve_target(target["version"])
@@ -255,6 +296,21 @@ def test_interleaved_identical_fact_submissions_preserve_each_scope(tmp_path: Pa
             (fact_id,),
         )]
     assert epochs == ["epoch-1", "epoch-2"]
+
+
+def test_finalize_fact_is_idempotent_after_recovery_race(tmp_path: Path):
+    project, store, target = _project(tmp_path)
+    store.approve_target(target["version"])
+    store.add_route({"id": "r1", "obligation_id": "v0001-T", "method_title": "Method", "expected_result": "T"})
+    fact_id = FactGraph(project).add(problem_id="P", author="high", statement="L", proof="proof")
+    submission_id = store.prepare_fact(fact_id, {"scope": {
+        "worker": "high", "target_version": "v0001", "obligation_id": "v0001-T",
+        "route_id": "r1", "assignment_epoch": "epoch", "claim_role": "unconditional",
+        "assumptions_used": [],
+    }})
+    store.finalize_fact(fact_id, submission_id)
+    assert store.finalize_fact(fact_id, submission_id)["already_complete"] is True
+    assert [event["fact_id"] for event in store.events("fact_linked")] == [fact_id]
 
 
 def test_control_http_requires_capability_origin_and_generation(tmp_path: Path, monkeypatch):
@@ -289,12 +345,12 @@ def test_browser_view_state_has_no_persistent_or_write_path():
     assert "focus:'adjacency'" not in script
     assert "function factSection(title, text, open = false)" in script
     assert "el('details', 'fact-section')" in script
-    assert "function renderRouteTheoremGroups(data, surface = 'fact')" in script
+    assert "function renderRouteFactSkeleton(data, surface = 'fact')" in script
     assert "direction=predecessors&depth=3&limit=300" in script
     assert "katex.renderToString" in script
     page = (Path(observability_app.__file__).parent / "static" / "index.html").read_text(encoding="utf-8")
     assert "Show all routes" in page
-    assert "theorem group" in page
+    assert "route facts" in page
     assert "katex.min.js" in page
 
 

@@ -165,7 +165,8 @@ code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0
 
 /* v2 layered research console */
 .research-grid { display:grid; grid-template-columns:1.1fr 1.4fr 1fr; gap:14px; }
-.research-lower { display:grid; grid-template-columns:1.5fr .8fr .8fr; gap:14px; margin-top:14px; }
+.research-lower { display:grid; grid-template-columns:1fr 1fr; gap:14px; margin-top:14px; }
+.research-lower > .panel:first-child { grid-column:1 / -1; }
 .route-graph { height:560px; min-width:0; border-radius:11px; background-color:#fbfdff; background-image:radial-gradient(#d9e2ef 0.7px, transparent 0.7px); background-size:18px 18px; }
 .entry.clickable { cursor:pointer; }
 .entry.clickable:hover { border-color:var(--accent); }

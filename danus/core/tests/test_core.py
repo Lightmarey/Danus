@@ -113,6 +113,14 @@ def test_glossary_flatten_and_undefined():
     # and if neither the token nor its base is defined, it IS flagged
     assert _glossary.undefined_symbols(
         statement="S_M(x) applied", proof="", defined=set()) == ["S_M(x)"]
+    assert _glossary.undefined_symbols(
+        statement="Let Y_{tt} denote the second derivative and set m_L := 1.",
+        proof="Y_{tt}=m_L follows.", defined=set(),
+    ) == []
+    # Do not read Greek-name prefixes or arithmetic plus signs as standalone symbols.
+    assert _glossary.undefined_symbols(
+        statement="Psit_j^2 + X+gamma_n is bounded.", proof="", defined=set(),
+    ) == []
 
 
 def test_glossary_global_load_and_fallback():
@@ -288,6 +296,20 @@ def test_global_memory():
         gm.set_status(gid, "verified", fact_id="abc123")
         entry = [e for e in gm.read("counterexample") if e["id"] == gid][0]
         assert entry["status"] == "verified" and entry["fact_id"] == "abc123"
+
+        interrupted = gm.append(
+            "proof_attempt", claim="Interrupted proof", evidence="partial proof",
+            author="worker_high",
+        )
+        other = gm.append(
+            "proof_attempt", claim="Other proof", evidence="complete proof",
+            author="worker_xhigh",
+        )
+        gm.set_status(interrupted, "verifying")
+        gm.set_status(other, "verifying")
+        assert gm.recover_verifying("worker_high") == [interrupted]
+        assert [e for e in gm.read("proof_attempt") if e["id"] == interrupted][0]["status"] == "unverified"
+        assert [e for e in gm.read("proof_attempt") if e["id"] == other][0]["status"] == "verifying"
 
 
 def test_factgraph():

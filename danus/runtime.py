@@ -26,6 +26,7 @@ else:
     import fcntl
 
 DEFAULT_PYTHON_ENV = ("DANUS_PYTHON_BIN", "DANUS_PY")
+PAUSE_FILE = ".danus-paused"
 _STILL_ACTIVE = 259
 _PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
 _PROCESS_TERMINATE = 0x0001
@@ -79,6 +80,10 @@ def current_python(*override_env_names: str) -> str:
 
 def module_cmd(module: str, *args: str, python: Optional[str] = None) -> List[str]:
     return [python or current_python(), "-m", module, *args]
+
+
+def pause_path(runtime_dir: str | Path) -> Path:
+    return Path(runtime_dir).resolve() / PAUSE_FILE
 
 
 def load_env_files(root: str | Path, environ: Optional[Dict[str, str]] = None) -> Dict[str, str]:
@@ -181,7 +186,9 @@ def symlink_or_copy(target: Path, link: Path) -> None:
 def sync_symlink_or_copy(target: Path, link: Path) -> None:
     """Create an asset link, or refresh its copied fallback."""
     if link.is_symlink():
-        return
+        if link.exists():
+            return
+        link.unlink()
     if not link.exists():
         symlink_or_copy(target, link)
     elif target.is_dir():

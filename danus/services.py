@@ -63,6 +63,7 @@ def service_env(root: Optional[Path] = None) -> Dict[str, str]:
     env.setdefault("VERIFIER_RESULTS_DIR", str(runtime_dir / "verify-runs"))
     env.setdefault("VERIFY_HOST", "127.0.0.1")
     env.setdefault("VERIFY_PORT", "8091")
+    env.setdefault("DASHBOARD_HOST", "127.0.0.1")
     env.setdefault("DASHBOARD_PORT", "8099")
     env.setdefault("DANUS_VERIFY_URL", f"http://127.0.0.1:{env['VERIFY_PORT']}/verify")
     return env
@@ -216,6 +217,36 @@ def dashboard_state(name: str, env: Dict[str, str], run: Path) -> Dict:
     return _state(name, int(env["DASHBOARD_PORT"]), env, run, project.resolve())
 
 
+def _dashboard_name_from_health(health: Optional[Dict], env: Dict[str, str]) -> Optional[str]:
+    try:
+        project = Path(str((health or {}).get("project"))).resolve()
+        relative = project.relative_to(Path(env["DANUS_AGENTS_ROOT"]).resolve())
+    except (ValueError, OSError):
+        return None
+    return _dashboard_name(relative.name) if len(relative.parts) == 1 else None
+
+
+def _service_names(env: Dict[str, str], run: Path, target: str) -> List[str]:
+    names = {
+        _service_name(path.stem)
+        for pattern in ("*.pid", "*.identity")
+        for path in run.glob(pattern)
+        if path.stem == "verify" or path.stem.startswith("dashboard-")
+    }
+    for entry in _manifest(run):
+        names.add("verify" if entry == "verify" else _dashboard_name(entry.removeprefix("dashboard ")))
+    dashboard_health = _dashboard_name_from_health(
+        _http_health(int(env["DASHBOARD_PORT"])), env,
+    )
+    if dashboard_health:
+        names.add(dashboard_health)
+    if target == "all":
+        names.add("verify")
+    if target == "verify":
+        return ["verify"]
+    return sorted(name for name in names if name.startswith("dashboard-")) if target == "dashboard" else sorted(names, key=lambda name: (name != "verify", name))
+
+
 def _dashboard_name(project: str) -> str:
     return f"dashboard-{_identifier(project, 'dashboard project')}"
 
@@ -228,6 +259,8 @@ def up(service: str, project: Optional[str] = None, *, root: Optional[Path] = No
     if service not in ("verify", "dashboard"):
         raise SystemExit("service must be verify or dashboard")
     env = service_env(root)
+    if service != "dashboard" and runtime.pause_path(env["DANUS_RUNTIME"]).exists():
+        raise SystemExit("Danus is paused; run `danus resume` before starting services")
     run, logs = _dirs(env)
     _manifest(run)  # validate before starting a process or changing evidence
     if service == "verify":
@@ -249,7 +282,7 @@ def up(service: str, project: Optional[str] = None, *, root: Optional[Path] = No
         port = int(env["DASHBOARD_PORT"])
         cmd = runtime.module_cmd(
             "danus.observability", "--project", str(project_dir),
-            "--host", "127.0.0.1", "--port", str(port), python=_python(env),
+            "--host", env["DASHBOARD_HOST"], "--port", str(port), python=_python(env),
         )
     state = _state(name, port, env, run, project_dir)
     if state["state"] == "up":
@@ -296,12 +329,10 @@ def up(service: str, project: Optional[str] = None, *, root: Optional[Path] = No
 def status(*, root: Optional[Path] = None) -> List[Dict]:
     env = service_env(root)
     run, _ = _dirs(env)
-    _manifest(run)  # surface an injected manifest without interpreting it
-    rows = [verify_state(env, run)]
-    for path in sorted(run.glob("dashboard-*.pid")):
-        name = _service_name(path.stem)
-        rows.append(dashboard_state(name, env, run))
-    return rows
+    return [
+        verify_state(env, run) if name == "verify" else dashboard_state(name, env, run)
+        for name in _service_names(env, run, "all")
+    ]
 
 
 def _safe_to_stop(name: str, pid: int, env: Dict[str, str], run: Path) -> bool:
@@ -325,24 +356,30 @@ def down(target: str, *, root: Optional[Path] = None) -> List[Dict]:
         raise SystemExit("service must be verify, dashboard, or all")
     env = service_env(root)
     run, _ = _dirs(env)
-    _manifest(run)  # reject injected manifests before stopping or deleting evidence
-    if target == "all":
-        names = ["verify", *[_service_name(p.stem) for p in sorted(run.glob("dashboard-*.pid"))]]
-    elif target == "dashboard":
-        names = [_service_name(p.stem) for p in sorted(run.glob("dashboard-*.pid"))]
-    else:
-        names = ["verify"]
+    names = _service_names(env, run, target)
     rows = []
     for name in dict.fromkeys(names):
         pid_file, identity_file = _pid_file(run, name), _identity_file(run, name)
         pid = _read_pid(pid_file)
-        if not pid_file.exists():
-            rows.append({"service": name, "state": "not-running", "pid": None})
+        port = int(env["VERIFY_PORT"] if name == "verify" else env["DASHBOARD_PORT"])
+        health = _http_health(port)
+        health_pid = health.get("pid") if isinstance(health, dict) else None
+        project = None if name == "verify" else (Path(env["DANUS_AGENTS_ROOT"]) / name.removeprefix("dashboard-")).resolve()
+        if pid is None and isinstance(health_pid, int) and _health_matches(health, health_pid, project):
+            pid = health_pid
+        entry = "verify" if name == "verify" else f"dashboard {name.removeprefix('dashboard-')}"
+        if pid is None:
+            if health is not None or _port_open(port):
+                rows.append({"service": name, "state": "refused-unsafe", "pid": health_pid})
+                continue
+            pid_file.unlink(missing_ok=True)
+            identity_file.unlink(missing_ok=True)
+            _set_manifest(run, entry, False)
+            rows.append({"service": name, "state": "cleared-stale", "pid": None})
             continue
         if not runtime.pid_alive(pid):
-            pid_file.unlink()
+            pid_file.unlink(missing_ok=True)
             identity_file.unlink(missing_ok=True)
-            entry = "verify" if name == "verify" else f"dashboard {name.removeprefix('dashboard-')}"
             _set_manifest(run, entry, False)
             rows.append({"service": name, "state": "cleared-stale", "pid": pid})
             continue
@@ -355,11 +392,13 @@ def down(target: str, *, root: Optional[Path] = None) -> List[Dict]:
         if runtime.pid_alive(pid):
             rows.append({"service": name, "state": "stop-failed", "pid": pid})
             continue
-        pid_file.unlink()
+        pid_file.unlink(missing_ok=True)
         identity_file.unlink(missing_ok=True)
-        entry = "verify" if name == "verify" else f"dashboard {name.removeprefix('dashboard-')}"
         _set_manifest(run, entry, False)
-        rows.append({"service": name, "state": "stopped", "pid": pid})
+        if _http_health(port) is not None or _port_open(port):
+            rows.append({"service": name, "state": "stop-failed", "pid": pid})
+        else:
+            rows.append({"service": name, "state": "stopped", "pid": pid})
     return rows
 
 
@@ -370,7 +409,27 @@ def logs(service: str, *, root: Optional[Path] = None, lines: int = 50) -> str:
     path = _log_file(log_dir, service)
     if not path.is_file():
         raise SystemExit(f"no log: {path}")
-    return "\n".join(path.read_text(encoding="utf-8", errors="replace").splitlines()[-lines:])
+    recent = path.read_text(encoding="utf-8", errors="replace").splitlines()[-lines:]
+    known = {
+        "codex-cache-ttl": lambda line: "base_instructions" in line.lower() and "ttl" in line.lower(),
+        "codex-skill-budget": lambda line: "skill" in line.lower() and "budget" in line.lower(),
+    }
+    output: List[str] = []
+    grouped: Dict[str, tuple[int, int]] = {}
+    for line in recent:
+        category = next((name for name, matches in known.items() if matches(line)), None)
+        if not category:
+            output.append(line)
+            continue
+        if category not in grouped:
+            grouped[category] = (len(output), 1)
+            output.append(line)
+        else:
+            index, count = grouped[category]
+            grouped[category] = (index, count + 1)
+    for category, (index, count) in grouped.items():
+        output[index] = f"[known-external:{category}; repeated={count}] {output[index]}"
+    return "\n".join(output)
 
 
 def test(*, root: Optional[Path] = None) -> List[Dict]:
@@ -385,6 +444,8 @@ def recover(*, root: Optional[Path] = None) -> List[Dict]:
     overwritten.  Worker loops are deliberately outside this manifest.
     """
     env = service_env(root)
+    if runtime.pause_path(env["DANUS_RUNTIME"]).exists():
+        raise SystemExit("Danus is paused; run `danus resume` before recovering services")
     run, _ = _dirs(env)
     entries = _manifest(run)  # validate the complete file before any mutation
     rows: List[Dict] = []

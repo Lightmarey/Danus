@@ -132,7 +132,9 @@ def test_build_codex_command_shape():
                   VERIFY_AGENT_HOME=str(tmp),
                   DANUS_VERIFY_MODEL="m-test", DANUS_VERIFY_EFFORT="e-test",
                   DANUS_CODEX_MODEL=None, DANUS_CODEX_EFFORT=None):
-            cmd = launcher.build_codex_command("RID", _STMT, _PROOF)
+            cmd = launcher.build_codex_command(
+                "RID", _STMT, _PROOF, project_dir=str(tmp / "project"),
+            )
     assert cmd[0] == str(tmp / "codex") and cmd[1] == "exec"
     assert "--model" in cmd and cmd[cmd.index("--model") + 1] == "m-test"
     assert '--config' in cmd and 'model_reasoning_effort="e-test"' in cmd
@@ -141,6 +143,10 @@ def test_build_codex_command_shape():
     assert "-c" in cmd
     py = json.dumps(runtime.current_python())
     assert any('mcp_servers.danus=' in a and 'DANUS_ROLE="verifier"' in a and py in a for a in cmd)
+    assert any(
+        f'DANUS_PROJECT_DIR={json.dumps(str((tmp / "project").resolve()))}' in a
+        for a in cmd
+    )
     assert "--dangerously-bypass-approvals-and-sandbox" in cmd
     assert "--json" in cmd
     # the prompt (final arg) names the exact output path
@@ -222,6 +228,44 @@ def test_verification_path_found_and_absent():
             (d / launcher.VERIFICATION_FILENAMES[0]).write_text("{}")
             # primary filename takes precedence
             assert launcher._verification_path(rid).name == launcher.VERIFICATION_FILENAMES[0]
+
+
+def test_verifier_protocol_audit_rejects_shell_fact_reads(tmp_path):
+    log = tmp_path / "log.md"
+    events = [
+        {"type": "item.completed", "item": {
+            "type": "command_execution",
+            "command": "python -c \"from danus.research import ResearchQuery\"",
+        }},
+        {"type": "item.completed", "item": {
+            "type": "command_execution",
+            "command": "Get-Content runtime/projects/p/fact_graph/facts/deadbeef.json",
+        }},
+        {"type": "item.completed", "item": {
+            "type": "command_execution",
+            "command": "Select-String runtime/projects/p/fact_graph/glossary.json growth",
+        }},
+    ]
+    log.write_text("\n".join(json.dumps(event) for event in events), encoding="utf-8")
+    assert launcher.verifier_protocol_violations(log) == [
+        "danus.research", "fact_graph/facts", "glossary.json", "researchquery",
+    ]
+
+
+def test_verifier_protocol_audit_allows_contract_and_result_commands(tmp_path):
+    log = tmp_path / "log.md"
+    events = [
+        {"type": "item.completed", "item": {
+            "type": "command_execution",
+            "command": "Get-Content agents/contracts/verifier.md",
+        }},
+        {"type": "item.completed", "item": {
+            "type": "command_execution",
+            "command": "Set-Content results/RID/verification.json '{}'",
+        }},
+    ]
+    log.write_text("\n".join(json.dumps(event) for event in events), encoding="utf-8")
+    assert launcher.verifier_protocol_violations(log) == []
 
 
 # --------------------------------------------------------------------------- #

@@ -36,6 +36,8 @@ from .control import (
 _METHOD_KEY = re.compile(r"[^a-z0-9]+")
 _RESERVATION_GRACE_SECONDS = 60.0
 _NESTED_CALL_CLEANUP_SECONDS = 15.0
+_FRESH_INPUT_ANOMALY_THRESHOLD = 100_000
+_SQLITE_BUSY_TIMEOUT_MS = 30_000
 
 
 class _Connection(sqlite3.Connection):
@@ -77,10 +79,14 @@ class SQLiteControlStore:
 
     def _connect(self) -> sqlite3.Connection:
         self.dir.mkdir(parents=True, exist_ok=True)
-        db = sqlite3.connect(self.db_path, timeout=5, factory=_Connection)
+        db = sqlite3.connect(
+            self.db_path,
+            timeout=_SQLITE_BUSY_TIMEOUT_MS / 1000,
+            factory=_Connection,
+        )
         db.row_factory = sqlite3.Row
         db.execute("PRAGMA foreign_keys=ON")
-        db.execute("PRAGMA busy_timeout=5000")
+        db.execute(f"PRAGMA busy_timeout={_SQLITE_BUSY_TIMEOUT_MS}")
         return db
 
     @contextmanager
@@ -704,7 +710,7 @@ class SQLiteControlStore:
         return str(row[0])
 
     def _set_route_state(self, db: sqlite3.Connection, rid: str, state: str, *, actor: str, reason: str = "") -> None:
-        if state not in {"proposed", "active", "stalled", "failed", "succeeded", "superseded"}:
+        if state not in {"proposed", "active", "stalled", "failed", "refuted", "succeeded", "superseded"}:
             raise ControlError(f"invalid route state: {state}")
         row = db.execute("SELECT target_version,obligation_id FROM routes WHERE id=?", (rid,)).fetchone()
         if not row:
@@ -752,7 +758,12 @@ class SQLiteControlStore:
     def save_assignment(self, assignment: dict[str, Any]) -> None:
         self.scaffold()
         with self._tx() as db:
-            db.execute("UPDATE assignments SET status=?,payload=? WHERE worker=?", (assignment["status"], _dump(assignment), assignment["worker"]))
+            changed = db.execute(
+                "UPDATE assignments SET status=?,payload=? WHERE worker=? AND epoch=?",
+                (assignment["status"], _dump(assignment), assignment["worker"], assignment["epoch"]),
+            ).rowcount
+            if not changed:
+                raise ControlError("assignment changed during update")
             self._bump(db)
 
     def invalidate_assignments(self, *, reason: str) -> list[str]:
@@ -854,38 +865,64 @@ class SQLiteControlStore:
             if not row:
                 raise ControlError(f"worker {worker} has no v2 assignment")
             assignment = _load(row[0], {})
+            reservation_scope: dict[str, Any] = {}
+            if reservation_id:
+                reservation = db.execute(
+                    "SELECT scope FROM call_reservations WHERE id=? AND status='active'",
+                    (reservation_id,),
+                ).fetchone()
+                if reservation:
+                    reservation_scope = _load(reservation["scope"], {})
+            assignment_changed = bool(
+                reservation_scope.get("assignment_epoch")
+                and reservation_scope["assignment_epoch"] != assignment["epoch"]
+            )
             failure_class = str(outcome.get("failure_class") or "unknown_infra")
             attempts_limit, wall_limit, retry_schedule = self._infra_policy(failure_class)
-            attempts = int(assignment.get("infra_failure_count") or 0) + 1
+            circuit = db.execute("SELECT consecutive_failures,infra_wall_seconds FROM backend_circuits WHERE provider_key=?", (provider_key,)).fetchone()
+            attempts = (
+                int(circuit["consecutive_failures"] if circuit else 0) + 1
+                if assignment_changed
+                else int(assignment.get("infra_failure_count") or 0) + 1
+            )
             infra_wall = float(assignment.get("infra_wall_seconds") or 0) + max(0.0, wall_seconds)
             outage_wall = float(assignment.get("infra_outage_wall_seconds") or 0) + max(0.0, wall_seconds)
-            circuit = db.execute("SELECT infra_wall_seconds FROM backend_circuits WHERE provider_key=?", (provider_key,)).fetchone()
-            provider_outage_wall = float(circuit[0] if circuit else 0) + max(0.0, wall_seconds)
+            provider_outage_wall = float(circuit["infra_wall_seconds"] if circuit else 0) + max(0.0, wall_seconds)
             retryable = bool(outcome.get("retryable"))
-            blocked = not retryable or attempts >= attempts_limit or outage_wall >= wall_limit or provider_outage_wall >= wall_limit
+            blocked = not retryable or attempts >= attempts_limit or (not assignment_changed and outage_wall >= wall_limit) or provider_outage_wall >= wall_limit
             requested_wait = max(0, int(outcome.get("retry_after_seconds") or 0))
             wait = max(requested_wait, retry_schedule[min(attempts - 1, len(retry_schedule) - 1)])
             next_retry = None if blocked else time.time() + wait
-            assignment.update(
-                status="infra_blocked" if blocked else "waiting_retry",
-                infra_failure_count=attempts,
-                infra_wall_seconds=infra_wall,
-                infra_outage_wall_seconds=outage_wall,
-                next_retry_at_epoch=next_retry,
-                last_failure_class=failure_class,
-                last_error_signature=outcome.get("error_signature"),
-            )
-            db.execute("UPDATE assignments SET status=?,payload=? WHERE worker=?", (assignment["status"], _dump(assignment), worker))
+            if not assignment_changed:
+                assignment.update(
+                    status="infra_blocked" if blocked else "waiting_retry",
+                    infra_failure_count=attempts,
+                    infra_wall_seconds=infra_wall,
+                    infra_outage_wall_seconds=outage_wall,
+                    next_retry_at_epoch=next_retry,
+                    last_failure_class=failure_class,
+                    last_error_signature=outcome.get("error_signature"),
+                )
+                db.execute(
+                    "UPDATE assignments SET status=?,payload=? WHERE worker=? AND epoch=?",
+                    (assignment["status"], _dump(assignment), worker, assignment["epoch"]),
+                )
             circuit_state = "blocked" if blocked else "open"
             db.execute(
                 "INSERT INTO backend_circuits(provider_key,state,consecutive_failures,opened_until,failure_class,infra_wall_seconds,updated_at_utc) VALUES (?,?,?,?,?,?,?) ON CONFLICT(provider_key) DO UPDATE SET state=excluded.state,consecutive_failures=backend_circuits.consecutive_failures+1,opened_until=excluded.opened_until,failure_class=excluded.failure_class,infra_wall_seconds=backend_circuits.infra_wall_seconds+excluded.infra_wall_seconds,updated_at_utc=excluded.updated_at_utc",
                 (provider_key, circuit_state, 1, next_retry, failure_class, max(0.0, wall_seconds), utc_now()),
             )
-            event = self._event(db, "round_infra_error", worker=worker, assignment_epoch=assignment["epoch"], target_version=assignment["target_version"], obligation_id=assignment["obligation_id"], route_id=assignment["route_id"], failure_class=failure_class, retryable=retryable, retry_at_epoch=next_retry, error_signature=outcome.get("error_signature"), return_code=outcome.get("return_code"), blocked=blocked)
-            self._record_cost(db, component="worker_infra", wall_seconds=wall_seconds, usage=usage, reservation_id=reservation_id, worker=worker, assignment_epoch=assignment["epoch"], target_version=assignment["target_version"], obligation_id=assignment["obligation_id"], route_id=assignment["route_id"], failure_class=failure_class, attempt_status="failed")
+            event_scope = {
+                "assignment_epoch": reservation_scope.get("assignment_epoch") or assignment["epoch"],
+                "target_version": reservation_scope.get("target_version") or assignment["target_version"],
+                "obligation_id": reservation_scope.get("obligation_id") or assignment["obligation_id"],
+                "route_id": reservation_scope.get("route_id") or assignment["route_id"],
+            }
+            event = self._event(db, "round_infra_error", worker=worker, failure_class=failure_class, retryable=retryable, retry_at_epoch=next_retry, error_signature=outcome.get("error_signature"), return_code=outcome.get("return_code"), blocked=blocked, assignment_changed=assignment_changed, **event_scope)
+            self._record_cost(db, component="worker_infra", wall_seconds=wall_seconds, usage=usage, reservation_id=reservation_id, worker=worker, failure_class=failure_class, attempt_status="failed", **event_scope)
             self._bump(db)
         self._record_budget_threshold()
-        return {"assignment": assignment, "event": event, "blocked": blocked, "wait_seconds": None if blocked else wait}
+        return {"assignment": assignment, "event": event, "blocked": blocked, "wait_seconds": None if blocked else wait, "assignment_changed": assignment_changed}
 
     def resume_worker_retry(self, worker: str) -> dict[str, Any]:
         assignment = self.assignment(worker)
@@ -895,10 +932,15 @@ class SQLiteControlStore:
         self.save_assignment(assignment)
         return assignment
 
-    def record_worker_call_success(self, worker: str, provider_key: str = "codex") -> None:
+    def record_worker_call_success(self, worker: str, provider_key: str = "codex", *, assignment_epoch: Optional[str] = None) -> None:
         self.scaffold()
         with self._tx() as db:
-            row = db.execute("SELECT payload FROM assignments WHERE worker=?", (_id(worker, "worker"),)).fetchone()
+            sql = "SELECT payload FROM assignments WHERE worker=?"
+            params: tuple[Any, ...] = (_id(worker, "worker"),)
+            if assignment_epoch:
+                sql += " AND epoch=?"
+                params += (assignment_epoch,)
+            row = db.execute(sql, params).fetchone()
             circuit = db.execute("SELECT state FROM backend_circuits WHERE provider_key=?", (provider_key,)).fetchone()
             if row:
                 current = _load(row[0], {})
@@ -907,7 +949,10 @@ class SQLiteControlStore:
             if row:
                 assignment = current
                 assignment.update(infra_failure_count=0, infra_outage_wall_seconds=0.0, next_retry_at_epoch=None, last_failure_class=None, last_error_signature=None)
-                db.execute("UPDATE assignments SET payload=? WHERE worker=?", (_dump(assignment), worker))
+                db.execute(
+                    "UPDATE assignments SET payload=? WHERE worker=? AND epoch=?",
+                    (_dump(assignment), worker, assignment["epoch"]),
+                )
             db.execute("INSERT INTO backend_circuits(provider_key,state,consecutive_failures,opened_until,failure_class,infra_wall_seconds,updated_at_utc) VALUES (?, 'closed', 0, NULL, NULL, 0, ?) ON CONFLICT(provider_key) DO UPDATE SET state='closed',consecutive_failures=0,opened_until=NULL,failure_class=NULL,infra_wall_seconds=0,updated_at_utc=excluded.updated_at_utc", (provider_key, utc_now()))
             if circuit and circuit["state"] != "closed":
                 self._event(db, "backend_recovered", provider_key=provider_key, worker=worker)
@@ -918,37 +963,54 @@ class SQLiteControlStore:
                                    reservation_id: Optional[str] = None,
                                    reason: str = "operator_stop") -> dict[str, Any]:
         """Settle a cancelled round without charging a research checkpoint."""
-        assignment = self.assignment(worker)
-        if not assignment:
-            raise ControlError(f"worker {worker} has no v2 assignment")
-        if assignment.get("status") in {"assigned", "running", "auditing"}:
-            assignment["status"] = "assigned"
+        self.scaffold()
         usage = usage or {}
         with self._tx() as db:
-            db.execute(
-                "UPDATE assignments SET status=?,payload=? WHERE worker=?",
-                (assignment["status"], _dump(assignment), worker),
+            row = db.execute(
+                "SELECT payload FROM assignments WHERE worker=?", (_id(worker, "worker"),),
+            ).fetchone()
+            if not row:
+                raise ControlError(f"worker {worker} has no v2 assignment")
+            current = _load(row["payload"], {})
+            reservation_scope: dict[str, Any] = {}
+            if reservation_id:
+                reservation = db.execute(
+                    "SELECT scope FROM call_reservations WHERE id=? AND status='active'",
+                    (reservation_id,),
+                ).fetchone()
+                if reservation:
+                    reservation_scope = _load(reservation["scope"], {})
+            assignment_changed = bool(
+                reservation_scope.get("assignment_epoch")
+                and reservation_scope["assignment_epoch"] != current["epoch"]
             )
+            if not assignment_changed and current.get("status") in {"assigned", "running", "auditing"}:
+                current["status"] = "assigned"
+                db.execute(
+                    "UPDATE assignments SET status=?,payload=? WHERE worker=? AND epoch=?",
+                    (current["status"], _dump(current), worker, current["epoch"]),
+                )
+            event_scope = {
+                "assignment_epoch": reservation_scope.get("assignment_epoch") or current["epoch"],
+                "target_version": reservation_scope.get("target_version") or current["target_version"],
+                "obligation_id": reservation_scope.get("obligation_id") or current["obligation_id"],
+                "route_id": reservation_scope.get("route_id") or current["route_id"],
+            }
             event = self._event(
                 db, "round_interrupted", worker=worker,
-                assignment_epoch=assignment["epoch"],
-                target_version=assignment["target_version"],
-                obligation_id=assignment["obligation_id"],
-                route_id=assignment["route_id"], reason=reason,
+                reason=reason, assignment_changed=assignment_changed,
                 usage_status="partial" if usage else "unavailable",
+                **event_scope,
             )
             self._record_cost(
                 db, component="worker_round", wall_seconds=wall_seconds,
                 usage=usage, reservation_id=reservation_id, worker=worker,
-                assignment_epoch=assignment["epoch"],
-                target_version=assignment["target_version"],
-                obligation_id=assignment["obligation_id"],
-                route_id=assignment["route_id"], attempt_status="interrupted",
+                attempt_status="interrupted", **event_scope,
                 usage_status="partial" if usage else "unavailable",
             )
             self._bump(db)
         self._record_budget_threshold()
-        return {"assignment": assignment, "event": event}
+        return {"assignment": current, "event": event}
 
     def recover_worker_interruption(self, worker: str, *, wall_seconds: float = 0.0,
                                     reason: str = "dead_worker",
@@ -1128,13 +1190,17 @@ class SQLiteControlStore:
         from danus.research import index_fact_into
         with self._tx() as db:
             row = db.execute(
-                "SELECT fact_id,payload FROM pending_facts WHERE submission_id=? AND status='prepared'",
+                "SELECT fact_id,payload,status FROM pending_facts WHERE submission_id=?",
                 (submission_id,),
             ).fetchone()
             if not row:
                 raise ControlError(f"unknown pending fact: {fact_id}")
             if str(row["fact_id"]) != fact_id:
                 raise ControlError(f"pending submission does not match fact: {fact_id}")
+            if row["status"] == "complete":
+                return {"fact_id": fact_id, "already_complete": True}
+            if row["status"] != "prepared":
+                raise ControlError(f"pending fact is not prepared: {fact_id}")
             payload = _load(row["payload"], {})
             if not (self.project / "fact_graph" / "facts" / f"{fact_id}.md").is_file():
                 raise ControlError(f"pending fact file is missing: {fact_id}")
@@ -1183,13 +1249,18 @@ class SQLiteControlStore:
     def taint_fact(self, fact_id: str, reason: str, *, actor: str = "main") -> dict[str, Any]:
         from danus.research import ResearchQuery
         affected = {fact_id, *ResearchQuery(self.project).descendants(fact_id)}
+        producing_routes = {
+            str(row["route_id"])
+            for row in self.events("fact_linked")
+            if row.get("fact_id") in affected and row.get("route_id")
+        }
         event = self.append_event("fact_tainted", fact_id=fact_id, reason=reason.strip(), actor=actor, affected_fact_ids=sorted(affected), review_required=True)
         stale = []
         with self._tx() as db:
             db.executemany("UPDATE facts SET status='tainted' WHERE fact_id=?", [(item,) for item in affected])
             for row in db.execute("SELECT a.worker,a.payload,r.payload route FROM assignments a JOIN routes r ON r.id=a.route_id"):
                 assignment, route = _load(row["payload"], {}), _load(row["route"], {})
-                if affected.intersection(route.get("input_fact_ids") or []):
+                if affected.intersection(route.get("input_fact_ids") or []) or assignment["route_id"] in producing_routes:
                     assignment.update(status="tainted", stale_reason=f"route depends on tainted fact {fact_id}")
                     db.execute("UPDATE assignments SET status='tainted',payload=? WHERE worker=?", (_dump(assignment), row["worker"]))
                     self._set_route_state(db, assignment["route_id"], "stalled", actor="controller", reason=assignment["stale_reason"])
@@ -1208,16 +1279,39 @@ class SQLiteControlStore:
         invalid_reason = None
         if not assignment:
             raise ControlError(f"worker {worker} has no v2 assignment")
-        if assignment.get("status") not in {"assigned", "running", "auditing"}:
+        reservation_scope: dict[str, Any] = {}
+        if reservation_id:
+            with self._connect() as db:
+                row = db.execute(
+                    "SELECT component,status,scope FROM call_reservations WHERE id=?",
+                    (reservation_id,),
+                ).fetchone()
+            if row:
+                reservation_scope = _load(row["scope"], {})
+            if (
+                not row
+                or row["component"] != "worker_round"
+                or row["status"] != "active"
+                or reservation_scope.get("worker") != worker
+                or reservation_scope.get("assignment_epoch") != assignment.get("epoch")
+            ):
+                invalid_reason = "worker-round reservation does not match the assignment"
+        if not invalid_reason and assignment.get("status") not in {"assigned", "running", "auditing"}:
             invalid_reason = f"assignment is not runnable: {assignment.get('status')}"
-        elif assignment["target_version"] != self.current_target_version():
+        elif not invalid_reason and assignment["target_version"] != self.current_target_version():
             invalid_reason = "assignment target is stale"
-        elif int(assignment["rounds_used"]) >= int(assignment["max_rounds"]):
+        elif not invalid_reason and int(assignment["rounds_used"]) >= int(assignment["max_rounds"]):
             invalid_reason = "route round budget exhausted"
         if invalid_reason:
+            cost_scope = {
+                "target_version": reservation_scope.get("target_version") or assignment.get("target_version"),
+                "obligation_id": reservation_scope.get("obligation_id") or assignment.get("obligation_id"),
+                "route_id": reservation_scope.get("route_id") or assignment.get("route_id"),
+                "assignment_epoch": reservation_scope.get("assignment_epoch") or assignment.get("epoch"),
+            }
             with self._tx() as db:
-                self._record_cost(db, component="worker_round", wall_seconds=wall_seconds, usage=usage, reservation_id=reservation_id, worker=worker, target_version=assignment.get("target_version"), obligation_id=assignment.get("obligation_id"), route_id=assignment.get("route_id"), assignment_epoch=assignment.get("epoch"), attempt_status="discarded")
-                self._event(db, "round_discarded", worker=worker, assignment_epoch=assignment.get("epoch"), reason=invalid_reason)
+                self._record_cost(db, component="worker_round", wall_seconds=wall_seconds, usage=usage, reservation_id=reservation_id, worker=worker, attempt_status="discarded", **cost_scope)
+                self._event(db, "round_discarded", worker=worker, assignment_epoch=cost_scope["assignment_epoch"], reason=invalid_reason)
                 self._bump(db)
             self._record_budget_threshold()
             return {"gain": "none", "decision": "invalidated", "assignment": assignment}
@@ -1244,9 +1338,14 @@ class SQLiteControlStore:
             assignment["credited_evidence_refs"] = sorted(credited | set(valid_refs))
         assignment["last_unresolved_interfaces"] = len(interfaces)
         audit_was_required = bool(assignment.get("audit_required"))
+        route_status = report.get("route_status")
+        route_completed = route_status in {"completed", "refuted"} and gain == "high"
         if budget_blocks:
             assignment.update(status="budget_exhausted", audit_required=False)
             decision = "budget_exhausted"
+        elif route_completed:
+            assignment.update(status="completed", audit_required=False)
+            decision = "completed"
         elif gain in {"high", "medium"}:
             assignment.update(consecutive_low=0, audit_required=False)
             assignment["rounds_remaining"] = min(int(assignment["max_rounds"]) - int(assignment["rounds_used"]), int(assignment["rounds_remaining"]) + RENEWAL_ROUNDS)
@@ -1261,26 +1360,45 @@ class SQLiteControlStore:
             else:
                 assignment["status"] = "stalled"
                 decision = "stalled"
-        if self.obligation_state(assignment["obligation_id"]) in {"closed", "refuted"}:
+        obligation_closed = self.obligation_state(assignment["obligation_id"]) in {"closed", "refuted"}
+        if obligation_closed:
             assignment.update(status="completed", audit_required=False)
             decision = "completed"
         if assignment["rounds_used"] >= assignment["max_rounds"]:
             if decision != "completed":
                 assignment["status"], decision = "budget_exhausted", "budget_exhausted"
+        superseded_assignment = None
         with self._tx() as db:
-            db.execute("UPDATE assignments SET status=?,payload=? WHERE worker=?", (assignment["status"], _dump(assignment), worker))
-            if decision == "stalled" or (decision == "budget_exhausted" and not budget_blocks):
-                self._set_route_state(db, assignment["route_id"], "stalled", actor="controller", reason=decision)
-            elif decision == "completed":
-                self._set_route_state(db, assignment["route_id"], "succeeded", actor="controller", reason="obligation closed")
-            event = self._event(db, "work_checkpoint", worker=worker, assignment_epoch=assignment["epoch"], target_version=assignment["target_version"], obligation_id=assignment["obligation_id"], route_id=assignment["route_id"], rounds_used=assignment["rounds_used"], gain=gain, decision=decision, valid_evidence_refs=valid_refs, budget_block_event_ids=[row["event_id"] for row in budget_blocks], report=report)
-            db.execute("INSERT INTO checkpoints VALUES (?,?,?,?,?,?,?,?,?)", (event["seq"], assignment["target_version"], assignment["obligation_id"], assignment["route_id"], worker, assignment["rounds_used"], gain, decision, _dump(report)))
-            for signature in report.get("failed_attempt_signatures") or []:
-                db.execute("INSERT INTO obstacles VALUES (?,?,?,?,?,?,?,?) ON CONFLICT(signature,route_id) DO UPDATE SET occurrences=occurrences+1,last_seen_seq=excluded.last_seen_seq,title=excluded.title,status='open'", (signature, assignment["route_id"], assignment["obligation_id"], signature, "open", 1, event["seq"], event["seq"]))
-            self._record_cost(db, component="worker_round", wall_seconds=wall_seconds, usage=usage, reservation_id=reservation_id, worker=worker, target_version=assignment["target_version"], obligation_id=assignment["obligation_id"], route_id=assignment["route_id"], assignment_epoch=assignment["epoch"])
-            self._bump(db)
+            current = db.execute(
+                "SELECT epoch,payload FROM assignments WHERE worker=?", (worker,),
+            ).fetchone()
+            if not current or current["epoch"] != assignment["epoch"]:
+                superseded_assignment = _load(current["payload"], {}) if current else assignment
+                self._record_cost(db, component="worker_round", wall_seconds=wall_seconds, usage=usage, reservation_id=reservation_id, worker=worker, target_version=assignment["target_version"], obligation_id=assignment["obligation_id"], route_id=assignment["route_id"], assignment_epoch=assignment["epoch"], attempt_status="discarded")
+                self._event(db, "round_discarded", worker=worker, assignment_epoch=assignment["epoch"], reason="assignment changed during report evaluation")
+                self._bump(db)
+            else:
+                db.execute("UPDATE assignments SET status=?,payload=? WHERE worker=? AND epoch=?", (assignment["status"], _dump(assignment), worker, assignment["epoch"]))
+                if decision == "stalled" or (decision == "budget_exhausted" and not budget_blocks):
+                    self._set_route_state(db, assignment["route_id"], "stalled", actor="controller", reason=decision)
+                elif decision == "completed":
+                    route_state = "refuted" if route_status == "refuted" else "succeeded"
+                    reason = "obligation closed" if obligation_closed else f"verified route {route_status}"
+                    self._set_route_state(db, assignment["route_id"], route_state, actor="controller", reason=reason)
+                event = self._event(db, "work_checkpoint", worker=worker, assignment_epoch=assignment["epoch"], target_version=assignment["target_version"], obligation_id=assignment["obligation_id"], route_id=assignment["route_id"], rounds_used=assignment["rounds_used"], gain=gain, decision=decision, valid_evidence_refs=valid_refs, budget_block_event_ids=[row["event_id"] for row in budget_blocks], report=report)
+                db.execute("INSERT INTO checkpoints VALUES (?,?,?,?,?,?,?,?,?)", (event["seq"], assignment["target_version"], assignment["obligation_id"], assignment["route_id"], worker, assignment["rounds_used"], gain, decision, _dump(report)))
+                for signature in report.get("failed_attempt_signatures") or []:
+                    db.execute("INSERT INTO obstacles VALUES (?,?,?,?,?,?,?,?) ON CONFLICT(signature,route_id) DO UPDATE SET occurrences=occurrences+1,last_seen_seq=excluded.last_seen_seq,title=excluded.title,status='open'", (signature, assignment["route_id"], assignment["obligation_id"], signature, "open", 1, event["seq"], event["seq"]))
+                self._record_cost(db, component="worker_round", wall_seconds=wall_seconds, usage=usage, reservation_id=reservation_id, worker=worker, target_version=assignment["target_version"], obligation_id=assignment["obligation_id"], route_id=assignment["route_id"], assignment_epoch=assignment["epoch"])
+                self._bump(db)
         self._record_budget_threshold()
-        return {"gain": gain, "decision": decision, "assignment": assignment, "project_budget_blocked": bool(budget_blocks)}
+        if superseded_assignment is not None:
+            return {"gain": "none", "decision": "invalidated", "assignment": superseded_assignment}
+        return {
+            "gain": gain, "decision": decision, "assignment": assignment,
+            "project_budget_blocked": bool(budget_blocks),
+            "last_fact_id": str(linked[-1]["fact_id"]) if linked else None,
+        }
 
     def activate_fallback(self, worker: str) -> Optional[dict[str, Any]]:
         assignment = self.assignment(worker)
@@ -1293,7 +1411,7 @@ class SQLiteControlStore:
                 return self.assign(worker, obligation_id=assignment["obligation_id"], route_id=rid, task=f"Fallback route {rid}: {self.route(rid)['expected_result']}", max_rounds=assignment["max_rounds"], round_timeout_seconds=assignment["round_timeout_seconds"])
         return None
 
-    def reserve_call(self, *, component: str, max_wall_seconds: float, provider_key: str = "codex", estimated_cost_usd: Optional[float] = None, parent_reservation_id: Optional[str] = None, **scope: Any) -> dict[str, Any]:
+    def reserve_call(self, *, component: str, max_wall_seconds: float, provider_key: str = "codex", estimated_cost_usd: Optional[float] = None, parent_reservation_id: Optional[str] = None, require_current_assignment: bool = False, **scope: Any) -> dict[str, Any]:
         """Atomically reserve the worst-case local budget before spawning a paid call."""
         self.scaffold()
         wall = float(max_wall_seconds)
@@ -1302,6 +1420,17 @@ class SQLiteControlStore:
         estimated = None if estimated_cost_usd is None else max(0.0, float(estimated_cost_usd))
         now = time.time()
         with self._tx() as db:
+            if component == "worker_round" and require_current_assignment:
+                row = db.execute(
+                    "SELECT epoch,status FROM assignments WHERE worker=?",
+                    (scope.get("worker"),),
+                ).fetchone()
+                if (
+                    not row
+                    or row["epoch"] != scope.get("assignment_epoch")
+                    or row["status"] not in {"assigned", "running", "auditing"}
+                ):
+                    raise ControlError("worker-round reservation does not match the assignment")
             reserved_wall = wall
             if parent_reservation_id:
                 parent = db.execute(
@@ -1415,6 +1544,13 @@ class SQLiteControlStore:
             }
             wall_seconds = 0.0
         usage = usage or {}
+        if "input_tokens" in usage and "fresh_input_tokens" not in usage:
+            usage = {**usage, "fresh_input_tokens": max(
+                0, int(usage.get("input_tokens", 0) or 0)
+                - int(usage.get("cached_input_tokens", 0) or 0),
+            )}
+        fresh_input = int(usage.get("fresh_input_tokens", 0) or 0)
+        usage_anomaly = fresh_input >= _FRESH_INPUT_ANOMALY_THRESHOLD
         if cost_usd is None and any(key in usage for key in ("input_tokens", "output_tokens")):
             try:
                 cost_usd = (float(usage.get("input_tokens", 0) or 0) * float(os.environ.get("DANUS_CODEX_PRICE_IN", "")) + float(usage.get("output_tokens", 0) or 0) * float(os.environ.get("DANUS_CODEX_PRICE_OUT", ""))) / 1_000_000
@@ -1423,7 +1559,14 @@ class SQLiteControlStore:
         cost_status = "known" if cost_usd is not None else "unknown"
         if cost_usd is None and reserved_cost is not None:
             cost_usd, cost_status = reserved_cost, "estimated_ceiling"
-        return self._event(db, "cost", component=component, wall_seconds=round(max(0.0, wall_seconds), 3), usage=usage, cost_usd=cost_usd, cost_status=cost_status, reservation_id=reservation_id, **scope)
+        event = self._event(db, "cost", component=component, wall_seconds=round(max(0.0, wall_seconds), 3), usage=usage, usage_anomaly=usage_anomaly, cost_usd=cost_usd, cost_status=cost_status, reservation_id=reservation_id, **scope)
+        if usage_anomaly:
+            self._event(
+                db, "usage_anomaly", component=component,
+                fresh_input_tokens=fresh_input,
+                threshold=_FRESH_INPUT_ANOMALY_THRESHOLD, **scope,
+            )
+        return event
 
     def record_cost(self, *, component: str, wall_seconds: float, usage: Optional[dict[str, Any]] = None, cost_usd: Optional[float] = None, reservation_id: Optional[str] = None, **scope: Any) -> dict[str, Any]:
         self.scaffold()

@@ -57,6 +57,10 @@ Concretely, before you submit:
   `undefined_symbols` for candidates that missed one.
 - **Cite every dependency by `fact_id`** — never "by the result above", never the
   problem statement as a math source.
+- **Only load-bearing material.** Put strategy surveys, failed alternatives,
+  novelty discussion, and unused related facts in the `WorkReport`, not in the
+  candidate proof. Every cited or declared predecessor must be used by a proof
+  step needed for the submitted statement.
 - **Every quantifier explicit; every introduced parameter (epsilon, k, …) carries
   an explicit range.**
 - **No handwave** ("obviously", "easy to see", "routine", "analogously",
@@ -74,6 +78,12 @@ evidence=<proof>, verifiable=true)` and put `verification_goal`, `display_title`
 `assumptions_used` entry exactly from the research-context list; the gateway
 stamps the assignment scope. Then call
 `fact_submit_batch(verification_goal, candidates=[{"source_id": ...}])`.
+When `closes_obligation=true`, keep `claim` self-contained. If the obligation
+text is only a short research directive, copy it verbatim into
+`links.closure_statement` and put the detailed theorem in `claim`; the gateway
+verifies that theorem together with its exact obligation binding. Omit
+`closure_statement` only when the self-contained `claim` already equals the
+obligation text after whitespace normalization.
 `claim_role` must be exactly one of:
 
 - `unconditional` — the default for an ordinary positive lemma or theorem proved

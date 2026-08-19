@@ -47,13 +47,40 @@ Assume `Proof` is markdown text written in normal mathematical order, like a pap
 No code-level proof parser is required. Do not invent parser modules for subgoal extraction. Read the markdown in order and use its displayed structure.
 
 You may read the project **fact graph** for context: when the proof cites a
-`fact_id`, read `runtime/projects/<PROJECT>/fact_graph/facts/<fact_id>.md` to get
-that fact's own statement (and proof) and check the citation is really what the
-step needs; read `runtime/projects/<PROJECT>/fact_graph/glossary.json` to resolve
-project symbols, and `danus/core/glossary_global.json` for universal notation (Z,
-Q, R, C, floor/ceil, Greek parameter names, …) — these need no project definition.
+`fact_id`, call `fact_get(fact_id=<id>, include_proof=false)` to get that fact's
+signed statement and check the citation is really what the step needs. To resolve
+one undefined project or universal symbol, call `glossary_get(term=<exact term>)`;
+it returns only that exact definition. Do not read or search whole glossary files.
 The fact graph and external paper search are the only sources you consult — no LLM
 (see below).
+
+### Context economy and authoritative sources
+
+- Never consult Codex/user history memory, rollout summaries, or unrelated task
+  transcripts. They are not verification evidence.
+- Retrieve every signed internal fact through the verifier MCP
+  `fact_get(fact_id=<id>, include_proof=false)` tool. Never use shell commands,
+  Python scripts, direct database/file reads, or Danus query/storage APIs to
+  inspect facts. A run that bypasses `fact_get` is a protocol violation and its
+  verdict is discarded by the verify service.
+- For an internal signed fact, call `fact_get(..., include_proof=false)` first.
+  Its accepted statement is an available theorem; verify that the candidate uses
+  that statement with matching hypotheses and conclusions.
+- Fetch `include_proof=true` only when the candidate explicitly relies on a proof
+  detail that is absent from the signed statement. Do not recursively expand the
+  proofs of cited facts.
+- The P3 chain check reads only each directly cited fact's signed statement. Do
+  not recursively traverse its predecessors or proof citations.
+- Follow the candidate proof sequentially and fetch a directly cited fact only
+  when that step needs it. Make one bounded tool call at a time; never bulk-fetch,
+  print, or dump a collection of facts into context.
+- Do not broadly search the filesystem for context. Read only the glossary or
+  exact source needed for the candidate under review.
+
+Shell access is reserved for reading the verifier contract/skills and for writing
+or validating the requested `verification.json`. Do not inspect Danus source
+code, fact or glossary storage, global memory, previous verifier runs, or worker
+logs through the shell.
 
 ## Required Skills
 
@@ -262,9 +289,16 @@ Check that the candidate fact's `statement` is self-contained. If it begins with
 
 ### P3-supplement (chain check)
 
-When a step cites a 16-hex `fact_id`, treat that fact's own `statement` as if it were inlined. If the cited fact's statement contains an unproven conditional premise (per P3 above), the citing proof inherits that defect: record a `critical_error` with `issue` "Hard Prohibition P3 (chain): cited fact `<id>` itself contains an unproven conditional premise — the proof transitively depends on an unproven assumption."
+When a step cites a 16-hex `fact_id`, use `fact_get(..., include_proof=false)` and
+treat that fact's own `statement` as if it were inlined. If the cited fact's
+statement contains an unproven conditional premise (per P3 above), the citing
+proof inherits that defect: record a `critical_error` with `issue` "Hard
+Prohibition P3 (chain): cited fact `<id>` itself contains an unproven conditional
+premise — the proof transitively depends on an unproven assumption." This check
+is direct, not recursive: do not expand the cited fact's proof or predecessors.
 
-Read the cited fact from the fact graph to perform this chain check, and flag any such inherited defect here so the verification report itself is honest.
+Use the exact `fact_get` result to perform this chain check, and flag any such
+inherited defect here so the verification report itself is honest.
 
 ### Notes on these prohibitions
 

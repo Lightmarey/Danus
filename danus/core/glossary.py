@@ -36,8 +36,8 @@ _GREEK = (
 _INTERESTING = re.compile(
     r"\b("
     r"[A-Za-z][A-Za-z]?(?:_\{[^}]+\}|_[A-Za-z0-9+]+)+(?:\([^)\s]{0,30}\))?"
-    r"|[A-Z][A-Z]?(?:\([^)\s]{0,30}\)|\+|>=\d+|<=\d+)"
-    r"|" + "|".join(sorted(_GREEK, key=len, reverse=True)) +
+    r"|[A-Z][A-Z]?(?:\([^)\s]{0,30}\)|\+(?![A-Za-z0-9_])|>=\d+|<=\d+)"
+    r"|(?:" + "|".join(sorted(_GREEK, key=len, reverse=True)) + r")(?![A-Za-z0-9_])"
     r"|\{[a-zA-Z]\}|\[[a-z],\s*[a-z]\]|\([a-z],\s*[a-z]\)"
     r")"
 )
@@ -47,6 +47,19 @@ _STOPLIST = frozenset({
     "OR", "AND", "NOT", "IF", "THEN",
     "QED", "PROOF", "LEMMA", "THEOREM", "CLAIM",
 })
+
+_INLINE_DEFINITION = re.compile(r"\b(?:let|set|write|denote|where)\b", re.IGNORECASE)
+
+
+def _defined_inline(token: str, text: str) -> bool:
+    for match in _INLINE_DEFINITION.finditer(text):
+        clause = re.split(r"[.;\n]", text[match.end():match.end() + 160], maxsplit=1)[0]
+        if token in clause:
+            return True
+    return bool(re.search(
+        rf"{re.escape(token)}[^.;\n]{{0,60}}\b(?:denotes|means)\b|"
+        rf"{re.escape(token)}\s*:?=", text, re.IGNORECASE,
+    ))
 
 
 def flatten(glossary_obj: Optional[Dict[str, Any]]) -> Dict[str, str]:
@@ -106,7 +119,9 @@ def undefined_symbols(
     available glossaries' keys). Returns a de-duplicated, sorted list."""
     defined_set = set(defined)
     found: Dict[str, None] = {}
-    for text in (statement, proof, intuition):
+    texts = (statement, proof, intuition)
+    body = "\n".join(text or "" for text in texts)
+    for text in texts:
         for m in _INTERESTING.finditer(text or ""):
             tok = m.group(1)
             if tok in _STOPLIST or tok in defined_set:
@@ -114,6 +129,8 @@ def undefined_symbols(
             # try the base form without a trailing argument list
             stripped = re.sub(r"\([^)]*\)$", "", tok)
             if stripped and stripped in defined_set:
+                continue
+            if _defined_inline(tok, body):
                 continue
             found[tok] = None
     return sorted(found)

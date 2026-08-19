@@ -194,6 +194,37 @@ def test_exec_cmd_empty_tail():
     assert cmd == ["codex", "exec", "--model", "m", "--config", 'model_reasoning_effort="e"']
 
 
+def test_remaining_percent_uses_most_consumed_window():
+    result = {"rateLimitsByLimitId": {"codex": {
+        "primary": {"usedPercent": 25}, "secondary": {"usedPercent": 81},
+    }}}
+    assert codex._remaining_percent(result, "codex") == 19
+
+
+def test_remaining_percent_rejects_missing_window():
+    try:
+        codex._remaining_percent({"rateLimits": {}}, "codex")
+        assert False, "missing quota window should fail closed"
+    except RuntimeError:
+        pass
+
+
+def test_call_admission_allows_above_floor_and_blocks_at_floor():
+    original = codex.rate_limit_remaining_percent
+    try:
+        with env(CODEX_BACKEND="chatgpt", DANUS_CODEX_MIN_REMAINING_PERCENT="75"):
+            codex.rate_limit_remaining_percent = lambda: 76
+            assert codex.require_call_admission() == (76, 75)
+            codex.rate_limit_remaining_percent = lambda: 75
+            try:
+                codex.require_call_admission()
+                assert False, "quota guard should block at the configured floor"
+            except codex.QuotaGuardBlocked:
+                pass
+    finally:
+        codex.rate_limit_remaining_percent = original
+
+
 def main() -> None:
     tests = [
         test_resolve_bin_prefers_danus_codex_bin_over_alias,
@@ -209,6 +240,9 @@ def main() -> None:
         test_subprocess_env_idempotent_when_dir_already_on_path,
         test_exec_cmd_shape_quoted_effort_and_verbatim_tail,
         test_exec_cmd_empty_tail,
+        test_remaining_percent_uses_most_consumed_window,
+        test_remaining_percent_rejects_missing_window,
+        test_call_admission_allows_above_floor_and_blocks_at_floor,
     ]
     for t in tests:
         t()

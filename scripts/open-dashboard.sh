@@ -67,8 +67,11 @@ esac
 cd "$ROOT"
 "$PYTHON" -m danus.orchestration services up dashboard "$PROJECT"
 LOGS="$("$PYTHON" -m danus.orchestration services logs "dashboard-$PROJECT")"
-URL="$(printf '%s\n' "$LOGS" | grep -Eo 'http://127\.0\.0\.1:[0-9]+/#control-token=[^[:space:]]+' | tail -n 1)"
+URL="$(printf '%s\n' "$LOGS" | grep -Eo 'http://[^/:[:space:]]+:[0-9]+/#control-token=[^[:space:]]+' | tail -n 1)"
 [ -n "$URL" ] || { echo "dashboard started, but its capability URL was not found in logs for dashboard-$PROJECT" >&2; exit 1; }
+case "$URL" in
+  http://0.0.0.0:*) URL="${URL/http:\/\/0.0.0.0:/http:\/\/$(hostname -I | awk '{print $1}'):}" ;;
+esac
 URL="${URL/\/#control-token=/\/?launch=$(date +%s)#control-token=}"
 
 printf '%s\n' "$URL"

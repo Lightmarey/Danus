@@ -29,7 +29,17 @@ For each cited external theorem/lemma/definition:
 9. If still not found, emit a critical error:
    - location: where the citation is used,
    - issue: referenced theorem appears non-existent or incorrectly cited.
-10. When a step cites an internal `fact_id` (16 hex characters) rather than an external paper, apply the verifier contract's P3-supplement **chain check** (`agents/contracts/verifier.md`): read the cited fact from the project fact graph and, if its own statement carries an unproven conditional premise, record the inherited defect as a `critical_error`. Read and apply the wording from the contract; do not fork it here.
+10. When a step cites an internal `fact_id` (16 hex characters) rather than an
+external paper, apply the verifier contract's P3-supplement **chain check**
+(`agents/contracts/verifier.md`): call
+`fact_get(fact_id=<id>, include_proof=false)` and, if its signed statement carries
+an unproven conditional premise, record the inherited defect as a
+`critical_error`. Do not expand its proof or recursively traverse predecessors.
+Read and apply the wording from the contract; do not fork it here.
+    This MCP call is the only permitted way to retrieve an internal fact. Do not
+    substitute shell commands, Python scripts, direct storage reads, or Danus
+    query APIs. Fetch facts one at a time as their proof steps are checked; never
+    bulk-print or dump cited facts into context.
 11. Keep each reference check in context for the synthesis step (you persist nothing —
    the verifier is stateless).
 
@@ -56,6 +66,7 @@ Produce one record per reference check, kept in context for synthesis:
 ## Tools
 
 - `search_arxiv_theorems`
+- `fact_get`
 - Codex's built-in web search
 
 (Findings stay in context for synthesis — nothing is persisted.)

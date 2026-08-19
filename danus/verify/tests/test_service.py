@@ -92,12 +92,16 @@ def test_verify_accept_contract():
     assert "repair_hints" in body
 
 
-def test_verify_forwards_timeout_and_cancel_path():
+def test_verify_forwards_runtime_context():
     captured = {}
 
-    def fake(run_id, statement, proof, timeout_seconds=None, cancel_path=None):
+    def fake(
+        run_id, statement, proof, timeout_seconds=None, cancel_path=None,
+        project_dir=None,
+    ):
         captured["timeout_seconds"] = timeout_seconds
         captured["cancel_path"] = cancel_path
+        captured["project_dir"] = project_dir
         return _CANNED_OK
 
     with _fake_run(fake):
@@ -105,19 +109,27 @@ def test_verify_forwards_timeout_and_cancel_path():
             "/verify", json={
                 "statement": _STMT, "proof": _PROOF,
                 "timeout_seconds": 17, "cancel_path": "C:/tmp/worker.stop",
+                "project_dir": "C:/tmp/project",
             },
         )
     assert resp.status_code == 200
     assert captured["timeout_seconds"] == 17
     assert captured["cancel_path"] == "C:/tmp/worker.stop"
+    assert captured["project_dir"] == "C:/tmp/project"
 
 
 def test_verify_batch_contract_and_single_launch():
     calls = []
     original = service.run_codex_batch_verification
 
-    def fake(run_id, verification_goal, candidates, timeout_seconds=None, cancel_path=None):
-        calls.append((run_id, verification_goal, candidates, timeout_seconds, cancel_path))
+    def fake(
+        run_id, verification_goal, candidates, timeout_seconds=None,
+        cancel_path=None, project_dir=None,
+    ):
+        calls.append((
+            run_id, verification_goal, candidates, timeout_seconds,
+            cancel_path, project_dir,
+        ))
         return {
             "verifications": [
                 dict(_CANNED_OK, candidate_id=candidate["candidate_id"])
@@ -135,11 +147,13 @@ def test_verify_batch_contract_and_single_launch():
                 {"candidate_id": "b", "statement": _STMT + " Again.", "proof": _PROOF},
             ],
             "timeout_seconds": 17,
+            "project_dir": "C:/tmp/project",
         })
     finally:
         service.run_codex_batch_verification = original
     assert response.status_code == 200
     assert len(calls) == 1 and calls[0][1] == "Integer identities" and calls[0][3] == 17
+    assert calls[0][5] == "C:/tmp/project"
     assert [item["candidate_id"] for item in response.json()["verifications"]] == ["a", "b"]
 
 

@@ -268,60 +268,71 @@ function renderFactResearchMap(d) {
   $('#graph-stat').textContent = map.stat;
 }
 
-function renderRouteTheoremGroups(data, surface = 'fact') {
+function routeFactSkeleton(group) {
+  const facts = group.facts || [];
+  const byId = new Map(facts.map((fact) => [fact.fact_id, fact]));
+  const visible = facts.filter((fact) => fact.role !== 'support');
+  const visibleIds = new Set(visible.map((fact) => fact.fact_id));
+  const outgoing = new Map(facts.map((fact) => [fact.fact_id, []]));
+  (group.edges || []).forEach((edge) => {
+    if (byId.has(edge.source) && byId.has(edge.target)) outgoing.get(edge.source).push(edge.target);
+  });
+  const links = [];
+  const seenLinks = new Set();
+  visible.forEach((fact) => {
+    const pending = [...outgoing.get(fact.fact_id)];
+    const seen = new Set();
+    while (pending.length) {
+      const target = pending.pop();
+      if (seen.has(target)) continue;
+      seen.add(target);
+      if (visibleIds.has(target)) {
+        const key = `${fact.fact_id}:${target}`;
+        if (!seenLinks.has(key)) { links.push({source:fact.fact_id,target}); seenLinks.add(key); }
+      } else pending.push(...(outgoing.get(target) || []));
+    }
+  });
+  return {facts:visible, links, folded:facts.length - visible.length};
+}
+
+function renderRouteFactSkeleton(data, surface = 'fact') {
   const chart = surface === 'fact' ? graphChart : routeChart;
   const detailSelector = surface === 'fact' ? '#fact-detail' : '#research-detail';
   const statSelector = surface === 'fact' ? '#graph-stat' : '#route-stat';
-  const facts = data.fact_group.facts || [];
-  const byId = new Map(facts.map((fact) => [fact.fact_id, fact]));
-  const closing = facts.filter((fact) => fact.role === 'closing');
-  const closingIds = new Set(closing.map((fact) => fact.fact_id));
-  let roots = [...new Set((data.fact_group.edges || [])
-    .filter((edge) => closingIds.has(edge.target) && byId.has(edge.source))
-    .map((edge) => edge.source))].map((id) => byId.get(id));
-  if (!roots.length) roots = facts.filter((fact) => fact.role === 'direct' || fact.role === 'input');
-  if (!roots.length) roots = closing;
-  const compact = chart.getWidth() < 650;
-  const routeNode = {
-    id:`route-summary:${data.route.id}`, name:data.obligation.statement, title:data.obligation.statement,
-    kind:'route-summary', closingFactId:closing[0]?.fact_id, x:500, y:35, symbolSize:30,
-    itemStyle:{color:'#0f766e'},
-  };
-  const columns = Math.min(compact ? 2 : chart.getWidth() < 950 ? 3 : 5, Math.max(1, roots.length));
-  const nodes = [routeNode, ...roots.map((fact, index) => ({
-    id:`theorem-group:${fact.fact_id}`, name:fact.fact_id, title:readableFactTitle(fact),
-    kind:'theorem-group', rootFactId:fact.fact_id, factId:fact.fact_id,
-    x:((index % columns) + 1) * 1000 / (columns + 1), y:245 + Math.floor(index / columns) * 180,
-    symbolSize:22, itemStyle:{color:'#6366f1'},
-  }))];
-  const links = roots.map((fact) => ({source:routeNode.id,target:`theorem-group:${fact.fact_id}`}));
+  const skeleton = routeFactSkeleton(data.fact_group);
+  const positions = layerFactNodes(skeleton.facts, skeleton.links);
   chart.setOption({
     tooltip:stableTooltip((p) => p.dataType === 'node'
-      ? `<b>${htmlEsc(p.data.title)}</b><br>${p.data.kind === 'theorem-group' ? 'theorem group · click to open' : 'route conclusion'}` : ''),
-    series:[{type:'graph',layout:'none',roam:true,data:nodes,links,
-      label:{show:true,position:'bottom',distance:8,fontSize:compact?10:12,formatter:(p)=>shortLabel(p.data.title,p.data.kind === 'route-summary' ? (compact?30:42) : (compact?16:28))},
+      ? `<b>${htmlEsc(p.data.title)}</b><br>${htmlEsc(p.data.role)} · click to expand support` : ''),
+    series:[{type:'graph',layout:'none',roam:true,
+      data:skeleton.facts.map((fact) => ({id:fact.fact_id,name:fact.fact_id,title:readableFactTitle(fact),role:fact.role,kind:'route-fact',
+        ...positions.get(fact.fact_id),symbolSize:fact.role==='closing'?22:fact.role==='input'?15:18,
+        itemStyle:{color:fact.role==='closing'?'#16a34a':fact.role==='input'?'#d97706':'#6366f1'}})),links:skeleton.links,
+      label:{show:true,position:'bottom',distance:8,formatter:(p)=>shortLabel(p.data.title,24)},
       lineStyle:{color:'#aeb9c9',width:1.4,opacity:.82},edgeSymbol:['none','arrow'],edgeSymbolSize:[0,6],
       emphasis:{disabled:true},select:{disabled:true}}]
   }, true);
   chart.off('click');
   chart.on('click', async (p) => {
-    if (p.data.kind === 'theorem-group') await loadTheoremGroup(p.data.rootFactId, surface);
-    if (p.data.kind === 'route-summary' && p.data.closingFactId) await showResearchFact(p.data.closingFactId, detailSelector);
+    if (p.data.kind === 'route-fact') {
+      await loadFactNeighborhood(p.data.id, surface, p.data.role);
+      await showResearchFact(p.data.id, detailSelector);
+    }
   });
-  $(statSelector).textContent = `${roots.length} theorem groups · click a group to inspect its facts`;
+  $(statSelector).textContent = `${skeleton.facts.length} route facts · ${skeleton.folded} supporting facts folded`;
   const detail = $(detailSelector); detail.innerHTML = '';
   const card = el('div', 'route-summary-card');
-  card.appendChild(el('div', 'eyebrow', 'Route conclusion'));
-  card.appendChild(el('h2', 'fact-title', data.obligation.statement));
+  card.appendChild(el('div', 'eyebrow', 'Route'));
+  card.appendChild(el('h2', 'fact-title', data.route.method_title || data.route.id));
   const expected = el('div', 'entry-claim'); mdmath(expected, data.route.expected_result || ''); card.appendChild(expected);
-  card.appendChild(el('div', 'muted', `${roots.length} theorem groups · ${facts.length} indexed facts in the current route view`));
+  card.appendChild(el('div', 'muted', `${skeleton.facts.length} route facts · ${skeleton.folded} supporting facts folded · click a fact to expand`));
   detail.appendChild(card);
 }
 
-async function loadTheoremGroup(rootFactId, surface) {
+async function loadFactNeighborhood(rootFactId, surface, rootRole) {
   const data = await api(`/api/research/facts/${rootFactId}/neighborhood?direction=predecessors&depth=3&limit=300`);
   const group = {
-    facts:(data.nodes || []).map((fact) => ({...fact, role:fact.fact_id === rootFactId ? 'closing' : 'support', shared:false})),
+    facts:(data.nodes || []).map((fact) => ({...fact, role:fact.fact_id === rootFactId ? rootRole : 'support', shared:false})),
     edges:data.edges || [], unexpanded_count:data.truncated ? 1 : 0,
   };
   if (surface === 'fact') renderFactGraphGroup(group);
@@ -351,7 +362,7 @@ function renderFactGraphGroup(group) {
 
 async function selectFactGraphRoute(routeId) {
   const d = await api(`/api/research/routes/${routeId}?snapshot=${controlGeneration}`);
-  renderRouteTheoremGroups(d, 'fact');
+  renderRouteFactSkeleton(d, 'fact');
 }
 
 async function selectFactGraphObligation(obligationId) {
@@ -456,36 +467,33 @@ function governanceCard(target) {
 function researchHierarchy(d) {
   const nodes = [];
   const links = [];
-  const obligations = new Set();
   const targetId = `target:${d.active_target ? d.active_target.version : 'none'}`;
   nodes.push({ id:targetId, name:d.active_target ? d.active_target.version : 'No active target', kind:'target', symbolSize:26, itemStyle:{color:'#0f766e'} });
-  d.methods.forEach((method) => {
-    const methodId = `method:${method.method_key}`;
-    nodes.push({ id:methodId, name:method.method_title, kind:'method', symbolSize:21, itemStyle:{color:'#7c3aed'} });
-    links.push({ source:targetId, target:methodId });
-    method.routes.forEach((route) => {
+  const routesByObligation = new Map(d.obligations.map((obligation) => [obligation.id, []]));
+  d.methods.forEach((method) => method.routes.forEach((route) => {
+    if (!routesByObligation.has(route.obligation_id)) routesByObligation.set(route.obligation_id, []);
+    routesByObligation.get(route.obligation_id).push(route);
+  }));
+  const routeCount = [...routesByObligation.values()].reduce((count, routes) => count + routes.length, 0);
+  let routeIndex = 0;
+  routesByObligation.forEach((routes, obligationKey) => {
+    const obligationId = `obligation:${obligationKey}`;
+    const obligation = d.obligations.find((item) => item.id === obligationKey);
+    nodes.push({id:obligationId,name:obligationKey,title:obligation?.statement,kind:'obligation',obligationId:obligationKey,symbolSize:18,itemStyle:{color:'#d97706'}});
+    links.push({source:targetId,target:obligationId});
+    const children = routes.map((route) => {
       const routeId = `route:${route.id}`;
-      const obligationId = `obligation:${route.obligation_id}`;
-      nodes.push({ id:routeId, name:route.id, title:route.method_title, kind:'route', routeId:route.id, symbolSize:17, itemStyle:{color:'#2563eb'} });
-      links.push({ source:methodId, target:routeId }, { source:routeId, target:obligationId });
-      if (!obligations.has(route.obligation_id)) {
-        obligations.add(route.obligation_id);
-        nodes.push({ id:obligationId, name:route.obligation_id, kind:'obligation', obligationId:route.obligation_id, symbolSize:14, itemStyle:{color:'#d97706'} });
-      }
+      const routeNode = {id:routeId,name:route.id,title:route.method_title,kind:'route',routeId:route.id,symbolSize:17,itemStyle:{color:'#2563eb'}};
+      nodes.push(routeNode);
+      links.push({source:obligationId,target:routeId});
+      Object.assign(routeNode, {x:(++routeIndex) * 1000 / (routeCount + 1),y:350});
+      return routeNode;
+    });
+    Object.assign(nodes.find((node) => node.id === obligationId), {
+      x:children.length ? children.reduce((sum, child) => sum + child.x, 0) / children.length : 500, y:170,
     });
   });
-  const byId = new Map(nodes.map((node) => [node.id, node]));
-  const routeNodes = nodes.filter((node) => node.kind === 'route');
-  routeNodes.forEach((node, index) => Object.assign(node, { x:(index + 1) * 1000 / (routeNodes.length + 1), y:350 }));
-  nodes.filter((node) => node.kind === 'obligation').forEach((node) => {
-    const routeLink = links.find((link) => link.target === node.id && byId.get(link.source)?.kind === 'route');
-    Object.assign(node, { x:routeLink ? byId.get(routeLink.source).x : 500, y:550 });
-  });
-  nodes.filter((node) => node.kind === 'method').forEach((node) => {
-    const children = links.filter((link) => link.source === node.id && byId.get(link.target)?.kind === 'route').map((link) => byId.get(link.target));
-    Object.assign(node, { x:children.length ? children.reduce((sum, child) => sum + child.x, 0) / children.length : 500, y:170 });
-  });
-  Object.assign(byId.get(targetId), { x:500, y:20 });
+  Object.assign(nodes[0], {x:500,y:20});
   return { nodes, links, stat:`${d.methods.length} methods · ${d.methods.reduce((n,m)=>n+m.routes.length,0)} routes · ${d.obligations.length} obligations` };
 }
 
@@ -495,7 +503,7 @@ function researchHierarchyOption(map) {
       ? `<b>${htmlEsc(p.data.title || p.data.name)}</b><br>${htmlEsc(p.data.kind)}` : ''),
     series:[{type:'graph',layout:'none',roam:true,
       label:{show:true,position:'bottom',distance:8,formatter:(p)=>p.data.kind === 'target'
-        ? p.data.name : shortLabel(p.data.kind === 'method' ? p.data.name : p.data.id.split(':').slice(1).join(':'), p.data.kind === 'method' ? 14 : 18)},
+        ? p.data.name : shortLabel(p.data.id.split(':').slice(1).join(':'), p.data.kind === 'obligation' ? 14 : 18)},
       data:map.nodes,links:map.links,lineStyle:{color:'#aeb9c9',width:1.4,opacity:.82},
       edgeSymbol:['none','arrow'],edgeSymbolSize:[0,6],emphasis:{disabled:true},select:{disabled:true}}]
   };
@@ -547,7 +555,7 @@ async function showResearchFact(factId, detailSelector = '#research-detail') {
 async function selectRoute(routeId) {
   try {
     const d = await api(`/api/research/routes/${routeId}?snapshot=${controlGeneration}`);
-    renderRouteTheoremGroups(d, 'control');
+    renderRouteFactSkeleton(d, 'control');
     const detail = $('#research-detail');
     const route = el('div', 'entry'); route.appendChild(el('div', 'entry-author', d.route.method_title));
     route.appendChild(el('div', 'entry-claim', d.route.expected_result || ''));

@@ -174,4 +174,9 @@ def test_http_routes_expose_only_indexed_research_graph(tmp_path: Path):
         assert client.get("/api/channel/unknown").status_code == 404
         index = client.get("/")
         assert index.status_code == 200 and "Danus" in index.text
+        assert "Target → obligation → route → route facts" in index.text
+        script = (Path(__file__).parents[1] / "static" / "app.js").read_text(encoding="utf-8")
+        assert "function renderRouteFactSkeleton" in script
+        assert "links.push({source:targetId,target:obligationId})" in script
+        assert "theorem-group" not in script
         assert index.headers["cache-control"] == "no-store"

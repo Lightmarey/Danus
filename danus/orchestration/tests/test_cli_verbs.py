@@ -362,8 +362,15 @@ def test_worker_status_working_and_dead_labels(tmp: Path):
         import time
         wl.pid.write_text(str(os.getpid()))
         wl.status.write_text(json.dumps(
-            {"state": "running", "round": 2, "round_started_at": time.time()}))
-        assert cli.worker_status(wl)["label"] == "working"
+            {"state": "running", "round": 2, "last_round_at": 1.0,
+              "round_started_at": time.time(), "quota_remaining_percent": 52.0,
+              "quota_floor_percent": 25.0, "quota_checked_at": 123.0}))
+        fresh = cli.worker_status(wl)
+        assert fresh["label"] == "working" and fresh["age_s"] < 5
+        assert fresh["quota"] == {
+            "remaining_percent": 52.0, "floor_percent": 25.0,
+            "checked_at_epoch": 123.0,
+        }
         # not alive + unknown terminal state => 'dead'
         wl.pid.write_text("2000000000")
         wl.status.write_text(json.dumps({"state": "weird", "round": 3}))
@@ -429,6 +436,17 @@ def test_do_start_project_wide_stagger(tmp: Path):
         assert {r["worker"] for r in res} == {"high", "high2"}
         assert {r["result"] for r in res} == {"started"}
         assert {c.name for c in fake.calls} == {"high", "high2"}
+
+
+def test_global_pause_blocks_start_until_explicit_resume(tmp: Path):
+    with _project_env(tmp), _patch_spawn():
+        cli.do_new("P", roles="high:1")
+        _prepare_route("P", ("high",))
+        pause = runtime.pause_path(L.agents_root().parent)
+        pause.write_text("paused\n", encoding="utf-8")
+        assert "Danus is paused" in str(_expect_exit(cli.do_start, "P"))
+        assert cli.do_resume()["resumed"] is True
+        assert cli.do_start("P", stagger=0)[0]["result"] == "started"
 
 
 # --------------------------------------------------------------------------- #
@@ -692,6 +710,18 @@ def _run_main(argv):
     with redirect_stdout(buf):
         rc = cli.main(argv)
     return rc, buf.getvalue()
+
+
+def test_cli_stdout_is_utf8_when_reconfigurable():
+    class Probe:
+        encoding = "cp1252"
+
+        def reconfigure(self, *, encoding):
+            self.encoding = encoding
+
+    stream = Probe()
+    cli._utf8_stdout(stream)
+    assert stream.encoding == "utf-8"
 
 
 def test_main_new_then_list_text_and_json(tmp: Path):

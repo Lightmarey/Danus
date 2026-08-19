@@ -89,6 +89,12 @@ verified predecessors. `conditional` preserves an additional condition and
 cannot close an unconditional obligation; `literature_import` requires
 structured external references and an applicability audit.
 
+A closing candidate keeps its fact `claim` self-contained. If the approved
+obligation is a shorter research directive, `links.closure_statement` carries
+that directive verbatim. The verifier checks that the detailed theorem entails
+the binding, and control compares the binding to the obligation before closing;
+this avoids forcing non-self-contained directive text into the fact graph.
+
 Use `danus control taint <project> <fact_id> --reason "..."` to append a
 non-destructive review marker and stop routes that explicitly depend on the fact.
 The gateway's `fact_revoke` action also taints rather than deleting. Formal

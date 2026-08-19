@@ -19,6 +19,9 @@ from danus.core.factgraph import FactGraph, parse_frontmatter, statement_of
 from danus.core.global_memory import GlobalMemory
 
 
+_CONTEXT_STATEMENT_CHARS = 1000
+
+
 def _dump(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
 
@@ -294,6 +297,10 @@ class ResearchQuery:
             roles[fact_id].add("support")
         facts = []
         for fact in self._fact_rows(roles):
+            statement = str(fact.get("statement") or "")
+            if len(statement) > _CONTEXT_STATEMENT_CHARS:
+                fact["statement"] = statement[:_CONTEXT_STATEMENT_CHARS].rstrip() + "…"
+                fact["statement_truncated"] = True
             fact_roles = sorted(roles[fact["fact_id"]], key=lambda item: self.ROLE_PRIORITY.get(item, 9))
             fact.update(role=fact_roles[0], roles=fact_roles, shared=fact["fact_id"] in shared)
             facts.append(fact)
@@ -569,7 +576,14 @@ class ResearchQuery:
         with self.store._tx() as db:
             db.execute("INSERT INTO context_manifests VALUES (?,?,?,?,?,?)", (manifest["id"], worker, assignment["epoch"], snapshot, _dump(manifest), manifest["created_at_utc"]))
             assignment["context_cursor"] = snapshot
-            db.execute("UPDATE assignments SET payload=? WHERE worker=?", (_dump(assignment), worker))
+            changed = db.execute(
+                "UPDATE assignments SET payload=? WHERE worker=? AND epoch=?",
+                (_dump(assignment), worker, assignment["epoch"]),
+            ).rowcount
+            if not changed:
+                from danus.control import ControlError
+
+                raise ControlError("assignment changed during context assembly")
         return manifest
 
     def context_manifest(self, manifest_id: str) -> dict[str, Any]:

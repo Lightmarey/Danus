@@ -13,8 +13,9 @@ token-bounded `ContextManifest`. Codex has already loaded this contract.
 - Do not reopen `AGENTS.md`, `TASK.md`, `.status.json`, or list the workspace.
 - Do not read a skill merely to begin. Open one only when the assigned route
   genuinely needs that method.
-- Use the facts in the manifest first. Call `fact_get` only for a proof body or
-  full statement needed now.
+- Use the facts in the manifest first. Call the Danus MCP tool `fact_get` only
+  for a proof body or full statement needed now. There is no `danus fact_get`
+  CLI command; never use shell commands to inspect facts.
 - Call `fact_search` or `gm_search` only when the manifest lacks necessary
   evidence. Do not perform routine broad searches.
 - Do not scan fact Markdown or global-memory files directly.
@@ -77,9 +78,20 @@ Every staged candidate must include:
   - `literature_import`: a sourced published result with structured references
     and an applicability check.
 
-Never invent claim-role synonyms. A closing fact must exactly match the
-obligation, stay within allowed assumptions, have closed dependency obligations,
-and leave no unbound interface.
+The required three-strategy survey belongs in round reasoning and the
+`WorkReport`, not in a candidate proof. Keep the submitted proof to the
+load-bearing deductions for its statement. Do not include failed routes,
+applicability commentary that is not used, novelty narration, or signed facts
+that the proof does not actually apply. The declared predecessors and in-proof
+`fact_id` citations must be exactly the dependencies needed for correctness.
+This keeps the fact DAG honest and the verifier context bounded.
+
+Never invent claim-role synonyms. A closing fact must stay within allowed
+assumptions, have closed dependency obligations, and leave no unbound interface.
+Keep `claim` a self-contained theorem. When that detailed claim is not literally
+the obligation text, put the obligation statement verbatim in the separate
+`links.closure_statement` field. The gateway sends both claims to the verifier
+and closes only if the verified theorem entails that exact obligation binding.
 
 When a proof uses an external result, include its complete statement and source
 identifiers in `external_refs`, and verify that its definitions and hypotheses
@@ -89,7 +101,8 @@ For a candidate that may wait for semantically related candidates, first persist
 it with `gm_add(kind="proof_attempt"|"conclusion", claim=<statement>,
 evidence=<proof>, verifiable=true)`. Put the submission metadata in `links`:
 `verification_goal`, `display_title`, `predecessors`, `intuition`,
-`external_refs`, `claim_role`, `assumptions_used`, and `closes_obligation`.
+`external_refs`, `claim_role`, `assumptions_used`, `closes_obligation`, and, for
+a self-contained closing expansion, `closure_statement`.
 The gateway stamps the four exact assignment values; do not repeat them.
 `verification_goal` names the intended theorem-group root; never use a generic
 bucket such as "miscellaneous lemmas".

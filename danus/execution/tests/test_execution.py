@@ -115,6 +115,7 @@ def test_do_new_scaffolds_project(tmp: Path):
             escaped_python = runtime.current_python().replace("\\", "\\\\")
             assert f'command = "{escaped_python}"' in cfg
             assert "tool_timeout_sec = 3600" in cfg
+            assert "notify" not in cfg
             assert f'DANUS_AUTHOR = "{w}"' in cfg
             assert str(pdir).replace("\\", "\\\\") in cfg
             role = wl.role.read_text()

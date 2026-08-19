@@ -7,6 +7,8 @@
     danus start  <project>[/<worker>]
     danus status <project>[/<worker>] [--json]
     danus stop   <project>[/<worker>] [--force]
+    danus pause  [--force]
+    danus resume
 
 This module is the verbs/UX only. The worker outer loop, the on-disk layout, and
 the scaffolding they drive live in ``danus.execution`` (imported here as a
@@ -23,6 +25,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 import time
 from pathlib import Path
 from typing import Dict, List, Optional
@@ -32,10 +35,11 @@ from danus.execution.scaffold import atomic_write, do_new, migrate_project, spaw
 from danus import runtime
 from danus.control import ControlError, ControlStore, is_v2_project, require_v2_project
 from danus.control_service import ControlService
+from danus.core.global_memory import GlobalMemory
 
 __all__ = [
     "do_new", "do_assign", "do_start", "do_status", "worker_status",
-    "do_list", "do_stop", "do_finalize", "do_migrate", "do_target", "do_obligation",
+    "do_list", "do_stop", "do_pause", "do_resume", "do_finalize", "do_migrate", "do_target", "do_obligation",
     "do_route", "do_control_rebuild", "do_control_taint", "build_parser", "main",
 ]
 
@@ -43,6 +47,13 @@ __all__ = [
 # --------------------------------------------------------------------------- #
 # read helpers                                                                 #
 # --------------------------------------------------------------------------- #
+
+def _utf8_stdout(stream=None) -> None:
+    stream = stream or sys.stdout
+    try:
+        stream.reconfigure(encoding="utf-8")
+    except (AttributeError, OSError, ValueError):
+        pass
 
 def _read_pid(wl: L.WorkerLayout) -> Optional[int]:
     pf = wl.pid
@@ -205,6 +216,7 @@ def _recover_dead_worker(wl: L.WorkerLayout, *, reason: str) -> Dict:
     result = store.recover_worker_interruption(
         wl.name, wall_seconds=wall, reason=reason, round_was_active=round_was_active,
     )
+    result["recovered_verifying_sources"] = GlobalMemory(wl.project_dir).recover_verifying(wl.name)
     if not result.get("recovered"):
         assignment = store.assignment(wl.name)
         if assignment and assignment.get("status") in {"running", "auditing"}:
@@ -221,6 +233,8 @@ def _mark_worker_terminated(wl: L.WorkerLayout) -> None:
 
 
 def do_start(target: str, stagger: float = 0.2) -> List[Dict]:
+    if runtime.pause_path(L.agents_root().parent).exists():
+        raise SystemExit("Danus is paused; run `danus resume` before starting workers")
     dirs = L.target_worker_dirs(target)
     if not dirs:
         raise SystemExit(f"no workers for target {target!r}")
@@ -274,7 +288,13 @@ def worker_status(wl: L.WorkerLayout) -> Dict:
     st = _read_status(wl)
     state = st.get("state", "-")
     now = time.time()
-    last = st.get("last_round_at") or st.get("round_started_at") or st.get("updated_at")
+    timestamps = [
+        value for value in (
+            st.get("last_round_at"), st.get("round_started_at"), st.get("updated_at"),
+        )
+        if isinstance(value, (int, float))
+    ]
+    last = max(timestamps) if timestamps else None
     age = (now - last) if isinstance(last, (int, float)) else None
     assignment = None
     if is_v2_project(wl.project_dir):
@@ -299,6 +319,12 @@ def worker_status(wl: L.WorkerLayout) -> Dict:
         "round": st.get("round", 0), "age_s": round(age, 1) if age is not None else None,
         "last_fact_id": st.get("last_fact_id"), "label": label,
     }
+    if isinstance(st.get("quota_floor_percent"), (int, float)):
+        out["quota"] = {
+            "remaining_percent": st.get("quota_remaining_percent"),
+            "floor_percent": st["quota_floor_percent"],
+            "checked_at_epoch": st.get("quota_checked_at"),
+        }
     if is_v2_project(wl.project_dir):
         out["control"] = ({
             "status": assignment.get("status"),
@@ -401,6 +427,21 @@ def do_stop(target: str, force: bool = False) -> List[Dict]:
     if not dirs:
         raise SystemExit(f"no workers for target {target!r}")
     return [{"worker": d.name, "result": _stop_one(L.WorkerLayout(d), force)} for d in dirs]
+
+
+def do_pause(force: bool = False) -> Dict:
+    path = runtime.pause_path(L.agents_root().parent)
+    atomic_write(path, f"paused_at={time.time()}\n")
+    workers = [row for project in L.list_projects() for row in do_stop(project, force=force)]
+    from danus import services
+    return {"pause_file": str(path), "workers": workers, "services": services.down("all")}
+
+
+def do_resume() -> Dict:
+    path = runtime.pause_path(L.agents_root().parent)
+    was_paused = path.exists()
+    path.unlink(missing_ok=True)
+    return {"pause_file": str(path), "resumed": was_paused}
 
 
 # --------------------------------------------------------------------------- #
@@ -612,6 +653,9 @@ def build_parser() -> argparse.ArgumentParser:
     sp = sub.add_parser("stop", help="stop worker loop(s)")
     sp.add_argument("target", help="<project> or <project>/<worker>")
     sp.add_argument("--force", action="store_true", help="kill now (else interrupt and settle the active round)")
+    pause = sub.add_parser("pause", help="persistently stop all workers and services")
+    pause.add_argument("--force", action="store_true", help="kill workers now")
+    sub.add_parser("resume", help="clear the global pause; does not start anything")
     from danus import services
     services.configure_parser(sub)
     from danus import codex_backend
@@ -622,6 +666,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: Optional[List[str]] = None) -> int:
+    _utf8_stdout()
     runtime.configure_environment()
     args = build_parser().parse_args(argv)
     if args.cmd == "list":
@@ -694,6 +739,10 @@ def main(argv: Optional[List[str]] = None) -> int:
     elif args.cmd == "stop":
         for r in do_stop(args.target, force=args.force):
             print(f"{r['worker']}: {r['result']}")
+    elif args.cmd == "pause":
+        print(json.dumps(do_pause(force=args.force), ensure_ascii=False, indent=2))
+    elif args.cmd == "resume":
+        print(json.dumps(do_resume(), ensure_ascii=False, indent=2))
     elif args.cmd == "services":
         from danus import services
         return services.dispatch(args)

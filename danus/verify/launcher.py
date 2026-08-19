@@ -38,6 +38,23 @@ from danus.control import parse_codex_usage
 _HERE = Path(__file__).resolve().parent  # danus/verify/
 VERIFICATION_FILENAMES = ("verification.json", "verificationt.json")
 
+# The verifier may use the shell to read its contract/skills and to write the
+# result artifact, but signed facts must cross the bounded verifier MCP surface.
+# Inspect only command text (never command output, which can legitimately quote
+# the contract) and fail closed before a verdict reaches storage.
+_FORBIDDEN_FACT_READ_MARKERS = (
+    "danus.research",
+    "researchquery",
+    "danus/research.py",
+    "danus\\research.py",
+    "fact_graph/facts",
+    "fact_graph\\facts",
+    "fact_graph/fact_graph.db",
+    "fact_graph\\fact_graph.db",
+    "glossary.json",
+    "glossary_global.json",
+)
+
 
 # --------------------------------------------------------------------------- #
 # config resolution (env read at call time)                                   #
@@ -85,12 +102,16 @@ def _timeout(requested_seconds: Optional[int] = None) -> Optional[int]:
     return min(requested_seconds, configured) if configured else requested_seconds
 
 
-def _mcp_config_arg() -> str:
+def _mcp_config_arg(project_dir: Optional[str] = None) -> str:
     """Inject the danus gateway (role=verifier) into the codex agent via `-c`,
     independent of CODEX_HOME. Runs the current interpreter with ``-m
-    danus.gateway``); the verifier role exposes only search_arxiv_theorems."""
+    danus.gateway``); the verifier role exposes bounded read-only fact_get,
+    glossary_get, and search_arxiv_theorems."""
     py = json.dumps(runtime.current_python())
-    return f'mcp_servers.danus={{command={py},args=["-m","danus.gateway"],env={{DANUS_ROLE="verifier"}}}}'
+    env = 'DANUS_ROLE="verifier"'
+    if project_dir:
+        env += f",DANUS_PROJECT_DIR={json.dumps(str(Path(project_dir).resolve()))}"
+    return f'mcp_servers.danus={{command={py},args=["-m","danus.gateway"],env={{{env}}}}}'
 
 
 # --------------------------------------------------------------------------- #
@@ -134,6 +155,27 @@ def _verification_path(run_id: str) -> Optional[Path]:
     return None
 
 
+def verifier_protocol_violations(log_path: Path) -> List[str]:
+    """Return forbidden shell fact-read markers found in a Codex JSONL log."""
+    if not log_path.exists():
+        return []
+    found: set[str] = set()
+    for raw_line in log_path.read_text(encoding="utf-8", errors="replace").splitlines():
+        try:
+            event = json.loads(raw_line)
+        except (json.JSONDecodeError, TypeError):
+            continue
+        item = event.get("item") if isinstance(event, dict) else None
+        if not isinstance(item, dict) or item.get("type") != "command_execution":
+            continue
+        command = item.get("command")
+        if not isinstance(command, str):
+            continue
+        lowered = command.lower().replace("\\\\", "\\")
+        found.update(marker for marker in _FORBIDDEN_FACT_READ_MARKERS if marker in lowered)
+    return sorted(found)
+
+
 def load_verification_result(run_id: str) -> Optional[Dict[str, Any]]:
     """Load a completed verifier artifact, including measured token usage."""
     verification_path = _verification_path(run_id)
@@ -150,6 +192,15 @@ def load_verification_result(run_id: str) -> Optional[Dict[str, Any]]:
         raise HTTPException(
             status_code=500,
             detail=f"verification output at {verification_path} must be a JSON object",
+        )
+    violations = verifier_protocol_violations(_results_dir(run_id) / "log.md")
+    if violations:
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                "verifier protocol violation: internal facts were read outside "
+                f"MCP fact_get ({', '.join(violations)}); verdict discarded"
+            ),
         )
     payload.pop("cost_usd", None)
     payload["usage"] = parse_codex_usage(_results_dir(run_id) / "log.md")
@@ -181,24 +232,29 @@ def build_batch_prompt(
     )
 
 
-def build_codex_command(run_id: str, statement: str, proof: str) -> List[str]:
-    return _build_codex_command(build_prompt(run_id, statement, proof))
+def build_codex_command(
+    run_id: str, statement: str, proof: str, project_dir: Optional[str] = None,
+) -> List[str]:
+    return _build_codex_command(build_prompt(run_id, statement, proof), project_dir)
 
 
 def build_batch_codex_command(
     run_id: str, verification_goal: str, candidates: List[Dict[str, str]],
+    project_dir: Optional[str] = None,
 ) -> List[str]:
-    return _build_codex_command(build_batch_prompt(run_id, verification_goal, candidates))
+    return _build_codex_command(
+        build_batch_prompt(run_id, verification_goal, candidates), project_dir,
+    )
 
 
-def _build_codex_command(prompt: str) -> List[str]:
+def _build_codex_command(prompt: str, project_dir: Optional[str] = None) -> List[str]:
     return codex.exec_cmd(
         codex.resolve_bin(), _model(), _effort(),
         "-C", str(_agent_home()),
         # on an install without .git (tarball download), codex's
         # trusted-directory check refuses to run (exit 1 → /verify HTTP 500)
         "--skip-git-repo-check",
-        "-c", _mcp_config_arg(),
+        "-c", _mcp_config_arg(project_dir),
         "--dangerously-bypass-approvals-and-sandbox",
         "--json",
         prompt,
@@ -207,14 +263,14 @@ def _build_codex_command(prompt: str) -> List[str]:
 
 def run_codex_verification(
     run_id: str, statement: str, proof: str, timeout_seconds: Optional[int] = None,
-    cancel_path: Optional[str] = None,
+    cancel_path: Optional[str] = None, project_dir: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Spawn the cold-start codex verifier; read back + return the verification
     JSON. Raises HTTPException 504 (timeout) / 500 (nonzero exit, no output, or
     bad/non-dict JSON) — the callers translate these into the fact_submit
     verify-error path."""
     return _run_codex(
-        run_id, build_codex_command(run_id, statement, proof),
+        run_id, build_codex_command(run_id, statement, proof, project_dir),
         timeout_seconds=timeout_seconds, cancel_path=cancel_path,
     )
 
@@ -222,10 +278,13 @@ def run_codex_verification(
 def run_codex_batch_verification(
     run_id: str, verification_goal: str, candidates: List[Dict[str, str]],
     timeout_seconds: Optional[int] = None, cancel_path: Optional[str] = None,
+    project_dir: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Verify several independent candidates in one cold Codex process."""
     return _run_codex(
-        run_id, build_batch_codex_command(run_id, verification_goal, candidates),
+        run_id, build_batch_codex_command(
+            run_id, verification_goal, candidates, project_dir,
+        ),
         timeout_seconds=timeout_seconds, cancel_path=cancel_path,
     )
 
@@ -234,6 +293,7 @@ def _run_codex(
     run_id: str, cmd: List[str], timeout_seconds: Optional[int] = None,
     cancel_path: Optional[str] = None,
 ) -> Dict[str, Any]:
+    codex.require_call_admission()
     results_dir = _results_dir(run_id)
     results_dir.mkdir(parents=True, exist_ok=True)
     log_path = results_dir / "log.md"

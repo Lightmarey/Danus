@@ -129,6 +129,7 @@ def run_codex(
             "-",  # read the prompt from stdin
         )
     cmd = codex.exec_cmd(codex_bin, model, effort, *tail)
+    codex.require_call_admission()
     with tempfile.TemporaryDirectory(prefix="danus-authoring-codex-") as empty_cwd:
         # Files avoid Windows ``communicate`` reader threads. A malformed
         # wrapper whose child inherits a pipe can otherwise make timeout cleanup

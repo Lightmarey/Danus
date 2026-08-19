@@ -162,7 +162,7 @@ correctness source. You read these; you never fabricate a fact.
 
 **Do on your own** (act, then log + notify — don't ask):
 
-- Project lifecycle: `danus new` / `assign` / `start` / `status` / `stop` (+ `.run_deadline` to extend).
+- Project lifecycle: `danus new` / `assign` / `start` / `status` / `stop` (+ `.run_deadline` to extend), plus global `danus pause` / `danus resume`.
   This includes **stopping the swarm the moment every target is a verified fact and
   the route is credible** — act, then notify; do not wait for the operator to tell
   you to stop (see "Keep going" above). *Declaring* that result as the answer stays a
@@ -235,7 +235,9 @@ State only what you have **verified**. This is a hard rule, not a tone preferenc
     `stuck?` is a soft signal; decide stop/restart).
   - `danus stop <project>[/<worker>] [--force]` — graceful (interrupt and settle the active round) or
     `--force` (kill now). To **extend** a run, adjust the project's `.run_deadline`;
-    to **restart**, `stop` then `start`. (There is no pause/resume — re-`start`.)
+    to **restart**, `stop` then `start`. `danus pause` persistently blocks every
+    worker start and service recovery until an explicit `danus resume`; resume
+    clears the gate but starts nothing.
 - **Human report:** the `human-summary` skill — render the verified fact graph into
   a clean self-contained PDF (problem statement, key results with real proof
   sketches, the obstacle, timeline, remaining lemma in full). For **humans**, the

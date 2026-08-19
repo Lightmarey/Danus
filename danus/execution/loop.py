@@ -14,6 +14,8 @@ Config:
 Env (all optional; tests inject these):
   DANUS_CODEX_BIN            codex binary (default "codex")
   DANUS_ROUND_BEAT           seconds to sleep between rounds (default 5)
+  DANUS_CODEX_MIN_REMAINING_PERCENT
+                             ChatGPT quota floor checked before each new round
 """
 
 from __future__ import annotations
@@ -24,6 +26,7 @@ import re
 import signal
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 from typing import Optional
@@ -35,6 +38,7 @@ from danus.control import (
     ControlError, ControlStore, parse_codex_usage, parse_work_report,
     require_v2_project, work_report_valid,
 )
+from danus.core.global_memory import GlobalMemory
 from danus.research import ResearchQuery
 
 _FACT_ID_RE = re.compile(r'"?fact_id"?\s*[:=]\s*"?([0-9a-f]{16})"?')
@@ -185,6 +189,23 @@ def _parse_last_fact_id(log_path: Path) -> Optional[str]:
     return ids[-1] if ids else None
 
 
+def _round_output_paths(wl: L.WorkerLayout, round_no: int) -> tuple[Path, Path]:
+    """Choose round output paths without overwriting an earlier attempt."""
+    stem = f"round_{round_no}"
+    log_path = wl.logs / f"{stem}.jsonl"
+    report_path = wl.logs / f"{stem}_report.json"
+    if not log_path.exists() and not report_path.exists():
+        return log_path, report_path
+    attempt = 2
+    while True:
+        attempt_stem = f"{stem}_attempt_{attempt}"
+        log_path = wl.logs / f"{attempt_stem}.jsonl"
+        report_path = wl.logs / f"{attempt_stem}_report.json"
+        if not log_path.exists() and not report_path.exists():
+            return log_path, report_path
+        attempt += 1
+
+
 # --- one round ------------------------------------------------------------- #
 
 class _Child:
@@ -203,6 +224,10 @@ def run_round(wl: L.WorkerLayout, role: dict, prompt: str, log_path: Path,
     report_path.unlink(missing_ok=True)
     structured = [
         "--json",
+        # Command-line config has higher precedence than app-managed/user config.
+        # Background workers must not forward large turn payloads to desktop
+        # notification hooks (Windows CreateProcess is limited to ~32K chars).
+        "--config", "notify=[]",
         "--config", scaffold.worker_gateway_config_arg(wl, reservation_id),
         "--output-schema", str(output_schema),
         "--output-last-message", str(report_path),
@@ -215,23 +240,34 @@ def run_round(wl: L.WorkerLayout, role: dict, prompt: str, log_path: Path,
         "--skip-git-repo-check",
         "--dangerously-bypass-approvals-and-sandbox",
         *structured,
-        prompt,
+        "-",
     )
     timed_out = False
-    with open(log_path, "w", encoding="utf-8") as logf:
+    with tempfile.TemporaryFile(mode="w+", encoding="utf-8") as promptf, \
+            open(log_path, "w", encoding="utf-8") as logf:
+        promptf.write(prompt)
+        promptf.seek(0)
         try:
             child_env = codex.subprocess_env(codex_bin)
             if reservation_id:
                 child_env["DANUS_CALL_RESERVATION_ID"] = reservation_id
             _Child.proc = runtime.spawn_process(
                 cmd, stdout=logf, stderr=subprocess.STDOUT,
-                stdin=subprocess.DEVNULL, cwd=str(wdir),
+                stdin=promptf, cwd=str(wdir),
                 env=child_env,
                 new_process_group=True,
             )
-        except FileNotFoundError:
-            logf.write(f"[worker_loop] codex binary not found: {cmd[0]}\n")
-            return 127
+        except FileNotFoundError as exc:
+            if not Path(cmd[0]).is_file():
+                logf.write(f"[worker_loop] codex binary not found: {cmd[0]}\n")
+                return 127
+            logf.write(
+                "[worker_loop] process launch FileNotFoundError despite existing "
+                f"codex binary: executable={cmd[0]!r} filename={exc.filename!r} "
+                f"errno={exc.errno!r} winerror={getattr(exc, 'winerror', None)!r} "
+                f"detail={exc}\n"
+            )
+            return 126
         try:
             deadline = time.monotonic() + hard_timeout if hard_timeout > 0 else None
             while True:
@@ -298,6 +334,9 @@ def _run_loop(wl: L.WorkerLayout, role: dict, control: ControlStore, beat: float
     """Run finite, controller-scored exploration rounds for one assignment."""
     worker = wl.name
     while True:
+        if runtime.pause_path(wl.project_dir.parent.parent).exists():
+            write_status(wl, state="paused", control_reason="global pause")
+            return 0
         if wl.stop.exists():
             wl.stop.unlink(missing_ok=True)
             write_status(wl, state="stopped")
@@ -305,6 +344,23 @@ def _run_loop(wl: L.WorkerLayout, role: dict, control: ControlStore, beat: float
         if _deadline_passed(wl.project_dir):
             write_status(wl, state="deadline")
             return 0
+        try:
+            quota = codex.require_call_admission()
+        except codex.QuotaGuardBlocked as exc:
+            write_status(
+                wl, state="quota", quota_remaining_percent=exc.remaining_percent,
+                quota_floor_percent=exc.floor_percent, quota_checked_at=time.time(),
+            )
+            return 0
+        except (OSError, RuntimeError, TimeoutError, ValueError) as exc:
+            write_status(wl, state="quota_unavailable", error=str(exc))
+            return 0
+        if quota:
+            quota_remaining, quota_floor = quota
+            write_status(
+                wl, quota_remaining_percent=quota_remaining,
+                quota_floor_percent=quota_floor, quota_checked_at=time.time(),
+            )
         probe_claimed = False
         raw_assignment = control.assignment(worker)
         if raw_assignment and raw_assignment.get("status") == "waiting_retry":
@@ -333,23 +389,43 @@ def _run_loop(wl: L.WorkerLayout, role: dict, control: ControlStore, beat: float
 
         audit = bool(assignment.get("audit_required"))
         round_no = int(assignment["rounds_used"]) + 1
-        manifest = ResearchQuery(wl.project_dir).build_context_manifest(worker)
+        while True:
+            try:
+                manifest = ResearchQuery(wl.project_dir).build_context_manifest(worker)
+                break
+            except ValueError as exc:
+                message = str(exc)
+                if not (
+                    message.startswith("snapshot generation ")
+                    and " is not current generation " in message
+                ):
+                    raise
+                # A concurrent verifier or worker committed between reading the
+                # generation and assembling this manifest. Rebuild from the new
+                # current generation instead of killing an otherwise healthy loop.
+                time.sleep(0.01)
+            except ControlError as exc:
+                write_status(wl, state="waiting", control_reason=str(exc))
+                return 0
         prompt = kickoff(
             wl.project, worker, assignment, audit=audit,
             context=ResearchQuery.format_context_manifest(manifest),
         )
-        log_path = wl.logs / f"round_{round_no}.jsonl"
-        report_path = wl.logs / f"round_{round_no}_report.json"
+        log_path, report_path = _round_output_paths(wl, round_no)
+        refresh_worker_assets(wl)
         write_status(
             wl, state="auditing" if audit else "running", round=round_no,
             round_started_at=time.time(), target_version=assignment["target_version"],
             obligation_id=assignment["obligation_id"], route_id=assignment["route_id"],
             context_manifest_id=manifest["id"], context_snapshot=manifest["snapshot_generation"],
             last_rc=None, usage_status=None, control_reason=None, error=None,
+            failure_class=None, infra_failure_count=0, retry_after_seconds=None,
+            gain=None, decision=None,
         )
         try:
             reservation = control.reserve_call(
                 component="worker_round", max_wall_seconds=float(assignment["round_timeout_seconds"]),
+                require_current_assignment=True,
                 worker=worker, assignment_epoch=assignment["epoch"],
                 target_version=assignment["target_version"], obligation_id=assignment["obligation_id"],
                 route_id=assignment["route_id"],
@@ -380,6 +456,7 @@ def _run_loop(wl: L.WorkerLayout, role: dict, control: ControlStore, beat: float
                 worker, wall_seconds=wall, usage=usage,
                 reservation_id=reservation["id"],
             )
+            GlobalMemory(wl.project_dir).recover_verifying(worker)
             wl.stop.unlink(missing_ok=True)
             write_status(
                 wl, state="stopped", last_rc=rc,
@@ -399,20 +476,26 @@ def _run_loop(wl: L.WorkerLayout, role: dict, control: ControlStore, beat: float
                 infra_failure_count=failure["assignment"]["infra_failure_count"],
                 retry_after_seconds=failure["wait_seconds"],
             )
+            if failure.get("assignment_changed"):
+                write_status(wl, state="waiting", control_reason="assignment invalidated while the round was running")
+                return 0
             if failure["blocked"]:
                 return 127 if rc == 127 else 1
             continue
-        control.record_worker_call_success(worker)
+        control.record_worker_call_success(worker, assignment_epoch=assignment["epoch"])
         result = control.evaluate_work_report(
             worker, report, wall_seconds=wall,
             usage=parse_codex_usage(log_path),
             reservation_id=reservation["id"],
         )
         current = result["assignment"]
+        last_fact_id = result.get("last_fact_id") or _parse_last_fact_id(log_path)
         write_status(
             wl, state=current["status"], round=current["rounds_used"],
             last_round_at=time.time(), last_rc=rc, gain=result["gain"],
-            decision=result["decision"], last_fact_id=_parse_last_fact_id(log_path),
+            decision=result["decision"],
+            failure_class=None, infra_failure_count=0, retry_after_seconds=None,
+            **({"last_fact_id": last_fact_id} if last_fact_id else {}),
         )
         if result["decision"] in {"stalled", "budget_exhausted"}:
             fallback = None if result.get("project_budget_blocked") else control.activate_fallback(worker)
@@ -445,8 +528,6 @@ def main(worker_dir: str) -> int:
         return 2
     role = _read_role(wl)
     control = ControlStore(project_dir)
-    refresh_worker_assets(wl)
-
     # Refresh the worker gateway command from the shared runtime resolver on every
     # start, so a moved/rebuilt or explicitly configured interpreter is picked up.
     scaffold.write_codex_config(wl)
@@ -475,6 +556,7 @@ def main(worker_dir: str) -> int:
                 wl.name, wall_seconds=wall, reason=f"signal_{signum}",
                 round_was_active=round_was_active,
             )
+            GlobalMemory(project_dir).recover_verifying(wl.name)
         except Exception as exc:
             write_status(wl, state="terminated", error=f"interruption recovery failed: {exc}")
             _cleanup_pid(wl)
@@ -489,7 +571,7 @@ def main(worker_dir: str) -> int:
     write_status(
         wl, state="running", round=0, started_at=time.time(),
         last_rc=None, last_fact_id=None, usage_status=None, control_reason=None,
-        error=None,
+        error=None, gain=None, decision=None,
     )
     try:
         return _run_loop(wl, role, control, beat)

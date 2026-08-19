@@ -91,6 +91,19 @@ class GlobalMemory:
             {"timestamp_utc": utc_now(), "id": entry_id, "status": status, "fact_id": fact_id},
         )
 
+    def recover_verifying(self, author: str) -> List[str]:
+        """Return an interrupted worker's in-flight entries to ``unverified``."""
+        latest = self._latest_status()
+        recovered: List[str] = []
+        for kind in GLOBAL_KINDS:
+            for entry in read_jsonl(self._path(kind)):
+                entry_id = entry.get("id")
+                status = latest.get(entry_id, entry).get("status")
+                if entry_id and entry.get("author") == author and status == "verifying":
+                    self.set_status(entry_id, "unverified")
+                    recovered.append(entry_id)
+        return recovered
+
     # ------------------------------------------------------------------- read
     def _latest_status(self) -> Dict[str, Dict[str, Any]]:
         latest: Dict[str, Dict[str, Any]] = {}

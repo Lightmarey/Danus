@@ -23,10 +23,15 @@ service passes ``DANUS_VERIFY_MODEL``; the renderers pass
 
 from __future__ import annotations
 
-import os
 import hashlib
+import json
+import os
+import queue
 import re
 import shutil
+import subprocess
+import threading
+import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -36,6 +41,16 @@ _REPO_ROOT = Path(__file__).resolve().parents[1]
 
 DEFAULT_MODEL = "gpt-5.5"
 DEFAULT_EFFORT = "xhigh"
+
+
+class QuotaGuardBlocked(RuntimeError):
+    def __init__(self, remaining_percent: float, floor_percent: float):
+        self.remaining_percent = remaining_percent
+        self.floor_percent = floor_percent
+        super().__init__(
+            f"Codex quota guard blocked a new call: {remaining_percent:g}% "
+            f"remaining <= {floor_percent:g}% floor"
+        )
 
 _FAILURE_PATTERNS = (
     ("quota_exhausted", False, ("insufficient_quota", "quota exceeded", "credit balance", "billing hard limit", "usage limit reached")),
@@ -174,3 +189,91 @@ def exec_cmd(codex_bin: str, model: str, effort: str, *tail: str) -> List[str]:
         "--config", f'model_reasoning_effort="{effort}"',
         *tail,
     ]
+
+
+def _remaining_percent(result: Dict[str, Any], limit_id: str) -> float:
+    buckets = result.get("rateLimitsByLimitId") or {}
+    bucket = buckets.get(limit_id) or result.get("rateLimits") or {}
+    used = [
+        window["usedPercent"]
+        for name in ("primary", "secondary")
+        if isinstance((window := bucket.get(name)), dict)
+        and isinstance(window.get("usedPercent"), (int, float))
+    ]
+    if not used:
+        raise RuntimeError(f"Codex rate-limit bucket {limit_id!r} has no usage window")
+    return max(0.0, 100.0 - max(float(value) for value in used))
+
+
+def rate_limit_remaining_percent(limit_id: str = "codex", timeout: float = 10.0) -> float:
+    """Read ChatGPT Codex quota through the local app-server JSON-RPC API."""
+    codex_bin = resolve_bin()
+    proc = subprocess.Popen(
+        [codex_bin, "app-server", "--stdio"],
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+        text=True, encoding="utf-8", env=subprocess_env(codex_bin),
+    )
+    messages: queue.Queue = queue.Queue()
+
+    def _read() -> None:
+        assert proc.stdout is not None
+        for line in proc.stdout:
+            try:
+                messages.put(json.loads(line))
+            except json.JSONDecodeError:
+                continue
+
+    threading.Thread(target=_read, daemon=True).start()
+    deadline = time.monotonic() + timeout
+
+    def _send(message: Dict[str, Any]) -> None:
+        if proc.stdin is None:
+            raise RuntimeError("Codex app-server stdin is unavailable")
+        proc.stdin.write(json.dumps(message) + "\n")
+        proc.stdin.flush()
+
+    def _response(request_id: int) -> Dict[str, Any]:
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError("Codex rate-limit query timed out")
+            try:
+                message = messages.get(timeout=remaining)
+            except queue.Empty as exc:
+                raise TimeoutError("Codex rate-limit query timed out") from exc
+            if message.get("id") == request_id:
+                if "error" in message:
+                    raise RuntimeError(f"Codex app-server error: {message['error']}")
+                return message.get("result") or {}
+
+    try:
+        _send({
+            "method": "initialize", "id": 1,
+            "params": {"clientInfo": {
+                "name": "danus_quota_guard", "title": "Danus Quota Guard",
+                "version": "0.1.0",
+            }},
+        })
+        _response(1)
+        _send({"method": "initialized", "params": {}})
+        _send({"method": "account/rateLimits/read", "id": 2})
+        return _remaining_percent(_response(2), limit_id)
+    finally:
+        if proc.stdin is not None:
+            proc.stdin.close()
+        try:
+            proc.wait(timeout=1)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait(timeout=5)
+
+
+def require_call_admission() -> Optional[tuple[float, float]]:
+    """Fail closed before a new ChatGPT-backed Codex call when the guard is enabled."""
+    floor = float(os.environ.get("DANUS_CODEX_MIN_REMAINING_PERCENT", "0"))
+    if floor <= 0 or os.environ.get("CODEX_BACKEND") != "chatgpt":
+        return None
+    remaining = rate_limit_remaining_percent()
+    if remaining <= floor:
+        raise QuotaGuardBlocked(remaining, floor)
+    return remaining, floor

@@ -90,7 +90,10 @@ def _prepare_v2(path: str | Path, worker: str | None = None) -> dict:
     }
 
 
-def _stage(binding, statement, proof, title, goal="Shared theorem goal"):
+def _stage(
+    binding, statement, proof, title, goal="Shared theorem goal", *,
+    closes_obligation=False, closure_statement=None,
+):
     links = {
         "verification_goal": goal,
         **{key: binding[key] for key in (
@@ -98,8 +101,10 @@ def _stage(binding, statement, proof, title, goal="Shared theorem goal"):
         )},
         "display_title": title, "predecessors": [], "intuition": "",
         "external_refs": [], "claim_role": "unconditional",
-        "assumptions_used": [], "closes_obligation": False,
+        "assumptions_used": [], "closes_obligation": closes_obligation,
     }
+    if closure_statement is not None:
+        links["closure_statement"] = closure_statement
     return {"source_id": server.gm_add(
         "proof_attempt", claim=statement, evidence=proof,
         verifiable=True, links=links,
@@ -111,11 +116,13 @@ def test_role_table():
     assert "fact_submit" not in tools_for("main")
     assert "fact_submit_batch" not in tools_for("main")
     assert "fact_revoke" in tools_for("main")
-    # verifier is read-only: literature lookup ONLY
-    assert tools_for("verifier") == ["search_arxiv_theorems"]
+    # verifier is read-only: bounded fact/glossary reads plus literature lookup
+    assert tools_for("verifier") == ["fact_get", "glossary_get", "search_arxiv_theorems"]
     # worker is the only role that can submit a fact
     assert "fact_submit" not in tools_for("worker")
     assert "fact_submit_batch" in tools_for("worker")
+    assert "route_context" not in tools_for("worker")
+    assert "obligation_context" not in tools_for("worker")
     # all three get the read view + literature grounding
     for r in ("worker", "main", "verifier"):
         assert "search_arxiv_theorems" in tools_for(r)
@@ -258,6 +265,81 @@ def test_fact_submit_batch_flushes_single_durable_source_without_waiting():
         assert result["accepted"] is True and result["results"][0]["fact_id"]
         source = GlobalMemory(Path(d)).read("proof_attempt")[-1]
         assert source["status"] == "verified" and source["fact_id"] == result["results"][0]["fact_id"]
+
+
+def test_batch_closure_separates_self_contained_fact_from_exact_obligation_binding():
+    with tempfile.TemporaryDirectory() as d, _env(
+        DANUS_PROJECT_DIR=d, DANUS_AGENTS_ROOT=None, DANUS_AUTHOR="worker_high",
+        DANUS_VERIFY_URL="http://mock", DANUS_PROBLEM_ID="P",
+    ):
+        binding = _prepare_v2(d, "worker_high")
+        store = ControlStore(Path(d))
+        obligation_statement = store.obligation(binding["obligation_id"])["statement"]
+        detailed_statement = (
+            "Let n be a positive integer and define S to be the assertion n=n. "
+            "Then S holds."
+        )
+        calls = []
+        original = server._verify
+
+        def fake(statement, proof):
+            calls.append((statement, proof))
+            return {"verdict": "correct", "verification_report": {"summary": "ok"}}
+
+        server._verify = fake
+        try:
+            first = server.fact_submit_batch(
+                candidates=[_stage(
+                    binding, detailed_statement, "First complete proof.",
+                    "Detailed target theorem",
+                )],
+                verification_goal="Shared theorem goal",
+            )
+            closing = server.fact_submit_batch(
+                candidates=[_stage(
+                    binding, detailed_statement, "Second complete proof.",
+                    "Detailed closing theorem", closes_obligation=True,
+                    closure_statement=obligation_statement,
+                )],
+                verification_goal="Shared theorem goal",
+            )
+        finally:
+            server._verify = original
+
+        assert first["accepted"] is True
+        assert closing["accepted"] is True
+        assert closing["results"][0]["closure"]["closed"] is True
+        assert store.obligation_state(binding["obligation_id"]) == "closed"
+        assert len(calls) == 2  # a separate closure binding is never trusted via reuse
+        assert obligation_statement in calls[-1][1]
+        fact = FactGraph(Path(d)).get_raw(closing["results"][0]["fact_id"])
+        assert fact is not None and detailed_statement in fact
+
+
+def test_batch_closure_rejects_wrong_binding_before_verifier():
+    with tempfile.TemporaryDirectory() as d, _env(
+        DANUS_PROJECT_DIR=d, DANUS_AGENTS_ROOT=None, DANUS_AUTHOR="worker_high",
+        DANUS_VERIFY_URL="http://mock", DANUS_PROBLEM_ID="P",
+    ):
+        binding = _prepare_v2(d, "worker_high")
+        original = server._verify
+        server._verify = lambda *_args: (_ for _ in ()).throw(
+            AssertionError("a mismatched closure binding must not spend verifier tokens")
+        )
+        try:
+            result = server.fact_submit_batch(
+                candidates=[_stage(
+                    binding, "A detailed self-contained theorem.", "Proof.",
+                    "Wrong closure binding", closes_obligation=True,
+                    closure_statement="A different obligation.",
+                )],
+                verification_goal="Shared theorem goal",
+            )
+        finally:
+            server._verify = original
+        assert result["verdict"] == "control_error"
+        assert "does not exactly match" in result["error"]
+        assert FactGraph(Path(d)).list() == []
 
 
 def test_fact_submit_batch_rejects_duplicate_statements_before_verifier():
@@ -473,6 +555,60 @@ def test_role_env_default_and_build_app():
         assert server._role() == "verifier"  # unset falls back read-only (fail-closed)
 
 
+def test_verifier_fact_get_returns_compact_signed_statement():
+    full = {
+        "fact_id": "abc", "title": "T", "statement": "S", "status": "active",
+        "intuition": "large", "author": "worker", "problem_id": "P",
+        "predecessors": ["p"], "successors": ["q"], "scopes": [{"route_id": "r"}],
+    }
+    original_query = server.ResearchQuery
+    original_project = server._project
+
+    class FakeQuery:
+        def __init__(self, project):
+            pass
+
+        def fact_get(self, fact_id, *, include_proof=False):
+            assert fact_id == "abc"
+            return dict(full, **({"proof": "P"} if include_proof else {}))
+
+    server.ResearchQuery = FakeQuery
+    server._project = lambda project=None: Path("ignored")
+    try:
+        with _env(DANUS_ROLE="verifier"):
+            assert server.fact_get("abc") == {
+                "fact_id": "abc", "title": "T", "statement": "S", "status": "active",
+            }
+            assert server.fact_get("abc", include_proof=True)["proof"] == "P"
+        with _env(DANUS_ROLE="worker"):
+            assert server.fact_get("abc")["predecessors"] == ["p"]
+    finally:
+        server.ResearchQuery = original_query
+        server._project = original_project
+
+
+def test_glossary_get_returns_one_exact_definition():
+    with tempfile.TemporaryDirectory() as d, _env(
+        DANUS_PROJECT_DIR=d, DANUS_AGENTS_ROOT=None, DANUS_ROLE="verifier",
+    ):
+        _prepare_v2(d)
+        graph = FactGraph(Path(d))
+        graph.glossary_path.parent.mkdir(parents=True, exist_ok=True)
+        graph.glossary_path.write_text(
+            json.dumps({"beta-critical L2 slab growth": "exact project bound"}),
+            encoding="utf-8",
+        )
+        assert server.glossary_get("beta-critical L2 slab growth") == {
+            "term": "beta-critical L2 slab growth",
+            "definition": "exact project bound",
+            "source": "project",
+        }
+        assert server.glossary_get("R")["source"] == "global"
+        assert server.glossary_get("definitely missing") == {
+            "term": "definitely missing", "definition": None, "source": None,
+        }
+
+
 def test_project_by_name_without_agents_root_uses_default():
     # without an override, project names resolve under cwd/runtime/projects
     with _env(DANUS_AGENTS_ROOT=None, DANUS_PROJECT_DIR="/tmp/whatever"):
@@ -524,6 +660,7 @@ def test_verify_http_roundtrip_and_errors():
         assert '"statement": "S(n)=n^2"' in captured["body"]
         assert '"timeout_seconds": 5' in captured["body"]
         body = json.loads(captured["body"])
+        assert body["project_dir"] == str(Path("C:/tmp/project").resolve())
         assert body["cancel_path"] == str(Path("C:/tmp/project") / "workers" / "high" / ".stop")
         assert captured["ctype"] == "application/json"
         # a garbage timeout falls back to the default (no crash)

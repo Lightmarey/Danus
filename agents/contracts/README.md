@@ -8,7 +8,7 @@ the binding operating protocol, distinct from the on-demand skills under
 | --- | --- | --- |
 | `main_agent.md` | Codex main agent | reads global memory + fact graph; writes `master_guidance` / `elaboration` (`gm_add`); `fact_revoke`; high-autonomy orchestration. NO `fact_submit`. |
 | `worker.md` | controlled worker | compact assignment-bound contract; uses the supplied ContextManifest and expands facts only on demand. |
-| `verifier.md` | codex verifier (verify service) | judges `{statement, proof}` → strict verdict; called by `fact_submit`; read-only (only `search_arxiv_theorems`); writes its verdict JSON directly to results/{run_id}/verification.json. |
+| `verifier.md` | codex verifier (verify service) | judges `{statement, proof}` → strict verdict; called by `fact_submit`; bounded read-only fact/glossary/literature tools; writes its verdict JSON directly to results/{run_id}/verification.json. |
 
 Codex auto-loads the condensed repo guidance from root `AGENTS.md`;
 `main_agent.md` is the full contract and single source
@@ -30,7 +30,8 @@ Consistent across all three tiers:
 ## Who binds to these files
 
 - `danus/gateway` — the exact MCP tool set + role gating (`main` has no
-  `fact_submit`; `worker` adds it; `verifier` is read-only (`search_arxiv_theorems` only)).
+  `fact_submit`; `worker` adds it; `verifier` has bounded read-only
+  `fact_get`, `glossary_get`, and `search_arxiv_theorems`).
 - `danus/core` — the three-memory data model, the global-memory `kind`s, `fact_id`,
   the global glossary. The contracts are the human-readable statement of that model.
 - `danus/verify` — `verifier.md` **is** the verify service's system prompt; its

@@ -120,9 +120,10 @@ def test_run_round_injects_the_worker_gateway_config(tmp: Path):
     wl = _mk_worker(tmp)
     argv = wl.dir / "argv.json"
     reservation = wl.dir / "reservation.txt"
+    prompt_file = wl.dir / "prompt.txt"
     fake = _write_fake_codex(
         tmp,
-        f"import json, os, sys\nfrom pathlib import Path\nPath({str(argv)!r}).write_text(json.dumps(sys.argv[1:]), encoding='utf-8')\nPath({str(reservation)!r}).write_text(os.environ.get('DANUS_CALL_RESERVATION_ID', ''), encoding='utf-8')\nsys.exit(0)\n",
+        f"import json, os, sys\nfrom pathlib import Path\nPath({str(argv)!r}).write_text(json.dumps(sys.argv[1:]), encoding='utf-8')\nPath({str(reservation)!r}).write_text(os.environ.get('DANUS_CALL_RESERVATION_ID', ''), encoding='utf-8')\nPath({str(prompt_file)!r}).write_text(sys.stdin.read(), encoding='utf-8')\nsys.exit(0)\n",
     )
     schema = wl.dir / "report.schema.json"
     schema.write_text("{}", encoding="utf-8")
@@ -140,6 +141,10 @@ def test_run_round_injects_the_worker_gateway_config(tmp: Path):
     assert rc == 0
     args = json.loads(argv.read_text(encoding="utf-8"))
     assert "--json" in args
+    notify_index = args.index("notify=[]")
+    assert args[notify_index - 1] == "--config"
+    assert args[-1] == "-"
+    assert prompt_file.read_text(encoding="utf-8") == "prompt"
     assert "--ignore-user-config" not in args
     inline = next(arg for arg in args if "mcp_servers.danus=" in arg)
     assert "mcp_servers.danus=" in inline
@@ -240,6 +245,31 @@ def test_run_round_missing_binary_returns_127(tmp: Path):
     assert "codex binary not found" in log.read_text()
 
 
+def test_run_round_existing_binary_launch_file_error_returns_126(tmp: Path):
+    wl = _mk_worker(tmp)
+    fake = tmp / "codex"
+    fake.write_text("present")
+    log = wl.dir / "round.log"
+    original = loop.runtime.spawn_process
+
+    def fail_spawn(*_args, **_kwargs):
+        raise FileNotFoundError(2, "missing launch dependency", "child-side-target")
+
+    loop.runtime.spawn_process = fail_spawn  # type: ignore[assignment]
+    try:
+        with _env(DANUS_CODEX_BIN=str(fake)):
+            rc = loop.run_round(
+                wl, {"MODEL": "m", "REASONING_EFFORT": "high"}, "prompt",
+                log, hard_timeout=30, **_round_files(wl),
+            )
+    finally:
+        loop.runtime.spawn_process = original
+    text = log.read_text()
+    assert rc == 126
+    assert "despite existing codex binary" in text
+    assert "child-side-target" in text
+
+
 # --- run_round: unresponsive child → terminate times out → kill → 124 ------ #
 
 def test_run_round_timeout_then_kill(tmp: Path):
@@ -319,6 +349,38 @@ def test_main_stops_on_deadline(tmp: Path):
         rc = loop.main(str(wl.dir))
     assert rc == 0
     assert json.loads(wl.status.read_text())["state"] == "deadline"
+
+
+def test_main_pauses_before_round_at_quota_floor(tmp: Path):
+    wl = _mk_worker(tmp)
+    store = _enable_v2(wl)
+    target = store.propose_target({
+        "statement": "T holds", "allowed_assumptions": ["A"],
+        "forbidden_assumptions": [],
+        "required_conclusions": [{"id": "T", "statement": "T holds"}],
+        "out_of_scope": [], "fallback_candidates": [],
+    })
+    store.approve_target(target["version"])
+    store.add_route({
+        "id": "r1", "obligation_id": "v0001-T", "method_family": "direct",
+        "expected_result": "T", "assumptions": ["A"],
+    })
+    store.assign("high", obligation_id="v0001-T", route_id="r1", task="prove T")
+    original = loop.codex.rate_limit_remaining_percent
+    loop.codex.rate_limit_remaining_percent = lambda: 75.0
+    try:
+        with _restore_sigterm(), _env(
+            CODEX_BACKEND="chatgpt", DANUS_CODEX_MIN_REMAINING_PERCENT="75",
+            DANUS_ROUND_BEAT="0",
+        ):
+            rc = loop.main(str(wl.dir))
+    finally:
+        loop.codex.rate_limit_remaining_percent = original
+    status = json.loads(wl.status.read_text())
+    assert rc == 0
+    assert status["state"] == "quota"
+    assert status["quota_remaining_percent"] == 75.0
+    assert store.assignment("high")["rounds_used"] == 0
 
 
 # --- main: bad worker dir → rc 2 ------------------------------------------- #
